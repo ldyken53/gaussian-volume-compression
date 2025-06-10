@@ -15,7 +15,6 @@ from typing import NamedTuple
 
 import numpy as np
 import pyvista as pv
-from matplotlib.colors import LinearSegmentedColormap
 from plyfile import PlyData, PlyElement
 from vtk import vtkMatrix3x3, vtkMatrix4x4
 

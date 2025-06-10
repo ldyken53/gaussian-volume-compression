@@ -11,8 +11,9 @@ dependencies:
   - torchvision
   - tqdm
   - pip:
-    - diff-gaussian-rasterization
-    - submodules/simple-knn
     - opencv-python
     - pyvista
     - joblib
+    - piq
+    - diff-gaussian-rasterization
+    - submodules/simple-knn
