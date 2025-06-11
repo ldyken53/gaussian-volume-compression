@@ -1,14 +1,3 @@
-/*
- * Copyright (C) 2023, Inria
- * GRAPHDECO research group, https://team.inria.fr/graphdeco
- * All rights reserved.
- *
- * This software is free for non-commercial, research and evaluation use 
- * under the terms of the LICENSE.md file.
- *
- * For inquiries contact  george.drettakis@inria.fr
- */
-
 #include "rasterizer_impl.h"
 #include <iostream>
 #include <fstream>
@@ -112,8 +101,8 @@ CudaRasterizer::GeometryState CudaRasterizer::GeometryState::fromChunk(char*& ch
 	obtain(chunk, geom.means, P, 128);
 	obtain(chunk, geom.conic, P * 6, 128);
 	obtain(chunk, geom.aabbs, P * 6, 128);
-	obtain(chunk, geom.cells_touched, P, 128);
-	cub::DeviceScan::InclusiveSum(nullptr, geom.scan_size, geom.cells_touched, geom.cells_touched, P);
+	obtain(chunk, geom.blocks_touched, P, 128);
+	cub::DeviceScan::InclusiveSum(nullptr, geom.scan_size, geom.blocks_touched, geom.blocks_touched, P);
 	obtain(chunk, geom.scanning_space, geom.scan_size, 128);
 	obtain(chunk, geom.point_offsets, P, 128);
 	return geom;
@@ -207,13 +196,13 @@ int CudaRasterizer::Rasterizer::forward(
 		geomState.conic,
 		geomState.aabbs,
 		block_grid,
-		geomState.cells_touched
+		geomState.blocks_touched
 	), debug)
 	if (debug) cudaEventRecord(events[1]);
 
 	// Prefix sum computation
 	if (debug) cudaEventRecord(events[2]);
-	CHECK_CUDA(cub::DeviceScan::InclusiveSum(geomState.scanning_space, geomState.scan_size, geomState.cells_touched, geomState.point_offsets, P), debug)
+	CHECK_CUDA(cub::DeviceScan::InclusiveSum(geomState.scanning_space, geomState.scan_size, geomState.blocks_touched, geomState.point_offsets, P), debug)
 	if (debug) cudaEventRecord(events[3]);
 
 	// Retrieve total number of Gaussian instances to launch and resize aux buffers
@@ -222,17 +211,17 @@ int CudaRasterizer::Rasterizer::forward(
 	if (debug) {
 		std::cout << "Total Num Intersections: " << num_intersections << "\n";
 		
-		// Copy cells_touched data to host for detailed logging
-		int* host_cells_touched = new int[P];
-		cudaMemcpy(host_cells_touched, geomState.cells_touched, P * sizeof(int), cudaMemcpyDeviceToHost);
+		// Copy blocks_touched data to host for detailed logging
+		int* host_blocks_touched = new int[P];
+		cudaMemcpy(host_blocks_touched, geomState.blocks_touched, P * sizeof(int), cudaMemcpyDeviceToHost);
 		
 		// Calculate statistics
-		int min_intersections = *std::min_element(host_cells_touched, host_cells_touched + P);
-		int max_intersections = *std::max_element(host_cells_touched, host_cells_touched + P);
+		int min_intersections = *std::min_element(host_blocks_touched, host_blocks_touched + P);
+		int max_intersections = *std::max_element(host_blocks_touched, host_blocks_touched + P);
 		double avg_intersections = static_cast<double>(num_intersections) / P;
 		
 		// Count gaussians with zero intersections
-		int zero_intersections = std::count(host_cells_touched, host_cells_touched + P, 0);
+		int zero_intersections = std::count(host_blocks_touched, host_blocks_touched + P, 0);
 		
 		std::cout << "Intersections per Gaussian statistics:" << std::endl;
 		std::cout << "  Min: " << min_intersections << std::endl;
@@ -241,7 +230,7 @@ int CudaRasterizer::Rasterizer::forward(
 		std::cout << "  Gaussians with 0 intersections: " << zero_intersections << " (" 
 		          << (100.0 * zero_intersections / P) << "%)" << std::endl;
 		
-		delete[] host_cells_touched;
+		delete[] host_blocks_touched;
 	}
 
 	size_t binning_chunk_size = required<BinningState>(num_intersections);
@@ -272,9 +261,9 @@ int CudaRasterizer::Rasterizer::forward(
 		num_intersections, 0, bit), debug)
 	if (debug) cudaEventRecord(events[7]);
 
-	// Memory set
+	// Number of blocks in each dimension
 	if (debug) cudaEventRecord(events[8]);
-	CHECK_CUDA(cudaMemset(imgState.ranges, 0, num_cells.x * num_cells.y * num_cells.z * sizeof(uint2)), debug);
+	CHECK_CUDA(cudaMemset(imgState.ranges, 0, block_grid.x * block_grid.y * block_grid.z * sizeof(uint2)), debug);
 	if (debug) cudaEventRecord(events[9]);
 
 	// Tile range identification

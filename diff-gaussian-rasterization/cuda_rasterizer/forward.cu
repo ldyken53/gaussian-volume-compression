@@ -1,14 +1,3 @@
-/*
- * Copyright (C) 2023, Inria
- * GRAPHDECO research group, https://team.inria.fr/graphdeco
- * All rights reserved.
- *
- * This software is free for non-commercial, research and evaluation use 
- * under the terms of the LICENSE.md file.
- *
- * For inquiries contact  george.drettakis@inria.fr
- */
-
 #include "forward.h"
 #include "auxiliary.h"
 #include <cooperative_groups.h>
@@ -34,15 +23,15 @@ __global__ void preprocessCUDA(int P,
 	float* conic,
 	uint* aabbs,
 	const dim3 grid,
-	uint32_t* cells_touched)
+	uint32_t* blocks_touched)
 {
 	auto idx = cg::this_grid().thread_rank();
 	if (idx >= P)
 		return;
 
-	// Initialize touched cells to 0. If this isn't changed,
+	// Initialize touched blocks to 0. If this isn't changed,
 	// this Gaussian will not be processed further.
-	cells_touched[idx] = 0;
+	blocks_touched[idx] = 0;
 	radii[idx] = 0;
 
 	auto scale = scales[idx];
@@ -101,7 +90,7 @@ __global__ void preprocessCUDA(int P,
     conic[idx * 6 + 5] = (a * d - b * b) * det_inv;
 
 	// Scale S by 3 to include up to three std from Gaussian position
-	const float m = 2.0;
+	const float m = 3.0;
 	const float3 scaled_S = { S[0][0] * m, S[1][1] * m, S[2][2] * m };
 
  	// Create array for corner computations
@@ -137,34 +126,40 @@ __global__ void preprocessCUDA(int P,
         }
     }
 
-	uint3 start_cell = make_uint3(
-		max(0u, static_cast<unsigned int>(floor((mins.x - volume_mins.x) / cell_size))),
-		max(0u, static_cast<unsigned int>(floor((mins.y - volume_mins.y) / cell_size))),
-		max(0u, static_cast<unsigned int>(floor((mins.z - volume_mins.z) / cell_size)))
+	// Calculate block size in world coordinates
+	const float block_size_x = cell_size * BLOCK_X;
+	const float block_size_y = cell_size * BLOCK_Y;
+	const float block_size_z = cell_size * BLOCK_Z;
+
+	// Find which blocks the Gaussian intersects
+	uint3 start_block = make_uint3(
+		max(0u, static_cast<unsigned int>(floor((mins.x - volume_mins.x) / block_size_x))),
+		max(0u, static_cast<unsigned int>(floor((mins.y - volume_mins.y) / block_size_y))),
+		max(0u, static_cast<unsigned int>(floor((mins.z - volume_mins.z) / block_size_z)))
     );    
-	uint3 end_cell = make_uint3(
-		min(num_cells.x, static_cast<unsigned int>(ceil((maxes.x - volume_mins.x) / cell_size))),
-		min(num_cells.y, static_cast<unsigned int>(ceil((maxes.y - volume_mins.y) / cell_size))),
-		min(num_cells.z, static_cast<unsigned int>(ceil((maxes.z - volume_mins.z) / cell_size)))
+	uint3 end_block = make_uint3(
+		min(grid.x, static_cast<unsigned int>(ceil((maxes.x - volume_mins.x) / block_size_x))),
+		min(grid.y, static_cast<unsigned int>(ceil((maxes.y - volume_mins.y) / block_size_y))),
+		min(grid.z, static_cast<unsigned int>(ceil((maxes.z - volume_mins.z) / block_size_z)))
     );
-    uint3 cell_dims = make_uint3(
-		end_cell.x - start_cell.x,
-		end_cell.y - start_cell.y,
-		end_cell.z - start_cell.z
+    uint3 block_dims = make_uint3(
+		end_block.x - start_block.x,
+		end_block.y - start_block.y,
+		end_block.z - start_block.z
 	);
 
     // Store results
-    cells_touched[idx] = static_cast<int>(cell_dims.x * cell_dims.y * cell_dims.z);
+    blocks_touched[idx] = static_cast<int>(block_dims.x * block_dims.y * block_dims.z);
 	radii[idx] = 1;
-    aabbs[idx * 6] = start_cell.x;
-	aabbs[idx * 6 + 1] = start_cell.y;
-    aabbs[idx * 6 + 2] = start_cell.z;
-    aabbs[idx * 6 + 3] = end_cell.x;
-    aabbs[idx * 6 + 4] = end_cell.y;
-	aabbs[idx * 6 + 5] = end_cell.z;
+    aabbs[idx * 6] = start_block.x;
+	aabbs[idx * 6 + 1] = start_block.y;
+    aabbs[idx * 6 + 2] = start_block.z;
+    aabbs[idx * 6 + 3] = end_block.x;
+    aabbs[idx * 6 + 4] = end_block.y;
+	aabbs[idx * 6 + 5] = end_block.z;
 	clamped[idx] = (values[idx] < 0.0f) || (values[idx] > 1.0f);
     values_out[idx] = glm::clamp(values[idx], 0.0f, 1.0f);
-    volumes[idx] = static_cast<float>(cell_dims.x * cell_dims.y * cell_dims.z);
+    volumes[idx] = static_cast<float>(block_dims.x * block_dims.y * block_dims.z);
 }
 
 // Main rasterization method. Collaboratively works on one tile per
@@ -334,7 +329,7 @@ void FORWARD::preprocess(int P,
 	float* conic,
 	uint* aabbs,
 	const dim3 grid,
-	uint32_t* cells_touched)
+	uint32_t* blocks_touched)
 {
 	preprocessCUDA<NUM_CHANNELS> <<<(P + 255) / 256, 256>>> (
 		P,
@@ -354,6 +349,6 @@ void FORWARD::preprocess(int P,
 		conic,
 		aabbs,
 		grid,
-		cells_touched
+		blocks_touched
 	);
 }
