@@ -15,5 +15,7 @@ dependencies:
     - pyvista
     - joblib
     - piq
+    - matplotlib
+    - scipy
     - diff-gaussian-rasterization
     - submodules/simple-knn
