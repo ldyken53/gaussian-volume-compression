@@ -163,6 +163,14 @@ int CudaRasterizer::Rasterizer::forward(
 	int* radii,
 	bool debug)
 {
+	// Create CUDA events for timing (only when debug is enabled)
+	cudaEvent_t events[14]; // 7 pairs of start/stop events
+	if (debug) {
+		for (int i = 0; i < 14; i++) {
+			cudaEventCreate(&events[i]);
+		}
+	}
+
 	size_t chunk_size = required<GeometryState>(P);
 	char* chunkptr = geometryBuffer(chunk_size);
 	GeometryState geomState = GeometryState::fromChunk(chunkptr, P);
@@ -180,7 +188,8 @@ int CudaRasterizer::Rasterizer::forward(
 	char* img_chunkptr = imageBuffer(img_chunk_size);
 	ImageState imgState = ImageState::fromChunk(img_chunkptr, num_cells.x * num_cells.y * num_cells.z);
 
-	// Run preprocessing per-Gaussian (transformation, bounding, conversion of values to RGB)
+	// Preprocessing
+	if (debug) cudaEventRecord(events[0]);
 	CHECK_CUDA(FORWARD::preprocess(
 		P,
 		means3D,
@@ -200,91 +209,88 @@ int CudaRasterizer::Rasterizer::forward(
 		block_grid,
 		geomState.cells_touched
 	), debug)
+	if (debug) cudaEventRecord(events[1]);
 
-	// if (debug) {
-	// 	int* host_cells_touched = new int[P];
-	// 	cudaMemcpy(host_cells_touched, geomState.cells_touched, P * sizeof(int), cudaMemcpyDeviceToHost);
-	// 	std::cout << "cells_touched:" << std::endl;
-	// 	for (int i = 0; i < 1000; ++i) {
-	// 		std::cout << host_cells_touched[i] << " ";
-	// 	}
-	// 	std::cout << std::endl;
-	// 	delete[] host_cells_touched;
-	// }
-
-	// uint* host_aabbs = new uint[P * 6];
-	// cudaMemcpy(host_aabbs, geomState.aabbs, P * 6 * sizeof(uint), cudaMemcpyDeviceToHost);
-	// std::cout << "aabbs:" << std::endl;
-	// for (int i = 0; i < 1000; ++i) {
-	// 	std::cout << host_aabbs[i] << " ";
-	// }
-	// std::cout << std::endl;
-	// delete[] host_aabbs;
-
-	// Compute prefix sum over full list of touched tile counts by Gaussians
-	// E.g., [2, 3, 0, 2, 1] -> [2, 5, 5, 7, 8]
+	// Prefix sum computation
+	if (debug) cudaEventRecord(events[2]);
 	CHECK_CUDA(cub::DeviceScan::InclusiveSum(geomState.scanning_space, geomState.scan_size, geomState.cells_touched, geomState.point_offsets, P), debug)
+	if (debug) cudaEventRecord(events[3]);
 
 	// Retrieve total number of Gaussian instances to launch and resize aux buffers
 	int num_intersections;
 	CHECK_CUDA(cudaMemcpy(&num_intersections, geomState.point_offsets + P - 1, sizeof(int), cudaMemcpyDeviceToHost), debug);
 	if (debug) {
-		std::cout << "Num Intersections " << num_intersections << "\n";
+		std::cout << "Total Num Intersections: " << num_intersections << "\n";
+		
+		// Copy cells_touched data to host for detailed logging
+		int* host_cells_touched = new int[P];
+		cudaMemcpy(host_cells_touched, geomState.cells_touched, P * sizeof(int), cudaMemcpyDeviceToHost);
+		
+		// Calculate statistics
+		int min_intersections = *std::min_element(host_cells_touched, host_cells_touched + P);
+		int max_intersections = *std::max_element(host_cells_touched, host_cells_touched + P);
+		double avg_intersections = static_cast<double>(num_intersections) / P;
+		
+		// Count gaussians with zero intersections
+		int zero_intersections = std::count(host_cells_touched, host_cells_touched + P, 0);
+		
+		std::cout << "Intersections per Gaussian statistics:" << std::endl;
+		std::cout << "  Min: " << min_intersections << std::endl;
+		std::cout << "  Max: " << max_intersections << std::endl;
+		std::cout << "  Average: " << avg_intersections << std::endl;
+		std::cout << "  Gaussians with 0 intersections: " << zero_intersections << " (" 
+		          << (100.0 * zero_intersections / P) << "%)" << std::endl;
+		
+		delete[] host_cells_touched;
 	}
 
 	size_t binning_chunk_size = required<BinningState>(num_intersections);
 	char* binning_chunkptr = binningBuffer(binning_chunk_size);
 	BinningState binningState = BinningState::fromChunk(binning_chunkptr, num_intersections);
 
-	// For each instance to be rendered, produce adequate [ tile | depth ] key 
-	// and corresponding duplicated Gaussian indices to be sorted
+	// Key duplication
+	if (debug) cudaEventRecord(events[4]);
 	duplicateWithKeys << <(P + 255) / 256, 256 >> > (
 		P,
 		geomState.aabbs,
 		geomState.point_offsets,
 		binningState.point_list_keys_unsorted,
 		binningState.point_list_unsorted,
-		block_grid)
+		block_grid);
 	CHECK_CUDA(, debug)
-
-	// cudaDeviceSynchronize();
-    // uint32_t* host_keys = new uint32_t[100];
-    // cudaMemcpy(host_keys, binningState.point_list_keys_unsorted, 
-    //            100 * sizeof(uint32_t), 
-    //            cudaMemcpyDeviceToHost);
-    // // Print and verify the keys are within expected range
-    // for (int i = 0; i < 100; i++) {
-	// 	std::cout << host_keys[i] << " ";
-    //     if (host_keys[i] >= block_grid.x * block_grid.y * block_grid.z) {
-    //         printf("Invalid key at %d: %u\n", i, host_keys[i]);
-    //     }
-    // }
-    // delete[] host_keys;
-	// std::cout << "\n";
+	if (debug) cudaEventRecord(events[5]);
 
 	int bit = getHigherMsb(block_grid.x * block_grid.y * block_grid.z);
 
-	// Sort complete list of (duplicated) Gaussian indices by keys
+	// Sorting
+	if (debug) cudaEventRecord(events[6]);
 	CHECK_CUDA(cub::DeviceRadixSort::SortPairs(
 		binningState.list_sorting_space,
 		binningState.sorting_size,
 		binningState.point_list_keys_unsorted, binningState.point_list_keys,
 		binningState.point_list_unsorted, binningState.point_list,
 		num_intersections, 0, bit), debug)
+	if (debug) cudaEventRecord(events[7]);
 
+	// Memory set
+	if (debug) cudaEventRecord(events[8]);
 	CHECK_CUDA(cudaMemset(imgState.ranges, 0, num_cells.x * num_cells.y * num_cells.z * sizeof(uint2)), debug);
+	if (debug) cudaEventRecord(events[9]);
 
-
-	// Identify start and end of per-tile workloads in sorted list
-	if (num_intersections > 0)
+	// Tile range identification
+	if (num_intersections > 0) {
+		if (debug) cudaEventRecord(events[10]);
 		identifyTileRanges << <(num_intersections + 255) / 256, 256 >> > (
 			num_intersections,
 			binningState.point_list_keys,
 			imgState.ranges);
-	CHECK_CUDA(, debug)
+		CHECK_CUDA(, debug)
+		if (debug) cudaEventRecord(events[11]);
+	}
 
-	// Let each cell blend its range of Gaussians independently in parallel
+	// Rendering
 	const float* feature_ptr = geomState.values;
+	if (debug) cudaEventRecord(events[12]);
 	CHECK_CUDA(FORWARD::render(
 		block_grid, block,
 		imgState.ranges,
@@ -300,7 +306,29 @@ int CudaRasterizer::Rasterizer::forward(
 		imgState.n_contrib,
 		out_cells), 
 		debug)
+	if (debug) cudaEventRecord(events[13]);
 
+	// Calculate and print timing (only when debug is enabled)
+	if (debug) {
+		cudaDeviceSynchronize(); // Single sync at the end
+		
+		float elapsed_time;
+		const char* operation_names[] = {
+			"Preprocessing", "Prefix sum", "Key duplication", 
+			"Sorting", "Memory set", "Tile range identification", "Rendering"
+		};
+		
+		for (int i = 0; i < 7; i++) {
+			if (i == 5 && num_intersections == 0) continue; // Skip tile range if no intersections
+			cudaEventElapsedTime(&elapsed_time, events[i*2], events[i*2+1]);
+			std::cout << operation_names[i] << " time: " << elapsed_time << " ms" << std::endl;
+		}
+		
+		// Clean up events
+		for (int i = 0; i < 14; i++) {
+			cudaEventDestroy(events[i]);
+		}
+	}
 
 	return num_intersections;
 }
