@@ -63,3 +63,4 @@ diff_gaussian_rasterization/build/
 diff_gaussian_rasterization/diff_gaussian_rasterization.egg-info/
 diff_gaussian_rasterization/dist/
 diff_gaussian_rasterization/.vscode/
+test_*.vtk
