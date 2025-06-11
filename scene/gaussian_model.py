@@ -1,14 +1,3 @@
-#
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
-#
-# This software is free for non-commercial, research and evaluation use
-# under the terms of the LICENSE.md file.
-#
-# For inquiries contact  george.drettakis@inria.fr
-#
-
 from utils.system_utils import mkdir_p
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import (
@@ -46,6 +35,9 @@ class GaussianModel:
 
         self.opacity_activation = torch.sigmoid
         self.inverse_opacity_activation = inverse_sigmoid
+
+        self.values_activation = torch.sigmoid
+        self.inverse_value_activation = inverse_sigmoid
 
         self.rotation_activation = torch.nn.functional.normalize
 
@@ -122,7 +114,7 @@ class GaussianModel:
 
     @property
     def get_values(self):
-        return self._values
+        return self.values_activation(self._values)
 
     def get_covariance(self, scaling_modifier=1):
         return self.covariance_activation(
@@ -170,7 +162,9 @@ class GaussianModel:
             )
         )
 
-        values = torch.tensor(values_sampled, dtype=torch.float, device="cuda")
+        values = self.inverse_value_activation(
+            torch.tensor(values_sampled, dtype=torch.float, device="cuda")
+        )
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._scaling = nn.Parameter(scales.requires_grad_(True))
@@ -475,11 +469,11 @@ class GaussianModel:
             self._values = torch.cat(
                 (
                     self._values,
-                    torch.tensor(
+                    self.inverse_value_activation(torch.tensor(
                         np.zeros((new_size - old_size, 1)),
                         dtype=torch.float,
                         device="cuda",
-                    ),
+                    )),
                 ),
                 dim=0,
             )
@@ -618,15 +612,15 @@ class GaussianModel:
         gaussian_positions = self._xyz.detach().cpu().numpy()
         gaussian_positions = gaussian_positions[self.interpolation_mask]
 
-        interpolated_values = self._values.detach().cpu().numpy()
+        interpolated_values = self.get_values.detach().cpu().numpy()
         interpolated_values[self.interpolation_mask] = self.interpolator(
             gaussian_positions
         )
         interpolated_values = np.nan_to_num(interpolated_values, nan=0.0)
 
-        new_values = torch.tensor(
+        new_values = self.inverse_value_activation(torch.tensor(
             interpolated_values, dtype=torch.float, device="cuda"
-        ).reshape(-1, 1)
+        ).reshape(-1, 1))
 
         self._values = nn.Parameter(new_values.requires_grad_(False))
 
