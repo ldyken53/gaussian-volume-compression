@@ -28,7 +28,7 @@ def tensor_to_vtk(tensor: np.ndarray, output_path: str, spacing=(1.0, 1.0, 1.0))
         # Write point data header
         total_points = nx * ny * nz
         f.write(f'POINT_DATA {total_points}\n')
-        f.write('SCALARS values float\n')
+        f.write('SCALARS values double\n')
         f.write('LOOKUP_TABLE default\n')
         
         # Write the actual data

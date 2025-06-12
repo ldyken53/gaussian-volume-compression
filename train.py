@@ -12,7 +12,7 @@ import pyvista as pv
 from arguments import ModelParams, OptimizationParams, PipelineParams
 from gaussian_renderer import render
 from scene import GaussianModel, Scene
-from utils.debug_utils import tensor_to_vtk
+from utils.debug_utils import tensor_to_vtk, analyze_array
 from utils.general_utils import get_expon_lr_func, safe_state
 from utils.image_utils import psnr
 from utils.loss_utils import bounding_box_regularization, create_window, l1_loss, l2_loss
@@ -143,8 +143,11 @@ def training(
             if iteration in saving_iterations:
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
-                tensor_to_vtk(cells.cpu().numpy(), f"test_{iteration}.vtk")
-                
+                cpu_cells = cells.cpu().numpy()
+                # print(cpu_cells.min(), cpu_cells.max())
+                # print(gaussians.get_values.cpu().numpy().min(), gaussians.get_values.cpu().numpy().max())
+                tensor_to_vtk(cpu_cells)
+                # analyze_array(cpu_cells)
             # Densification
             # if iteration < opt.densify_until_iter:
             #     # Keep track of max radii in image-space for pruning
