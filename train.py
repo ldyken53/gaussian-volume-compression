@@ -58,7 +58,6 @@ def training(
     samples = np.vstack([x.ravel(), y.ravel(), z.ravel()]).T
     gt_point_cloud = pv.PolyData(samples)
     probed = gt_point_cloud.sample(gaussians.mesh)
-    print(probed.n_points)
     gt_cells = probed.point_data['value'].reshape(100, 100, 100)
     # flipped_tensor = np.flip(gt_cells, axis=1)
     rotated = np.rot90(gt_cells, k=1, axes=(2, 0))

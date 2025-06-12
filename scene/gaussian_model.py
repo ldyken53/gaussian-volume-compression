@@ -125,6 +125,8 @@ class GaussianModel:
         mesh: pv.PolyData,
     ):
         values = pcd.values
+        print(pcd.points.min())
+        print(pcd.points.max())
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
 
         self.mins = [
