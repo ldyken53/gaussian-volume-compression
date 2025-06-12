@@ -146,7 +146,7 @@ def training(
                 cpu_cells = cells.cpu().numpy()
                 # print(cpu_cells.min(), cpu_cells.max())
                 # print(gaussians.get_values.cpu().numpy().min(), gaussians.get_values.cpu().numpy().max())
-                tensor_to_vtk(cpu_cells)
+                tensor_to_vtk(cpu_cells, f"test_{iteration}.vtk")
                 # analyze_array(cpu_cells)
             # Densification
             # if iteration < opt.densify_until_iter:
