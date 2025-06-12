@@ -9,14 +9,11 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
-import json
 import os
-import random
 
 from arguments import ModelParams
-from scene.dataset_readers import readDirectSceneInfo
+from scene.dataset_readers import readData
 from scene.gaussian_model import GaussianModel
-from utils.camera_utils import camera_to_JSON, cameraList_from_camInfos
 from utils.system_utils import searchForMaxIteration
 
 
@@ -30,8 +27,7 @@ class Scene:
         gaussians: GaussianModel,
         load_iteration=None,
         normalize=False,
-        shuffle=True,
-        resolution_scales=[1.0],
+        fraction=0.1
     ):
         self.model_path = args.model_path
         self.loaded_iter = None
@@ -46,24 +42,12 @@ class Scene:
                 self.loaded_iter = load_iteration
             print("Loading trained model at iteration {}".format(self.loaded_iter))
 
-        if os.path.exists(os.path.join(args.source_path, "data.vtu")):
-            scene_info = readDirectSceneInfo(args.source_path)
+        if os.path.exists(args.source_path) and args.source_path.lower().endswith(('.vtk', '.vtu')):
+            mesh, pcd = readData(args.source_path, fraction)
         else:
             assert False, "Could not recognize scene type!"
 
-        if not self.loaded_iter:
-            with open(scene_info.ply_path, "rb") as src_file, open(
-                os.path.join(self.model_path, "input.ply"), "wb"
-            ) as dest_file:
-                dest_file.write(src_file.read())
-
         if self.loaded_iter:
-            self.gaussians.convert_ply_to_ascii(os.path.join(
-                self.model_path,
-                "point_cloud",
-                "iteration_" + str(self.loaded_iter),
-                "point_cloud.ply",
-            ))
             self.gaussians.load_ply(
                 os.path.join(
                     self.model_path,
@@ -71,15 +55,14 @@ class Scene:
                     "iteration_" + str(self.loaded_iter),
                     "point_cloud.ply",
                 ),
-                scene_info.point_cloud,
+                pcd,
                 normalize,
                 args.train_test_exp,
             )
         else:
-            self.gaussians.convert_ply_to_ascii(os.path.join(self.model_path, "input.ply"))
             self.gaussians.create_from_pcd(
-                scene_info.point_cloud,
-                scene_info.mesh,
+                pcd,
+                mesh,
             )
 
     def save(self, iteration):

@@ -7,14 +7,12 @@ from utils.general_utils import (
     inverse_sigmoid,
     strip_symmetric,
 )
-import json
 import os
 
 import numpy as np
 import pyvista as pv
 import torch
 from plyfile import PlyData, PlyElement
-from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
 from simple_knn._C import distCUDA2
 from torch import nn
 
@@ -58,7 +56,7 @@ class GaussianModel:
         self.interpolation_mask = None
         self.last_interpolated_xyz = None
         self.should_interpolate = False
-        self.bounding_box = None
+        self.mesh = None
         self.setup_functions()
 
     def capture(self):
@@ -126,15 +124,8 @@ class GaussianModel:
         pcd: BasicPointCloud,
         mesh: pv.PolyData,
     ):
-        # Define the percentage of points to keep
-        fraction = 0.1
-
-        # Generate random indices to keep 10% of the points
-        num_points = pcd.points.shape[0]
-        indices = np.random.choice(num_points, size=int(num_points * fraction), replace=False)
-        points_sampled = pcd.points[indices]
-        values_sampled = pcd.values.reshape(-1, 1)[indices]
-        fused_point_cloud = torch.tensor(np.asarray(points_sampled)).float().cuda()
+        values = pcd.values
+        fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
 
         self.mins = [
             0.0, 0.0, 0.0
@@ -148,7 +139,7 @@ class GaussianModel:
         )
 
         dist2 = torch.clamp_min(
-            distCUDA2(torch.from_numpy(np.asarray(points_sampled)).float().cuda()),
+            distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()),
             0.0000001,
         )
         scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 3)
@@ -163,7 +154,7 @@ class GaussianModel:
         )
 
         values = self.inverse_value_activation(
-            torch.tensor(values_sampled, dtype=torch.float, device="cuda")
+            torch.tensor(values, dtype=torch.float, device="cuda")
         )
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
@@ -173,7 +164,7 @@ class GaussianModel:
         self._values = nn.Parameter(values.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
-        self.process_mesh(points_sampled, values_sampled)
+        self.mesh = mesh
         self.last_interpolated_xyz = self._xyz.clone()
         self.interpolation_mask = np.full(self._xyz.shape[0], True)
         self.should_interpolate = True
@@ -336,7 +327,6 @@ class GaussianModel:
             torch.tensor(values, dtype=torch.float, device="cuda").requires_grad_(True)
         )
 
-        self.process_mesh(pcd.points, pcd.values.reshape(-1, 1))
         self.last_interpolated_xyz = self._xyz.clone()
         self.interpolation_mask = np.full(len(self._values), True)
 
@@ -592,16 +582,6 @@ class GaussianModel:
             viewspace_point_tensor.grad[update_filter, :2], dim=-1, keepdim=True
         )
         self.denom[update_filter] += 1
-
-    def process_mesh(self, points, values):
-        self.interpolator = LinearNDInterpolator(
-            points, values, fill_value=0.0
-        )
-
-        min_x, max_x = points[:, 0].min(), points[:, 0].max()
-        min_y, max_y = points[:, 1].min(), points[:, 1].max()
-        min_z, max_z = points[:, 2].min(), points[:, 2].max()
-        self.bounding_box = (min_x, max_x), (min_y, max_y), (min_z, max_z)
 
     def interpolate_new_values(self):
         # Return early if there are no new points to interpolate

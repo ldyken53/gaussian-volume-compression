@@ -12,7 +12,7 @@ import piq
 from arguments import ModelParams, OptimizationParams, PipelineParams
 from gaussian_renderer import network_gui, render
 from scene import GaussianModel, Scene
-from utils.debug_utils import save_debug_image, tensor_to_vtk
+from utils.debug_utils import tensor_to_vtk
 from utils.general_utils import get_expon_lr_func, safe_state
 from utils.image_utils import psnr
 from utils.loss_utils import bounding_box_regularization, create_window, l1_loss, l2_loss

@@ -7,12 +7,12 @@ import numpy as np
 
 import torch
 from tqdm import tqdm
-import piq
+import pyvista as pv
 
 from arguments import ModelParams, OptimizationParams, PipelineParams
-from gaussian_renderer import network_gui, render
+from gaussian_renderer import render
 from scene import GaussianModel, Scene
-from utils.debug_utils import save_debug_image, tensor_to_vtk
+from utils.debug_utils import tensor_to_vtk
 from utils.general_utils import get_expon_lr_func, safe_state
 from utils.image_utils import psnr
 from utils.loss_utils import bounding_box_regularization, create_window, l1_loss, l2_loss
@@ -50,23 +50,21 @@ def training(
     iter_start = torch.cuda.Event(enable_timing=True)
     iter_end = torch.cuda.Event(enable_timing=True)
 
-    depth_l1_weight = get_expon_lr_func(
-        opt.depth_l1_weight_init, opt.depth_l1_weight_final, max_steps=opt.iterations
-    )
-
     ema_loss_for_log = 0.0
-    ema_Ll1depth_for_log = 0.0
 
     # Make ground truth
-    v = np.linspace(0.01, 0.99, 100)
+    v = np.linspace(0.005, 0.995, 100)
     x, y, z = np.meshgrid(v, v, v, indexing='ij')
     samples = np.vstack([x.ravel(), y.ravel(), z.ravel()]).T
-    gt_cells = gaussians.interpolator(x.ravel(), y.ravel(), z.ravel()).reshape(100, 100, 100)
+    gt_point_cloud = pv.PolyData(samples)
+    probed = gt_point_cloud.sample(gaussians.mesh)
+    print(probed.n_points)
+    gt_cells = probed.point_data['value'].reshape(100, 100, 100)
     # flipped_tensor = np.flip(gt_cells, axis=1)
-    rotated_tensor = np.rot90(gt_cells, k=1, axes=(2, 0))
-    flipped_tensor = np.flip(rotated_tensor, axis=2)
-    tensor_to_vtk(flipped_tensor, "test_gt.vtk")
-    gt = torch.tensor(flipped_tensor.copy()).cuda()
+    rotated = np.rot90(gt_cells, k=1, axes=(2, 0))
+    flipped = np.flip(rotated, axis=2)
+    tensor_to_vtk(flipped, "test_gt.vtk")
+    gt = torch.tensor(flipped.copy()).cuda()
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
@@ -319,7 +317,7 @@ if __name__ == "__main__":
         "--test_iterations", nargs="+", type=int, default=[7_000, 30_000]
     )
     parser.add_argument(
-        "--save_iterations", nargs="+", type=int, default=[1, 100, 500, 1_000, 2_000, 4_000, 6_000, 8_000, 10_000]
+        "--save_iterations", nargs="+", type=int, default=[1, 100, 500, 1_000]
     )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--disable_viewer", action="store_true", default=True)
@@ -333,10 +331,6 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
-    # Start GUI server, configure and run training
-    # TODO: Can we remove this GUI server?
-    if not args.disable_viewer:
-        network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     training(
         lp.extract(args),
