@@ -163,7 +163,7 @@ def training(
             #         and iteration % opt.densification_interval == 0
             #     ):
             #         size_threshold = (
-            #             20 if iteration > opt.opacity_reset_interval else None
+            #             20 if iteration > opt.weight_reset_interval else None
             #         )
             #         gaussians.densify_and_prune(
             #             opt.densify_grad_threshold,
@@ -172,10 +172,10 @@ def training(
             #             size_threshold,
                     # )
 
-                # if iteration % opt.opacity_reset_interval == 0 or (
+                # if iteration % opt.weight_reset_interval == 0 or (
                 #     dataset.white_background and iteration == opt.densify_from_iter
                 # ):
-                #     gaussians.reset_opacity()
+                #     gaussians.reset_weight()
 
             # Optimizer step
             if iteration < opt.iterations:
@@ -296,7 +296,7 @@ def training_report(
 
         if tb_writer:
             tb_writer.add_histogram(
-                "scene/opacity_histogram", scene.gaussians.get_opacity, iteration
+                "scene/weight_histogram", scene.gaussians.get_weight, iteration
             )
             tb_writer.add_scalar(
                 "total_points", scene.gaussians.get_xyz.shape[0], iteration

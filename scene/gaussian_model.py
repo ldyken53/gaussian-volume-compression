@@ -31,8 +31,8 @@ class GaussianModel:
 
         self.covariance_activation = build_covariance_from_scaling_rotation
 
-        self.opacity_activation = torch.sigmoid
-        self.inverse_opacity_activation = inverse_sigmoid
+        self.weight_activation = torch.sigmoid
+        self.inverse_weight_activation = inverse_sigmoid
 
         self.values_activation = torch.sigmoid
         self.inverse_value_activation = inverse_sigmoid
@@ -43,7 +43,7 @@ class GaussianModel:
         self._xyz = torch.empty(0)
         self._scaling = torch.empty(0)
         self._rotation = torch.empty(0)
-        self._opacity = torch.empty(0)
+        self._weight = torch.empty(0)
         self._values = torch.empty(0)
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
@@ -64,7 +64,7 @@ class GaussianModel:
             self._xyz,
             self._scaling,
             self._rotation,
-            self._opacity,
+            self._weight,
             self._values,
             self.max_radii2D,
             self.xyz_gradient_accum,
@@ -78,7 +78,7 @@ class GaussianModel:
             self._xyz,
             self._scaling,
             self._rotation,
-            self._opacity,
+            self._weight,
             self._values,
             self.max_radii2D,
             xyz_gradient_accum,
@@ -107,8 +107,8 @@ class GaussianModel:
         return self._xyz
 
     @property
-    def get_opacity(self):
-        return self.opacity_activation(self._opacity)
+    def get_weight(self):
+        return self.weight_activation(self._weight)
 
     @property
     def get_values(self):
@@ -148,7 +148,7 @@ class GaussianModel:
         rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
         rots[:, 0] = 1
 
-        opacities = self.inverse_opacity_activation(
+        weights = self.inverse_weight_activation(
             (0.01)
             * torch.ones(
                 (fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"
@@ -162,7 +162,7 @@ class GaussianModel:
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
-        self._opacity = nn.Parameter(opacities.requires_grad_(True))
+        self._weight = nn.Parameter(weights.requires_grad_(True))
         self._values = nn.Parameter(values.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
@@ -183,9 +183,9 @@ class GaussianModel:
                 "name": "xyz",
             },
             {
-                "params": [self._opacity],
-                "lr": training_args.opacity_lr,
-                "name": "opacity",
+                "params": [self._weight],
+                "lr": training_args.weight_lr,
+                "name": "weight",
             },
             {
                 "params": [self._scaling],
@@ -222,7 +222,7 @@ class GaussianModel:
                 return lr
 
     def construct_list_of_attributes(self):
-        attributes = ["x", "y", "z", "value", "opacity"]
+        attributes = ["x", "y", "z", "value", "weight"]
         for i in range(self._scaling.shape[1]):
             attributes.append("scale_{}".format(i))
         for i in range(self._rotation.shape[1]):
@@ -233,7 +233,7 @@ class GaussianModel:
         mkdir_p(os.path.dirname(path))
 
         xyz = self._xyz.detach().cpu().numpy()
-        opacities = self._opacity.detach().cpu().numpy()
+        weights = self._weight.detach().cpu().numpy()
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
         values = self._values.detach().cpu().numpy()
@@ -243,7 +243,7 @@ class GaussianModel:
         ]
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        attributes = np.concatenate((xyz, values, opacities, scale, rotation), axis=1)
+        attributes = np.concatenate((xyz, values, weights, scale, rotation), axis=1)
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, "vertex")
         PlyData([el]).write(path)
@@ -251,12 +251,12 @@ class GaussianModel:
         # Also produce an ascii version of the .ply file
         self.convert_ply_to_ascii(path)
 
-    def reset_opacity(self):
-        opacities_new = self.inverse_opacity_activation(
-            torch.min(self.get_opacity, torch.ones_like(self.get_opacity) * 0.01)
+    def reset_weight(self):
+        weights_new = self.inverse_weight_activation(
+            torch.min(self.get_weight, torch.ones_like(self.get_weight) * 0.01)
         )
-        optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
-        self._opacity = optimizable_tensors["opacity"]
+        optimizable_tensors = self.replace_tensor_to_optimizer(weights_new, "weight")
+        self._weight = optimizable_tensors["weight"]
 
     def load_ply(self, path, pcd, normalize=False, use_train_test_exp=False):
         plydata = PlyData.read(path)
@@ -289,7 +289,7 @@ class GaussianModel:
         # self.maxes = [1,1,1]
         print(self.mins)
         print(self.maxes)
-        opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
+        weights = np.asarray(plydata.elements[0]["weight"])[..., np.newaxis]
 
         scale_names = [
             p.name
@@ -314,8 +314,8 @@ class GaussianModel:
         self._xyz = nn.Parameter(
             torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True)
         )
-        self._opacity = nn.Parameter(
-            torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(
+        self._weight = nn.Parameter(
+            torch.tensor(weights, dtype=torch.float, device="cuda").requires_grad_(
                 True
             )
         )
@@ -374,7 +374,7 @@ class GaussianModel:
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
 
         self._xyz = optimizable_tensors["xyz"]
-        self._opacity = optimizable_tensors["opacity"]
+        self._weight = optimizable_tensors["weight"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
         self._values = optimizable_tensors["value"]
@@ -426,14 +426,14 @@ class GaussianModel:
     def densification_postfix(
         self,
         new_xyz,
-        new_opacities,
+        new_weights,
         new_scaling,
         new_rotation,
         new_values
     ):
         d = {
             "xyz": new_xyz,
-            "opacity": new_opacities,
+            "weight": new_weights,
             "scaling": new_scaling,
             "rotation": new_rotation,
             "value": new_values
@@ -485,7 +485,7 @@ class GaussianModel:
         self.should_interpolate = np.any(interpolation_mask)
 
         self._xyz = optimizable_tensors["xyz"]
-        self._opacity = optimizable_tensors["opacity"]
+        self._weight = optimizable_tensors["weight"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
         self._values = optimizable_tensors["value"]
@@ -517,12 +517,12 @@ class GaussianModel:
             self.get_scaling[selected_pts_mask].repeat(N, 1) / (0.8 * N)
         )
         new_rotation = self._rotation[selected_pts_mask].repeat(N, 1)
-        new_opacity = self._opacity[selected_pts_mask].repeat(N, 1)
+        new_weight = self._weight[selected_pts_mask].repeat(N, 1)
         new_values = self._values[selected_pts_mask].repeat(N, 1)
 
         self.densification_postfix(
             new_xyz,
-            new_opacity,
+            new_weight,
             new_scaling,
             new_rotation,
             new_values
@@ -548,27 +548,27 @@ class GaussianModel:
         )
 
         new_xyz = self._xyz[selected_pts_mask]
-        new_opacities = self._opacity[selected_pts_mask]
+        new_weights = self._weight[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
         new_values = self._values[selected_pts_mask]
 
         self.densification_postfix(
             new_xyz,
-            new_opacities,
+            new_weights,
             new_scaling,
             new_rotation,
             new_values,
         )
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
+    def densify_and_prune(self, max_grad, min_weight, extent, max_screen_size):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
         self.densify_and_clone(grads, max_grad, extent)
         self.densify_and_split(grads, max_grad, extent)
 
-        prune_mask = (self.get_opacity < min_opacity).squeeze()
+        prune_mask = (self.get_weight < min_weight).squeeze()
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
