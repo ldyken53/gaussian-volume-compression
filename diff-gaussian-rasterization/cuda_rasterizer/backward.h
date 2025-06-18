@@ -19,6 +19,7 @@ namespace BACKWARD
 		const bool* clamped,
 		const float3* means3D,
 		const float* values,
+		const float* weights,
 		const float* out_cells,
 		const float* volumes,
 		const float* conic,
@@ -27,7 +28,8 @@ namespace BACKWARD
 		const float* dL_dcells,
 		float3* dL_dmean3D,
 		float* dL_dconic,
-		float* dL_dvalue);
+		float* dL_dvalue,
+		float* dL_dweights);
 
 	void preprocess(
 		int P,

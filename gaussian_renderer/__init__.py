@@ -48,6 +48,7 @@ def render(
     rotations = pc.get_rotation
 
     values = pc.get_values
+    opacities = pc.get_opacity
 
     # Rasterize visible Gaussians to cells, obtain their radii
     out_cells, radii = rasterizer(
@@ -55,6 +56,7 @@ def render(
         scales=scales,
         rotations=rotations,
         values=values,
+        weights=opacities
     )
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.

@@ -27,6 +27,7 @@
 		const torch::Tensor& scales,
 		const torch::Tensor& rotations,
 		const torch::Tensor& values,
+		const torch::Tensor& weights,
 		const float scale_modifier,
 		const float min_x, const float min_y, const float min_z, 
 		const float max_x, const float max_y, const float max_z,
@@ -72,6 +73,7 @@
 			scale_modifier,
 			rotations.contiguous().data_ptr<float>(),
 			values.contiguous().data<float>(),
+			weights.contiguous().data<float>(),
 			volume_mins,
 			volume_maxes,
 			num_cells,
@@ -83,13 +85,14 @@
 	return std::make_tuple(rendered, out_cells, radii, geomBuffer, binningBuffer, imgBuffer);
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansBackwardCUDA(
 	const torch::Tensor& means3D,
 	const torch::Tensor& radii,
 	const torch::Tensor& scales,
 	const torch::Tensor& rotations,
 	const torch::Tensor& values,
+	const torch::Tensor& weights,
 	const torch::Tensor& out_cells,
 	const float scale_modifier,
 	const float min_x, const float min_y, const float min_z, 
@@ -115,7 +118,7 @@ RasterizeGaussiansBackwardCUDA(
 
 	torch::Tensor dL_dmeans3D = torch::zeros({P, 3}, means3D.options());
 	torch::Tensor dL_dconic = torch::zeros({P, 6}, means3D.options());
-	torch::Tensor dL_dweight = torch::zeros({P, 1}, means3D.options());
+	torch::Tensor dL_dweights = torch::zeros({P, 1}, means3D.options());
 	torch::Tensor dL_dscales = torch::zeros({P, 3}, means3D.options());
 	torch::Tensor dL_drotations = torch::zeros({P, 4}, means3D.options());
 	torch::Tensor dL_dvalues = torch::zeros({P, 1}, means3D.options());
@@ -132,6 +135,7 @@ RasterizeGaussiansBackwardCUDA(
 		cell_size,
 		rotations.data_ptr<float>(),
 		values.contiguous().data<float>(),
+		weights.contiguous().data<float>(),
 		out_cells.contiguous().data<float>(),
 		radii.contiguous().data<int>(),
 		reinterpret_cast<char*>(geomBuffer.contiguous().data_ptr()),
@@ -143,8 +147,9 @@ RasterizeGaussiansBackwardCUDA(
 		dL_dscales.contiguous().data<float>(),
 		dL_drotations.contiguous().data<float>(),
 		dL_dvalues.contiguous().data<float>(),
+		dL_dweights.contiguous().data<float>(),
 		debug);
 	}
 
-	return std::make_tuple(dL_dmeans3D, dL_dscales, dL_drotations, dL_dvalues);
+	return std::make_tuple(dL_dmeans3D, dL_dscales, dL_drotations, dL_dvalues, dL_dweights);
 }

@@ -134,6 +134,7 @@ renderCUDA(
 	const bool* __restrict__ clamped,
 	const float3* __restrict__ means3D,
 	const float* __restrict__ values,
+	const float* __restrict__ weights,
 	const float* __restrict__ out_cells,
 	const float* __restrict__ volumes,
 	const float* __restrict__ conic,
@@ -142,7 +143,8 @@ renderCUDA(
 	const float* __restrict__ dL_dcells,
 	float3* __restrict__ dL_dmeans,
 	float* __restrict__ dL_dconic,
-	float* __restrict__ dL_dvalues
+	float* __restrict__ dL_dvalues,
+	float* __restrict__ dL_dweights
 )
 {
 	// We rasterize again. Compute necessary block info.
@@ -172,6 +174,7 @@ renderCUDA(
 	__shared__ float3 collected_means[BLOCK_SIZE];
 	__shared__ float collected_volumes[BLOCK_SIZE];
 	__shared__ float collected_values[BLOCK_SIZE];
+	__shared__ float collected_weights[BLOCK_SIZE];
 	__shared__ float collected_clamped[BLOCK_SIZE];
 	__shared__ float collected_conic[BLOCK_SIZE * 6];
 
@@ -190,6 +193,7 @@ renderCUDA(
 			collected_means[block.thread_rank()] = means3D[coll_id];
 			collected_volumes[block.thread_rank()] = volumes[coll_id];
 			collected_values[block.thread_rank()] = values[coll_id];
+			collected_weights[block.thread_rank()] = weights[coll_id];
 			collected_clamped[block.thread_rank()] = clamped[coll_id];
 			for (int k = 0; k < 6; k++)
 				collected_conic[block.thread_rank() * 6 + k] = conic[coll_id * 6 + k];
@@ -211,8 +215,7 @@ renderCUDA(
                     d.y * (collected_conic[j * 6 + 1] * d.x + collected_conic[j * 6 + 3] * d.y + collected_conic[j * 6 + 4] * d.z) +
                     d.z * (collected_conic[j * 6 + 2] * d.x + collected_conic[j * 6 + 4] * d.y + collected_conic[j * 6 + 5] * d.z)
                 );
-                float normalize_factor = 1.0f;
-                float weight = normalize_factor * exp(-0.5f * quad_form);
+                float weight = collected_weights[j] * exp(-0.5f * quad_form);
 
                 if (exp(-0.5f * quad_form) > 1.0f)
                     continue;
@@ -227,6 +230,9 @@ renderCUDA(
 
                 // Gradient for weight terms
                 float dL_dweight = dl_dout * (collected_values[j] / acc_weight - out_cells[cell_id] / acc_weight);
+				float dL_dw = dL_dweight * exp(-0.5f * quad_form);
+				atomicAdd(&dL_dweights[point_idx], dL_dw);
+
                 float dweight_dquad = -0.5f * weight;
 				float dL_dquad = dL_dweight * dweight_dquad;
                 
@@ -290,6 +296,7 @@ void BACKWARD::render(
 	const bool* clamped,
 	const float3* means3D,
 	const float* values,
+	const float* weights,
 	const float* out_cells,
 	const float* volumes,
 	const float* conic,
@@ -298,7 +305,9 @@ void BACKWARD::render(
 	const float* dL_dcells,
 	float3* dL_dmean3D,
 	float* dL_dconic,
-	float* dL_dvalue)
+	float* dL_dvalue,
+	float* dL_dweights
+)
 {
 	renderCUDA<NUM_CHANNELS> << <grid, block >> >(
 		grid,
@@ -310,6 +319,7 @@ void BACKWARD::render(
 		clamped,
 		means3D,
 		values,
+		weights,
 		out_cells,
 		volumes,
 		conic,
@@ -318,5 +328,7 @@ void BACKWARD::render(
 		dL_dcells,
 		dL_dmean3D,
 		dL_dconic,
-		dL_dvalue);
+		dL_dvalue,
+		dL_dweights
+	);
 }

@@ -12,6 +12,7 @@ __global__ void preprocessCUDA(int P,
 	const float scale_modifier,
 	const glm::vec4* rotations,
 	const float* values,
+	const float* weights,
 	bool* clamped,
 	const float3 volume_mins,
 	const float3 volume_maxes,
@@ -19,7 +20,9 @@ __global__ void preprocessCUDA(int P,
 	const float cell_size,
 	int* radii,
 	float3* means,
-	float* values_out, float* volumes,
+	float* values_out,
+	float* weights_out,
+	float* volumes,
 	float* conic,
 	uint* aabbs,
 	const dim3 grid,
@@ -157,8 +160,10 @@ __global__ void preprocessCUDA(int P,
     aabbs[idx * 6 + 3] = end_block.x;
     aabbs[idx * 6 + 4] = end_block.y;
 	aabbs[idx * 6 + 5] = end_block.z;
+	// Clamping may not be necessary since these are stored with sigmoid activation?
 	clamped[idx] = (values[idx] < 0.0f) || (values[idx] > 1.0f);
-    values_out[idx] = glm::clamp(values[idx], 0.0f, 1.0f);
+    values_out[idx] = glm::clamp(values[idx], 0.0f, 1.0f); 
+	weights_out[idx] = glm::clamp(weights[idx], 0.0f, 1.0f); 
     volumes[idx] = static_cast<float>(block_dims.x * block_dims.y * block_dims.z);
 }
 
@@ -176,6 +181,7 @@ renderCUDA(
 	const float cell_size,
 	const float3* __restrict__ means,
 	const float* __restrict__ values,
+	const float* __restrict__ weights,
 	const float* __restrict__ volumes,
 	const float* __restrict__ conic,
 	float* __restrict__ accumulated_weights,
@@ -209,6 +215,7 @@ renderCUDA(
 	__shared__ float3 collected_means[BLOCK_SIZE];
 	__shared__ float collected_volumes[BLOCK_SIZE];
 	__shared__ float collected_values[BLOCK_SIZE];
+	__shared__ float collected_weights[BLOCK_SIZE];
 	__shared__ float collected_conic[BLOCK_SIZE * 6];
 
 	// Initialize helper variables
@@ -233,6 +240,7 @@ renderCUDA(
 			collected_means[block.thread_rank()] = means[coll_id];
 			collected_volumes[block.thread_rank()] = volumes[coll_id];
 			collected_values[block.thread_rank()] = values[coll_id];
+			collected_weights[block.thread_rank()] = weights[coll_id];
 			for (int k = 0; k < 6; k++)
                 collected_conic[block.thread_rank() * 6 + k] = conic[coll_id * 6 + k];
 		}
@@ -250,9 +258,7 @@ renderCUDA(
 				d.y * (collected_conic[j * 6 + 1] * d.x + collected_conic[j * 6 + 3] * d.y + collected_conic[j * 6 + 4] * d.z) +
 				d.z * (collected_conic[j * 6 + 2] * d.x + collected_conic[j * 6 + 4] * d.y + collected_conic[j * 6 + 5] * d.z)
 			);
-			// float normalize_factor = 1.0 / collected_volumes[j];
-			float normalize_factor = 1.0;
-			float weight = normalize_factor * exp(-0.5 * quad_form);
+			float weight = collected_weights[j] * exp(-0.5 * quad_form);
 
 			if (exp(-0.5 * quad_form) > 1.0f)
 				continue;
@@ -290,6 +296,7 @@ void FORWARD::render(
 	const float cell_size,
 	const float3* means,
 	const float* values,
+	const float* weights,
 	const float* volumes,
 	const float* conic,
 	float* accumulated_weights,
@@ -305,6 +312,7 @@ void FORWARD::render(
 		cell_size,
 		means,
 		values,
+		weights,
 		volumes,
 		conic,
 		accumulated_weights,
@@ -318,6 +326,7 @@ void FORWARD::preprocess(int P,
 	const float scale_modifier,
 	const glm::vec4* rotations,
 	const float* values,
+	const float* weights,
 	bool* clamped,
 	const float3 volume_mins,
 	const float3 volume_maxes,
@@ -325,7 +334,9 @@ void FORWARD::preprocess(int P,
 	const float cell_size,
 	int* radii,
 	float3* means,
-	float* values_out, float* volumes,
+	float* values_out,
+	float* weights_out,
+	float* volumes,
 	float* conic,
 	uint* aabbs,
 	const dim3 grid,
@@ -338,6 +349,7 @@ void FORWARD::preprocess(int P,
 		scale_modifier,
 		rotations,
 		values,
+		weights,
 		clamped,
 		volume_mins,
 		volume_maxes,
@@ -345,7 +357,9 @@ void FORWARD::preprocess(int P,
 		cell_size,
 		radii,
 		means,
-		values_out, volumes,
+		values_out, 
+		weights_out,
+		volumes,
 		conic,
 		aabbs,
 		grid,

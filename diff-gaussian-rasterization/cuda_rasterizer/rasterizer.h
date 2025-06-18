@@ -20,6 +20,7 @@ namespace CudaRasterizer
 			const float scale_modifier,
 			const float* rotations,
 			const float* values,
+			const float* weights,
 			const float3 volume_mins,
 			const float3 volume_maxes,
 			const uint3 num_cells,
@@ -38,6 +39,7 @@ namespace CudaRasterizer
 			const float cell_size,
 			const float* rotations,
 			const float* values,
+			const float* weights,
 			const float* out_cells,
 			const int* radii,
 			char* geom_buffer,
@@ -49,6 +51,7 @@ namespace CudaRasterizer
 			float* dL_dscale,
 			float* dL_drot,
 			float* dL_dvalue,
+			float* dL_dweights,
 			bool debug);
 	};
 };

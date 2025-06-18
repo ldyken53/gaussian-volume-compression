@@ -97,6 +97,7 @@ CudaRasterizer::GeometryState CudaRasterizer::GeometryState::fromChunk(char*& ch
 	obtain(chunk, geom.clamped, P, 128);
 	obtain(chunk, geom.internal_radii, P, 128);
 	obtain(chunk, geom.values, P, 128);
+	obtain(chunk, geom.weights, P, 128);
 	obtain(chunk, geom.volumes, P, 128);
 	obtain(chunk, geom.means, P, 128);
 	obtain(chunk, geom.conic, P * 6, 128);
@@ -144,6 +145,7 @@ int CudaRasterizer::Rasterizer::forward(
 	const float scale_modifier,
 	const float* rotations,
 	const float* values,
+	const float* weights,
 	const float3 volume_mins,
 	const float3 volume_maxes,
 	const uint3 num_cells,
@@ -186,13 +188,16 @@ int CudaRasterizer::Rasterizer::forward(
 		scale_modifier,
 		(glm::vec4*)rotations,
 		values,
+		weights,
 		geomState.clamped,
 		volume_mins, volume_maxes,
 		num_cells,
 		cell_size,
 		radii,
 		geomState.means,
-		geomState.values, geomState.volumes,
+		geomState.values, 
+		geomState.weights,
+		geomState.volumes,
 		geomState.conic,
 		geomState.aabbs,
 		block_grid,
@@ -289,6 +294,7 @@ int CudaRasterizer::Rasterizer::forward(
 		cell_size,
 		geomState.means,
 		feature_ptr,
+		geomState.weights,
 		geomState.volumes,
 		geomState.conic,
 		imgState.accum_alpha,
@@ -334,6 +340,7 @@ void CudaRasterizer::Rasterizer::backward(
 	const float cell_size,
 	const float* rotations,
 	const float* values,
+	const float* weights,
 	const float* out_cells,
 	const int* radii,
 	char* geom_buffer,
@@ -345,6 +352,7 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_dscale,
 	float* dL_drot,
 	float* dL_dvalue,
+	float* dL_dweights,
 	bool debug)
 {
 	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P);
@@ -371,6 +379,7 @@ void CudaRasterizer::Rasterizer::backward(
 		geomState.clamped,
 		geomState.means,
 		geomState.values,
+		geomState.weights,
 		out_cells,
 		geomState.volumes,
 		geomState.conic,
@@ -379,7 +388,8 @@ void CudaRasterizer::Rasterizer::backward(
 		dL_dcells,
 		(float3*)dL_dmean3D,
 		dL_dconic,
-		dL_dvalue), debug);
+		dL_dvalue,
+		dL_dweights), debug);
 
 
 	// Take care of the rest of preprocessing, compute loss w.r.t

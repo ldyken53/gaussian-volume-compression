@@ -23,6 +23,7 @@ namespace CudaRasterizer
 		bool* clamped;
 		int* internal_radii;
 		float* values;
+		float* weights;
 		float* volumes;
 		float3* means;
 		float* conic;

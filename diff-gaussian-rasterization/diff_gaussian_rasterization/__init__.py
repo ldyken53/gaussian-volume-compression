@@ -17,6 +17,7 @@ def rasterize_gaussians(
     scales,
     rotations,
     values,
+    weights,
     raster_settings,
 ):
     return _RasterizeGaussians.apply(
@@ -24,6 +25,7 @@ def rasterize_gaussians(
         scales,
         rotations,
         values,
+        weights,
         raster_settings,
     )
 
@@ -36,6 +38,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         scales,
         rotations,
         values,
+        weights,
         raster_settings,
     ):
         volume_mins_x, volume_mins_y, volume_mins_z = raster_settings.volume_mins
@@ -47,6 +50,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             scales,
             rotations,
             values,
+            weights,
             raster_settings.scale_modifier,
             volume_mins_x, volume_mins_y, volume_mins_z,
             volume_maxes_x, volume_maxes_y, volume_maxes_z,
@@ -69,6 +73,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             scales,
             rotations,
             values,
+            weights,
             radii,
             geomBuffer,
             binningBuffer,
@@ -88,6 +93,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             scales,
             rotations,
             values,
+            weights,
             radii,
             geomBuffer,
             binningBuffer,
@@ -105,6 +111,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             scales,
             rotations,
             values,
+            weights,
             cells,
             raster_settings.scale_modifier,
             volume_mins_x, volume_mins_y, volume_mins_z,
@@ -124,7 +131,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             grad_means3D,
             grad_scales,
             grad_rotations,
-            grad_values
+            grad_values,
+            grad_weights
         ) = _C.rasterize_gaussians_backward(*args)
 
         # print(f"Grads computed.")
@@ -134,6 +142,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             grad_scales,
             grad_rotations,
             grad_values,
+            grad_weights,
             None,
         )
 
@@ -160,6 +169,7 @@ class GaussianRasterizer(nn.Module):
         scales=None,
         rotations=None,
         values=None,
+        weights=None
     ):
         raster_settings = self.raster_settings
 
@@ -171,6 +181,11 @@ class GaussianRasterizer(nn.Module):
         if (values is None):
             raise Exception(
                 "Please provide scalar values for each Gaussian!"
+            )
+        
+        if (weights is None):
+            raise Exception(
+                "Please provide scalar weights for each Gaussian!"
             )
 
         if scales is None:
@@ -184,5 +199,6 @@ class GaussianRasterizer(nn.Module):
             scales,
             rotations,
             values,
+            weights,
             raster_settings,
         )
