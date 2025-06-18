@@ -59,6 +59,7 @@ def training(
     gt_point_cloud = pv.PolyData(samples)
     probed = gt_point_cloud.sample(gaussians.mesh)
     gt_cells = probed.point_data['value'].reshape(100, 100, 100)
+    print(f"Number of nonvalid samples: {np.count_nonzero(probed.point_data['vtkValidPointMask'] == 0)}")
     # flipped_tensor = np.flip(gt_cells, axis=1)
     rotated = np.rot90(gt_cells, k=1, axes=(2, 0))
     flipped = np.flip(rotated, axis=2)
@@ -149,28 +150,27 @@ def training(
                 tensor_to_vtk(cpu_cells, f"test_{iteration}.vtk")
                 # analyze_array(cpu_cells)
             # Densification
-            # if iteration < opt.densify_until_iter:
-            #     # Keep track of max radii in image-space for pruning
-            #     gaussians.max_radii2D[visibility_filter] = torch.max(
-            #         gaussians.max_radii2D[visibility_filter], radii[visibility_filter]
-            #     )
-            #     gaussians.add_densification_stats(
-            #         viewspace_point_tensor, visibility_filter
-            #     )
+            if iteration < opt.densify_until_iter:
+                # Keep track of max radii in image-space for pruning
+                # gaussians.max_radii2D[visibility_filter] = torch.max(
+                #     gaussians.max_radii2D[visibility_filter], radii[visibility_filter]
+                # )
+                # gaussians.add_densification_stats(
+                #     viewspace_point_tensor, visibility_filter
+                # )
 
-            #     if (
-            #         iteration > opt.densify_from_iter
-            #         and iteration % opt.densification_interval == 0
-            #     ):
-            #         size_threshold = (
-            #             20 if iteration > opt.weight_reset_interval else None
-            #         )
-            #         gaussians.densify_and_prune(
-            #             opt.densify_grad_threshold,
-            #             0.005,
-            #             scene.cameras_extent,
-            #             size_threshold,
-                    # )
+                if (
+                    iteration > opt.densify_from_iter
+                    and iteration % opt.densification_interval == 0
+                ):
+
+                    gaussians.densify_and_prune(
+                        opt.densify_grad_threshold,
+                        0.001
+                    )
+                    mse = torch.mean((cells - gt) ** 2)
+                    psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
+                    print(f"Num Gaussians: {gaussians.get_values.shape[0]}, loss: {loss.item()}, psnr: {psnr}")
 
                 # if iteration % opt.weight_reset_interval == 0 or (
                 #     dataset.white_background and iteration == opt.densify_from_iter
@@ -319,7 +319,7 @@ if __name__ == "__main__":
         "--test_iterations", nargs="+", type=int, default=[7_000, 30_000]
     )
     parser.add_argument(
-        "--save_iterations", nargs="+", type=int, default=[1, 100, 500, 1_000]
+        "--save_iterations", nargs="+", type=int, default=[1, 100, 500, 1_000, 2_000, 4_000, 8_000]
     )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--disable_viewer", action="store_true", default=True)
