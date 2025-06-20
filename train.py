@@ -1,6 +1,7 @@
 import os
 import sys
 import uuid
+import json
 from argparse import ArgumentParser, Namespace
 from random import randint
 import numpy as np
@@ -36,11 +37,14 @@ def training(
     checkpoint_iterations,
     checkpoint,
     debug_from,
+    log_to_file,
+    fraction
 ):
+    log_data = []
     first_iter = 0
-    tb_writer = prepare_output_and_logger(dataset)
+    prepare_output(dataset)
     gaussians = GaussianModel()
-    scene = Scene(dataset, gaussians)
+    scene = Scene(dataset, gaussians, fraction=fraction)
     gaussians.training_setup(opt)
     scene.save(0)
     if checkpoint:
@@ -88,39 +92,37 @@ def training(
             render_pkg["radii"],
         )
         l1_l = l1_loss(cells, gt)
-
-        # ssim_value = piq.multi_scale_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
-
-        # scaling_loss = torch.mean(1.0 / torch.exp(gaussians._scaling))
-        # scaling_modifier = opt.lambda_scaling * torch.sigmoid(scaling_loss - 450).item()
-
-        # bound_loss = bounding_box_regularization(gaussians)
-
-        # Combine all losses
-        # loss = (
-        #     (1.0 - opt.lambda_dssim) * Ll1
-        #     + opt.lambda_dssim * (1.0 - ssim_value)
-        #     + scaling_modifier * scaling_loss
-        #     + bound_loss
-        # )
         loss = l1_l
         loss.backward()
 
         iter_end.record()
 
         with torch.no_grad():
+            # Logging
+            if log_to_file and iteration % 20 == 0:
+                cpu_cells = cells.cpu().numpy()
+                mse = torch.mean((cells - gt) ** 2)
+                psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
+                mse2 = torch.mean((cells[cpu_cells != -1] - gt[cpu_cells != -1]) ** 2)
+                psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
+                num_gaussians = gaussians.get_values.shape[0]
+                log_data.append({
+                    "iteration": iteration,
+                    "loss": loss.item(),
+                    "psnr": psnr.item(),
+                    "psnr2": psnr2.item(),
+                    "num_gaussians": num_gaussians
+                })
+            
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
-
             if iteration % 500 == 0:
                 mse = torch.mean((cells - gt) ** 2)
                 psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
                 progress_bar.set_postfix(
                     {
                         "Loss": f"{ema_loss_for_log:.{7}f}",
-                        "PSNR": f"{psnr:.{7}f}",
-                        # "Scaling": f"{scaling_modifier * scaling_loss.item():.{7}f}",
-                        # "Bound": f"{bound_loss.item():.{7}f}",
+                        "PSNR": f"{psnr:.{7}f}"
                     }
                 )
                 progress_bar.update(500)
@@ -128,57 +130,31 @@ def training(
             if iteration == opt.iterations:
                 progress_bar.close()
 
-            # Log and save
-            # training_report(
-            #     tb_writer,
-            #     iteration,
-            #     Ll1,
-            #     loss,
-            #     l1_loss,
-            #     iter_start.elapsed_time(iter_end),
-            #     testing_iterations,
-            #     scene,
-            #     render,
-            #     (pipe, background),
-            #     dataset.train_test_exp,
-            # )
+            # Save
             if iteration in saving_iterations:
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
                 cpu_cells = cells.cpu().numpy()
-                # print(cpu_cells.min(), cpu_cells.max())
-                # print(gaussians.get_values.cpu().numpy().min(), gaussians.get_values.cpu().numpy().max())
                 tensor_to_vtk(cpu_cells, f"test_{iteration}.vtk")
-                # analyze_array(cpu_cells)
+
             # Densification
-            if iteration < opt.densify_until_iter:
-                # Keep track of max radii in image-space for pruning
-                # gaussians.max_radii2D[visibility_filter] = torch.max(
-                #     gaussians.max_radii2D[visibility_filter], radii[visibility_filter]
-                # )
-                # gaussians.add_densification_stats(   
-                #     viewspace_point_tensor, visibility_filter
-                # )
-
-                if (
-                    iteration >= opt.densify_from_iter
-                    and iteration % opt.densification_interval == 0
-                ):
-
-                    cpu_cells = cells.cpu().numpy()
-                    print(f"Number of cells that weren't seen: {np.count_nonzero(cpu_cells == -1)}")
-                    # print(samples_tf_flat[cpu_cells.ravel() == -1])
-                    mse = torch.mean((cells[cpu_cells != -1] - gt[cpu_cells != -1]) ** 2)
-                    psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
-                    mse2 = torch.mean((cells - gt) ** 2)
-                    psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
-                    print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr with empty: {psnr2}")
-                    gaussians.densify_and_prune(
-                        opt.densify_grad_threshold,
-                        0.0001,
-                        samples_tf_flat[cpu_cells.ravel() == -1],
-                        gt_cells.ravel()[cpu_cells.ravel() == -1].reshape(-1, 1)
-                    )
+            if (iteration < opt.densify_until_iter and
+                iteration >= opt.densify_from_iter and
+                iteration % opt.densification_interval == 0
+            ):
+                cpu_cells = cells.cpu().numpy()
+                print(f"Number of cells that weren't seen: {np.count_nonzero(cpu_cells == -1)}")
+                mse = torch.mean((cells - gt) ** 2)
+                psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
+                mse2 = torch.mean((cells[cpu_cells != -1] - gt[cpu_cells != -1]) ** 2)
+                psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
+                print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr without empty: {psnr2}")
+                gaussians.densify_and_prune(
+                    opt.densify_grad_threshold,
+                    0.000,
+                    samples_tf_flat[cpu_cells.ravel() == -1],
+                    gt_cells.ravel()[cpu_cells.ravel() == -1].reshape(-1, 1)
+                )
 
                 # if iteration % opt.weight_reset_interval == 0 or (
                 #     dataset.white_background and iteration == opt.densify_from_iter
@@ -190,8 +166,6 @@ def training(
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none=True)
 
-            # gaussians.interpolate_new_values()
-
             if iteration in checkpoint_iterations:
                 print(f"\n[ITER {iteration}] Saving Checkpoint")
                 torch.save(
@@ -199,8 +173,14 @@ def training(
                     os.path.join(scene.model_path, "/chkpnt{iteration}.pth"),
                 )
 
+    if log_to_file:
+        log_file_path = os.path.join(scene.model_path, 'training_log.json')
+        with open(log_file_path, 'w') as log_file:
+            json.dump(log_data, log_file, indent=4)
 
-def prepare_output_and_logger(args):
+
+
+def prepare_output(args):
     if not args.model_path:
         if os.getenv("OAR_JOB_ID"):
             unique_str = os.getenv("OAR_JOB_ID")
@@ -214,104 +194,6 @@ def prepare_output_and_logger(args):
     with open(os.path.join(args.model_path, "cfg_args"), "w") as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(args))))
 
-    # Create Tensorboard writer
-    tb_writer = None
-    if TENSORBOARD_FOUND:
-        tb_writer = SummaryWriter(args.model_path)
-    else:
-        print("Tensorboard not available: not logging progress")
-    return tb_writer
-
-
-def training_report(
-    tb_writer,
-    iteration,
-    Ll1,
-    loss,
-    l1_loss,
-    elapsed,
-    testing_iterations,
-    scene: Scene,
-    renderFunc,
-    renderArgs,
-    train_test_exp,
-):
-    if tb_writer:
-        tb_writer.add_scalar("train_loss_patches/l1_loss", Ll1.item(), iteration)
-        tb_writer.add_scalar("train_loss_patches/total_loss", loss.item(), iteration)
-        tb_writer.add_scalar("iter_time", elapsed, iteration)
-
-    # Report test and samples of training set
-    if iteration in testing_iterations:
-        torch.cuda.empty_cache()
-        validation_configs = (
-            {"name": "test", "cameras": scene.getTestCameras()},
-            {
-                "name": "train",
-                "cameras": [
-                    scene.getTrainCameras()[idx % len(scene.getTrainCameras())]
-                    for idx in range(5, 30, 5)
-                ],
-            },
-        )
-
-        for config in validation_configs:
-            if config["cameras"] and len(config["cameras"]) > 0:
-                l1_test = 0.0
-                psnr_test = 0.0
-                for idx, viewpoint in enumerate(config["cameras"]):
-                    image = torch.clamp(
-                        renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"],
-                        0.0,
-                        1.0,
-                    )
-                    gt_image = torch.clamp(
-                        viewpoint.original_image.to("cuda"), 0.0, 1.0
-                    )
-                    if train_test_exp:
-                        image = image[..., image.shape[-1] // 2 :]
-                        gt_image = gt_image[..., gt_image.shape[-1] // 2 :]
-                    if tb_writer and (idx < 5):
-                        tb_writer.add_images(
-                            config["name"]
-                            + "_view_{}/render".format(viewpoint.image_name),
-                            image[None],
-                            global_step=iteration,
-                        )
-                        if iteration == testing_iterations[0]:
-                            tb_writer.add_images(
-                                config["name"]
-                                + "_view_{}/ground_truth".format(viewpoint.image_name),
-                                gt_image[None],
-                                global_step=iteration,
-                            )
-                    l1_test += l1_loss(image, gt_image).mean().double()
-                    psnr_test += psnr(image, gt_image).mean().double()
-                psnr_test /= len(config["cameras"])
-                l1_test /= len(config["cameras"])
-                print(
-                    "\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(
-                        iteration, config["name"], l1_test, psnr_test
-                    )
-                )
-                if tb_writer:
-                    tb_writer.add_scalar(
-                        config["name"] + "/loss_viewpoint - l1_loss", l1_test, iteration
-                    )
-                    tb_writer.add_scalar(
-                        config["name"] + "/loss_viewpoint - psnr", psnr_test, iteration
-                    )
-
-        if tb_writer:
-            tb_writer.add_histogram(
-                "scene/weight_histogram", scene.gaussians.get_weight, iteration
-            )
-            tb_writer.add_scalar(
-                "total_points", scene.gaussians.get_xyz.shape[0], iteration
-            )
-        torch.cuda.empty_cache()
-
-
 if __name__ == "__main__":
     window = create_window()
     # Set up command line argument parser
@@ -319,18 +201,17 @@ if __name__ == "__main__":
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
-    parser.add_argument("--ip", type=str, default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=6009)
     parser.add_argument("--debug_from", type=int, default=-1)
+    parser.add_argument("--fraction", type=float, default=0.01)
     parser.add_argument("--detect_anomaly", action="store_true", default=False)
     parser.add_argument(
         "--test_iterations", nargs="+", type=int, default=[7_000, 30_000]
     )
     parser.add_argument(
-        "--save_iterations", nargs="+", type=int, default=[1, 100, 500, 1_000, 2_000, 4_000, 8_000]
+        "--save_iterations", nargs="+", type=int, default=[1, 1_000, 2_000, 4_000, 6_000]
     )
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--disable_viewer", action="store_true", default=True)
+    parser.add_argument("--log_to_file", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default=None)
     args = parser.parse_args(sys.argv[1:])
@@ -351,6 +232,8 @@ if __name__ == "__main__":
         args.checkpoint_iterations,
         args.start_checkpoint,
         args.debug_from,
+        args.log_to_file,
+        args.fraction
     )
 
     # All done
