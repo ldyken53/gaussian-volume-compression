@@ -56,15 +56,16 @@ def training(
     v = np.linspace(0.005, 0.995, 100)
     x, y, z = np.meshgrid(v, v, v, indexing='ij')
     samples = np.vstack([x.ravel(), y.ravel(), z.ravel()]).T
-    gt_point_cloud = pv.PolyData(samples)
+    samples_3d = samples.reshape(100,100,100, 3)
+    rot = np.rot90(samples_3d, k=1, axes=(2,0))
+    samples_tf = np.flip(rot, axis=2)
+    samples_tf_flat = samples_tf.reshape(-1, 3)
+    gt_point_cloud = pv.PolyData(samples_tf_flat)
     probed = gt_point_cloud.sample(gaussians.mesh)
     gt_cells = probed.point_data['value'].reshape(100, 100, 100)
-    print(f"Number of nonvalid samples: {np.count_nonzero(probed.point_data['vtkValidPointMask'] == 0)}")
-    # flipped_tensor = np.flip(gt_cells, axis=1)
-    rotated = np.rot90(gt_cells, k=1, axes=(2, 0))
-    flipped = np.flip(rotated, axis=2)
-    tensor_to_vtk(flipped, "test_gt.vtk")
-    gt = torch.tensor(flipped.copy()).cuda()
+    print(f"Fraction of valid samples: {np.count_nonzero(probed.point_data['vtkValidPointMask']) / 100**3}")
+    tensor_to_vtk(gt_cells, "test_gt.vtk")
+    gt = torch.tensor(gt_cells.copy()).cuda()
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
@@ -155,22 +156,29 @@ def training(
                 # gaussians.max_radii2D[visibility_filter] = torch.max(
                 #     gaussians.max_radii2D[visibility_filter], radii[visibility_filter]
                 # )
-                # gaussians.add_densification_stats(
+                # gaussians.add_densification_stats(   
                 #     viewspace_point_tensor, visibility_filter
                 # )
 
                 if (
-                    iteration > opt.densify_from_iter
+                    iteration >= opt.densify_from_iter
                     and iteration % opt.densification_interval == 0
                 ):
 
+                    cpu_cells = cells.cpu().numpy()
+                    print(f"Number of cells that weren't seen: {np.count_nonzero(cpu_cells == -1)}")
+                    # print(samples_tf_flat[cpu_cells.ravel() == -1])
+                    mse = torch.mean((cells[cpu_cells != -1] - gt[cpu_cells != -1]) ** 2)
+                    psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
+                    mse2 = torch.mean((cells - gt) ** 2)
+                    psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
+                    print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr with empty: {psnr2}")
                     gaussians.densify_and_prune(
                         opt.densify_grad_threshold,
-                        0.001
+                        0.0001,
+                        samples_tf_flat[cpu_cells.ravel() == -1],
+                        gt_cells.ravel()[cpu_cells.ravel() == -1].reshape(-1, 1)
                     )
-                    mse = torch.mean((cells - gt) ** 2)
-                    psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
-                    print(f"Num Gaussians: {gaussians.get_values.shape[0]}, loss: {loss.item()}, psnr: {psnr}")
 
                 # if iteration % opt.weight_reset_interval == 0 or (
                 #     dataset.white_background and iteration == opt.densify_from_iter

@@ -215,27 +215,44 @@ int CudaRasterizer::Rasterizer::forward(
 	CHECK_CUDA(cudaMemcpy(&num_intersections, geomState.point_offsets + P - 1, sizeof(int), cudaMemcpyDeviceToHost), debug);
 	if (debug) {
 		std::cout << "Total Num Intersections: " << num_intersections << "\n";
-		
-		// Copy blocks_touched data to host for detailed logging
 		int* host_blocks_touched = new int[P];
-		cudaMemcpy(host_blocks_touched, geomState.blocks_touched, P * sizeof(int), cudaMemcpyDeviceToHost);
-		
-		// Calculate statistics
-		int min_intersections = *std::min_element(host_blocks_touched, host_blocks_touched + P);
-		int max_intersections = *std::max_element(host_blocks_touched, host_blocks_touched + P);
-		double avg_intersections = static_cast<double>(num_intersections) / P;
-		
-		// Count gaussians with zero intersections
-		int zero_intersections = std::count(host_blocks_touched, host_blocks_touched + P, 0);
-		
-		std::cout << "Intersections per Gaussian statistics:" << std::endl;
-		std::cout << "  Min: " << min_intersections << std::endl;
-		std::cout << "  Max: " << max_intersections << std::endl;
-		std::cout << "  Average: " << avg_intersections << std::endl;
-		std::cout << "  Gaussians with 0 intersections: " << zero_intersections << " (" 
-		          << (100.0 * zero_intersections / P) << "%)" << std::endl;
-		
+		CHECK_CUDA(cudaMemcpy(host_blocks_touched,
+							geomState.blocks_touched,
+							P * sizeof(int),
+							cudaMemcpyDeviceToHost),
+				debug);
+		int min_inter = *std::min_element(host_blocks_touched, host_blocks_touched + P);
+		int max_inter = *std::max_element(host_blocks_touched, host_blocks_touched + P);
+		double avg_inter = double(num_intersections) / P;
+
+		std::cout << "Intersections per Gaussian statistics:\n"
+				<< "  Min:     " << min_inter << "\n"
+				<< "  Max:     " << max_inter << "\n"
+				<< "  Average: " << avg_inter << "\n";
+
+		int max_idx = std::distance(
+			host_blocks_touched,
+			std::max_element(host_blocks_touched, host_blocks_touched + P)
+		);
+		glm::vec3* host_scales = new glm::vec3[P];
+		CHECK_CUDA(cudaMemcpy(host_scales,
+							scales,
+							P * sizeof(glm::vec3),
+							cudaMemcpyDeviceToHost),debug);
+
+		glm::vec3  orig_scale = host_scales[max_idx];
+		glm::vec3  mod_scale  = orig_scale * scale_modifier;
+
+		std::cout << "Gaussian #" << max_idx
+				<< " had the most intersections.\n"
+				<< "  Original scale: ("
+				<< orig_scale.x << ", "
+				<< orig_scale.y << ", "
+				<< orig_scale.z << ")\n";
+
+		// cleanup
 		delete[] host_blocks_touched;
+		delete[] host_scales;
 	}
 
 	size_t binning_chunk_size = required<BinningState>(num_intersections);

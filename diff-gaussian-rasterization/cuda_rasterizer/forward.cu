@@ -280,7 +280,7 @@ renderCUDA(
 			n_contrib[cell_id] = n_contributor;
 
 		} else {
-			out_cells[cell_id] = 0.0;
+			out_cells[cell_id] = -1.0;
 			accumulated_weights[cell_id] = 0.0;
 			n_contrib[cell_id] = n_contributor;
 		}

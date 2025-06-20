@@ -27,7 +27,7 @@ class GaussianModel:
             return symm
 
         self.scaling_activation = torch.exp
-        self.scaling_inverse_activation = torch.log
+        self.inverse_scaling_activation = torch.log
 
         self.covariance_activation = build_covariance_from_scaling_rotation
 
@@ -144,7 +144,7 @@ class GaussianModel:
             distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()),
             0.0000001,
         )
-        scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 3)
+        scales = self.inverse_scaling_activation(torch.sqrt(dist2))[..., None].repeat(1, 3)
         rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
         rots[:, 0] = 1
 
@@ -513,7 +513,7 @@ class GaussianModel:
         new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[
             selected_pts_mask
         ].repeat(N, 1)
-        new_scaling = self.scaling_inverse_activation(
+        new_scaling = self.inverse_scaling_activation(
             self.get_scaling[selected_pts_mask].repeat(N, 1) / (0.8 * N)
         )
         new_rotation = self._rotation[selected_pts_mask].repeat(N, 1)
@@ -561,14 +561,48 @@ class GaussianModel:
             new_values,
         )
 
-    def densify_and_prune(self, max_grad, min_weight):
+    def densify_in_empty(self, empty_points, empty_values):
+        # Extract points that satisfy the gradient condition
+        new_points = torch.tensor(empty_points).float().cuda()
+
+        new_scaling = self.inverse_scaling_activation(
+            (0.00167) # Slightly bigger than 1 cell in 100^3 grid
+            * torch.ones(
+                (empty_points.shape[0], 3), dtype=torch.float, device="cuda"
+            )
+        )
+        new_rotation = torch.zeros((empty_points.shape[0], 4), device="cuda")
+        new_rotation[:, 0] = 1
+
+        new_weights = self.inverse_weight_activation(
+            (0.01)
+            * torch.ones(
+                (empty_points.shape[0], 1), dtype=torch.float, device="cuda"
+            )
+        )
+
+        new_values = self.inverse_value_activation(
+            torch.tensor(empty_values, dtype=torch.float, device="cuda")
+        )
+
+        self.densification_postfix(
+            new_points,
+            new_weights,
+            new_scaling,
+            new_rotation,
+            new_values,
+        )
+
+    def densify_and_prune(self, max_grad, min_weight, empty_points, empty_values):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
         # self.densify_and_clone(grads, max_grad, extent)
         # self.densify_and_split(grads, max_grad, extent)
+        self.densify_in_empty(empty_points, empty_values)
 
         prune_mask = (self.get_weight < min_weight).squeeze()
+        print(f"Number of Gaussians pruned: {torch.count_nonzero(prune_mask)}")
         self.prune_points(prune_mask)
 
         torch.cuda.empty_cache()
