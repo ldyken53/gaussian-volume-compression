@@ -38,7 +38,8 @@ def training(
     checkpoint,
     debug_from,
     log_to_file,
-    fraction
+    fraction,
+    min_weight
 ):
     log_data = []
     first_iter = 0
@@ -138,7 +139,7 @@ def training(
                 tensor_to_vtk(cpu_cells, f"test_{iteration}.vtk")
 
             # Densification
-            if (iteration < opt.densify_until_iter and
+            if (iteration <= opt.densify_until_iter and
                 iteration >= opt.densify_from_iter and
                 iteration % opt.densification_interval == 0
             ):
@@ -151,7 +152,7 @@ def training(
                 print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr without empty: {psnr2}")
                 gaussians.densify_and_prune(
                     opt.densify_grad_threshold,
-                    0.000,
+                    min_weight,
                     samples_tf_flat[cpu_cells.ravel() == -1],
                     gt_cells.ravel()[cpu_cells.ravel() == -1].reshape(-1, 1)
                 )
@@ -203,6 +204,7 @@ if __name__ == "__main__":
     pp = PipelineParams(parser)
     parser.add_argument("--debug_from", type=int, default=-1)
     parser.add_argument("--fraction", type=float, default=0.01)
+    parser.add_argument("--min_weight", type=float, default=0.0001)
     parser.add_argument("--detect_anomaly", action="store_true", default=False)
     parser.add_argument(
         "--test_iterations", nargs="+", type=int, default=[7_000, 30_000]
@@ -233,7 +235,8 @@ if __name__ == "__main__":
         args.start_checkpoint,
         args.debug_from,
         args.log_to_file,
-        args.fraction
+        args.fraction,
+        args.min_weight
     )
 
     # All done

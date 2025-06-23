@@ -16,7 +16,7 @@ class Scene:
         gaussians: GaussianModel,
         load_iteration=None,
         normalize=False,
-        fraction=0.05
+        fraction=0.01
     ):
         self.model_path = args.model_path
         self.loaded_iter = None
