@@ -17,12 +17,12 @@ def apply_spherical_harmonics(value, cmap_name):
     normalized = (value - vmin) / (vmax - vmin) if vmax > vmin else np.zeros_like(value)
     cmap = plt.get_cmap(cmap_name)
     colors = cmap(normalized)[:, :3]
-    f_dc_0 = np.clip(((colors[:, 0] - 0.5) / SH_C0 * 255), 0, 255).astype(np.uint8)
-    f_dc_1 = np.clip(((colors[:, 1] - 0.5) / SH_C0 * 255), 0, 255).astype(np.uint8)
-    f_dc_2 = np.clip(((colors[:, 2] - 0.5) / SH_C0 * 255), 0, 255).astype(np.uint8)
+    f_dc_0 = np.clip((colors[:, 0] * SH_C0 * 255), 0, 255).astype(np.uint8)
+    f_dc_1 = np.clip((colors[:, 1] * SH_C0 * 255), 0, 255).astype(np.uint8)
+    f_dc_2 = np.clip((colors[:, 2] * SH_C0 * 255), 0, 255).astype(np.uint8)
     return f_dc_0, f_dc_1, f_dc_2
 
-def clean_and_process_ply(in_path, colormaps, constant_opacity):
+def clean_and_process_ply(in_path, colormaps, constant_opacity, use_weight):
     file_name = os.path.splitext(os.path.basename(in_path))[0]
 
     with open(in_path, 'rb') as f:
@@ -42,6 +42,7 @@ def clean_and_process_ply(in_path, colormaps, constant_opacity):
 
     cleaned_data = vertex_data[valid_mask]
     print(f"Cleaned vertices: {len(cleaned_data)} / Original vertices: {len(vertex_data)}")
+    value = cleaned_data["value"]
 
     cleaned_data = cleaned_data.copy()
     cleaned_data['value'] = sigmoid(cleaned_data['value'].astype(np.float64)).astype(cleaned_data['value'].dtype)
@@ -51,7 +52,10 @@ def clean_and_process_ply(in_path, colormaps, constant_opacity):
     inverse_sigmoid_opacity = inverse_sigmoid(np.full(cleaned_data.shape, constant_opacity))
 
     for cmap_name in colormaps:
-        f_dc_0, f_dc_1, f_dc_2 = apply_spherical_harmonics(cleaned_data['weight'], cmap_name)
+        if use_weight:
+            f_dc_0, f_dc_1, f_dc_2 = apply_spherical_harmonics(cleaned_data['weight'], cmap_name)
+        else:
+            f_dc_0, f_dc_1, f_dc_2 = apply_spherical_harmonics(cleaned_data['value'], cmap_name)
 
         new_dtype = cleaned_data.dtype.descr + [
             ('f_dc_0', 'u1'),
@@ -67,7 +71,7 @@ def clean_and_process_ply(in_path, colormaps, constant_opacity):
         new_data['f_dc_0'] = f_dc_0
         new_data['f_dc_1'] = f_dc_1
         new_data['f_dc_2'] = f_dc_2
-        new_data['opacity'] = inverse_sigmoid_opacity.astype('f4')
+        new_data['opacity'] = inverse_sigmoid(sigmoid(value) * 0.01)
 
         vertex_element = PlyElement.describe(new_data, 'vertex')
         os.makedirs('output', exist_ok=True)
@@ -82,4 +86,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     colormaps = ['viridis']
-    clean_and_process_ply(args.in_path, colormaps, constant_opacity=args.opacity)
+    clean_and_process_ply(args.in_path, colormaps, constant_opacity=args.opacity, use_weight=args.use_weight)
