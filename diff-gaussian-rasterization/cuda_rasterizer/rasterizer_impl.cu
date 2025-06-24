@@ -215,44 +215,44 @@ int CudaRasterizer::Rasterizer::forward(
 	CHECK_CUDA(cudaMemcpy(&num_intersections, geomState.point_offsets + P - 1, sizeof(int), cudaMemcpyDeviceToHost), debug);
 	if (debug) {
 		std::cout << "Total Num Intersections: " << num_intersections << "\n";
-		int* host_blocks_touched = new int[P];
-		CHECK_CUDA(cudaMemcpy(host_blocks_touched,
-							geomState.blocks_touched,
-							P * sizeof(int),
-							cudaMemcpyDeviceToHost),
-				debug);
-		int min_inter = *std::min_element(host_blocks_touched, host_blocks_touched + P);
-		int max_inter = *std::max_element(host_blocks_touched, host_blocks_touched + P);
-		double avg_inter = double(num_intersections) / P;
+		// int* host_blocks_touched = new int[P];
+		// CHECK_CUDA(cudaMemcpy(host_blocks_touched,
+		// 					geomState.blocks_touched,
+		// 					P * sizeof(int),
+		// 					cudaMemcpyDeviceToHost),
+		// 		debug);
+		// int min_inter = *std::min_element(host_blocks_touched, host_blocks_touched + P);
+		// int max_inter = *std::max_element(host_blocks_touched, host_blocks_touched + P);
+		// double avg_inter = double(num_intersections) / P;
 
-		std::cout << "Intersections per Gaussian statistics:\n"
-				<< "  Min:     " << min_inter << "\n"
-				<< "  Max:     " << max_inter << "\n"
-				<< "  Average: " << avg_inter << "\n";
+		// std::cout << "Intersections per Gaussian statistics:\n"
+		// 		<< "  Min:     " << min_inter << "\n"
+		// 		<< "  Max:     " << max_inter << "\n"
+		// 		<< "  Average: " << avg_inter << "\n";
 
-		int max_idx = std::distance(
-			host_blocks_touched,
-			std::max_element(host_blocks_touched, host_blocks_touched + P)
-		);
-		glm::vec3* host_scales = new glm::vec3[P];
-		CHECK_CUDA(cudaMemcpy(host_scales,
-							scales,
-							P * sizeof(glm::vec3),
-							cudaMemcpyDeviceToHost),debug);
+		// int max_idx = std::distance(
+		// 	host_blocks_touched,
+		// 	std::max_element(host_blocks_touched, host_blocks_touched + P)
+		// );
+		// glm::vec3* host_scales = new glm::vec3[P];
+		// CHECK_CUDA(cudaMemcpy(host_scales,
+		// 					scales,
+		// 					P * sizeof(glm::vec3),
+		// 					cudaMemcpyDeviceToHost),debug);
 
-		glm::vec3  orig_scale = host_scales[max_idx];
-		glm::vec3  mod_scale  = orig_scale * scale_modifier;
+		// glm::vec3  orig_scale = host_scales[max_idx];
+		// glm::vec3  mod_scale  = orig_scale * scale_modifier;
 
-		std::cout << "Gaussian #" << max_idx
-				<< " had the most intersections.\n"
-				<< "  Original scale: ("
-				<< orig_scale.x << ", "
-				<< orig_scale.y << ", "
-				<< orig_scale.z << ")\n";
+		// std::cout << "Gaussian #" << max_idx
+		// 		<< " had the most intersections.\n"
+		// 		<< "  Original scale: ("
+		// 		<< orig_scale.x << ", "
+		// 		<< orig_scale.y << ", "
+		// 		<< orig_scale.z << ")\n";
 
 		// cleanup
-		delete[] host_blocks_touched;
-		delete[] host_scales;
+		// delete[] host_blocks_touched;
+		// delete[] host_scales;
 	}
 
 	size_t binning_chunk_size = required<BinningState>(num_intersections);
@@ -319,6 +319,52 @@ int CudaRasterizer::Rasterizer::forward(
 		out_cells), 
 		debug)
 	if (debug) cudaEventRecord(events[13]);
+
+	if (debug) {
+		// allocate host array and copy back the per‐cell counts
+		int* host_n_contrib = new int[num_cells.x * num_cells.y * num_cells.z];
+		CHECK_CUDA(cudaMemcpy(
+			host_n_contrib,
+			imgState.n_contrib,
+			num_cells.x * num_cells.y * num_cells.z * sizeof(int),
+			cudaMemcpyDeviceToHost
+		), debug);
+
+		// compute statistics
+		int min_contrib = std::numeric_limits<int>::max();
+		int max_contrib = std::numeric_limits<int>::min();
+		int max_idx = 0;
+		int64_t sum_contrib = 0;
+		for (int64_t i = 0; i < num_cells.x * num_cells.y * num_cells.z; ++i) {
+			int c = host_n_contrib[i];
+			min_contrib = std::min(min_contrib, c);
+			if (c > max_contrib) {
+				max_contrib = c;
+				max_idx = int(i);
+			}
+			sum_contrib += c;
+		}
+		double avg_contrib = double(sum_contrib) / double(num_cells.x * num_cells.y * num_cells.z);
+
+		// decode (x,y,z) of the busiest cell for extra insight
+		int cx =  max_idx % num_cells.x;
+		int cy = (max_idx / num_cells.x) % num_cells.y;
+		int cz =  max_idx / (num_cells.x * num_cells.y);
+
+		// print out
+		std::cout << "Gaussians per Cell statistics:\n"
+				<< "  Min:     " << min_contrib << "\n"
+				<< "  Max:     " << max_contrib << "\n"
+				<< "  Average: " << avg_contrib << "\n"
+				<< "  Busiest cell: (" 
+					<< cx << ", " 
+					<< cy << ", " 
+					<< cz << ") with " 
+					<< max_contrib 
+					<< " contributions\n";
+
+		delete[] host_n_contrib;
+	}
 
 	// Calculate and print timing (only when debug is enabled)
 	if (debug) {
