@@ -36,7 +36,9 @@ def clean_and_process_ply(in_path, colormaps, constant_opacity):
     value = vertex_data['value'].astype(np.float64)
 
     valid_mask = ~(np.isnan(x) | np.isnan(y) | np.isnan(z) | np.isnan(value) |
-                   np.isinf(x) | np.isinf(y) | np.isinf(z) | np.isinf(value))
+                   np.isinf(x) | np.isinf(y) | np.isinf(z))
+
+    print(np.count_nonzero(np.isneginf(value)))
 
     cleaned_data = vertex_data[valid_mask]
     print(f"Cleaned vertices: {len(cleaned_data)} / Original vertices: {len(vertex_data)}")
@@ -44,16 +46,18 @@ def clean_and_process_ply(in_path, colormaps, constant_opacity):
     cleaned_data = cleaned_data.copy()
     cleaned_data['value'] = sigmoid(cleaned_data['value'].astype(np.float64)).astype(cleaned_data['value'].dtype)
     print(f"Max value: {np.max(cleaned_data['value'])}, min: {np.min(cleaned_data['value'])}, average: {np.mean(cleaned_data['value'])} ")
-
+    cleaned_data['weight'] = sigmoid(cleaned_data['weight'].astype(np.float64)).astype(cleaned_data['weight'].dtype)
+    print(f"Max value: {np.max(cleaned_data['weight'])}, min: {np.min(cleaned_data['weight'])}, average: {np.mean(cleaned_data['weight'])} ")
     inverse_sigmoid_opacity = inverse_sigmoid(np.full(cleaned_data.shape, constant_opacity))
 
     for cmap_name in colormaps:
-        f_dc_0, f_dc_1, f_dc_2 = apply_spherical_harmonics(cleaned_data['value'], cmap_name)
+        f_dc_0, f_dc_1, f_dc_2 = apply_spherical_harmonics(cleaned_data['weight'], cmap_name)
 
         new_dtype = cleaned_data.dtype.descr + [
             ('f_dc_0', 'u1'),
             ('f_dc_1', 'u1'),
             ('f_dc_2', 'u1'),
+            ('opacity', 'f4')
         ]
 
         new_data = np.empty(cleaned_data.shape, dtype=new_dtype)
@@ -63,6 +67,7 @@ def clean_and_process_ply(in_path, colormaps, constant_opacity):
         new_data['f_dc_0'] = f_dc_0
         new_data['f_dc_1'] = f_dc_1
         new_data['f_dc_2'] = f_dc_2
+        new_data['opacity'] = inverse_sigmoid_opacity.astype('f4')
 
         vertex_element = PlyElement.describe(new_data, 'vertex')
         os.makedirs('output', exist_ok=True)
@@ -73,6 +78,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert transfer function .ply to standard 3DGS .ply format with inverse sigmoid opacity.")
     parser.add_argument("in_path", type=str, help="Path to input .ply file.")
     parser.add_argument("--opacity", type=float, default=0.005, help="Constant opacity value (after sigmoid, range (0,1)).")
+    parser.add_argument("--use_weight", action="store_true", default=False, help="Color by weight instead of value.")
     args = parser.parse_args()
 
     colormaps = ['viridis']
