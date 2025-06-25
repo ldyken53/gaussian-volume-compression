@@ -418,6 +418,14 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_dweights,
 	bool debug)
 {
+	// Create CUDA events for timing (only when debug is enabled)
+	cudaEvent_t events[4]; // 2 pairs of start/stop events
+	if (debug) {
+		for (int i = 0; i < 4; i++) {
+			cudaEventCreate(&events[i]);
+		}
+	}
+
 	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P);
 	BinningState binningState = BinningState::fromChunk(binning_buffer, R);
 	ImageState imgState = ImageState::fromChunk(img_buffer, num_cells.x * num_cells.y * num_cells.z);
@@ -430,6 +438,7 @@ void CudaRasterizer::Rasterizer::backward(
 	dim3 block_grid((num_cells.x + BLOCK_X - 1) / BLOCK_X, (num_cells.y + BLOCK_Y - 1) / BLOCK_Y, (num_cells.z + BLOCK_Z - 1) / BLOCK_Z);
 	dim3 block(BLOCK_X, BLOCK_Y, BLOCK_Z);
 
+	if (debug) cudaEventRecord(events[0]);
 	// Compute loss gradients w.r.t. mean position, conic matrix,
 	// opacity and value of Gaussians from per-cell loss gradients.
 	CHECK_CUDA(BACKWARD::render(
@@ -453,8 +462,9 @@ void CudaRasterizer::Rasterizer::backward(
 		dL_dconic,
 		dL_dvalue,
 		dL_dweights), debug);
+	if (debug) cudaEventRecord(events[1]);
 
-
+	if (debug) cudaEventRecord(events[2]);
 	// Take care of the rest of preprocessing, compute loss w.r.t
 	// scales and rotation from conic gradients.
 	CHECK_CUDA(BACKWARD::preprocess(P,
@@ -466,4 +476,20 @@ void CudaRasterizer::Rasterizer::backward(
 		dL_dconic,
 		(glm::vec3*)dL_dscale,
 		(glm::vec4*)dL_drot), debug);
+	if (debug) cudaEventRecord(events[3]);
+
+	if (debug) {
+		cudaDeviceSynchronize(); // ensure all events are completed
+		float elapsed_time;
+		const char* operation_names[] = { "Backward Render", "Backward Preprocess" };
+
+		for (int i = 0; i < 2; ++i) {
+			cudaEventElapsedTime(&elapsed_time, events[i * 2], events[i * 2 + 1]);
+			std::cout << operation_names[i] << " time: " << elapsed_time << " ms" << std::endl;
+		}
+
+		for (int i = 0; i < 4; ++i) {
+			cudaEventDestroy(events[i]);
+		}
+	}
 }
