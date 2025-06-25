@@ -4,7 +4,7 @@
 #define NUM_CHANNELS 3 // Default 3, RGB
 #define BLOCK_X 4
 #define BLOCK_Y 4
-#define BLOCK_Z 4
+#define BLOCK_Z 2
 #define OPACITY 0.01
 
 #endif
