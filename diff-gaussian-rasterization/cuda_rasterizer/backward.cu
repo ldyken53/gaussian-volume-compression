@@ -215,10 +215,9 @@ renderCUDA(
                     d.y * (collected_conic[j * 6 + 1] * d.x + collected_conic[j * 6 + 3] * d.y + collected_conic[j * 6 + 4] * d.z) +
                     d.z * (collected_conic[j * 6 + 2] * d.x + collected_conic[j * 6 + 4] * d.y + collected_conic[j * 6 + 5] * d.z)
                 );
-                float weight = collected_weights[j] * exp(-0.5f * quad_form);
-
-                if (exp(-0.5f * quad_form) > 1.0f)
-                    continue;
+				float power = -0.5 * quad_form;
+				if (power < -14.0 || power > 0.0) continue;
+                float weight = collected_weights[j] * exp(power);
 
                 // Compute gradients
                 // dl_dvalue = dl_dout * dout_dvalue
