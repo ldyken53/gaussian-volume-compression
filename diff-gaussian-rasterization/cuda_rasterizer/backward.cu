@@ -149,6 +149,7 @@ renderCUDA(
 {
 	// We rasterize again. Compute necessary block info.
 	auto block = cg::this_thread_block();
+	auto tile = cg::tiled_partition<BLOCK_SIZE>(block);
 	uint3 cell_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y, block.group_index().z * BLOCK_Z};
 	uint3 cell_max = { min(cell_min.x + BLOCK_X, num_cells.x), min(cell_min.y + BLOCK_Y , num_cells.y), min(cell_min.z + BLOCK_Z , num_cells.z) };
 	uint3 cell = { cell_min.x + block.thread_index().x, cell_min.y + block.thread_index().y, cell_min.z + block.thread_index().z  };
@@ -162,7 +163,7 @@ renderCUDA(
 	// Check if this thread is associated with a valid cell or outside.
 	bool inside = cell.x < num_cells.x && cell.y < num_cells.y && cell.z < num_cells.z;
 	// Done threads can help with fetching, but don't rasterize
-	bool done = !inside;
+	bool done = !inside || accumulated_weights[cell_id] < 1e-5;
 
 	// Load start/end range of IDs to process in bit sorted list.
 	uint2 range = ranges[block.group_index().z * grid.y * grid.x + block.group_index().y * grid.x + block.group_index().x];
@@ -179,7 +180,7 @@ renderCUDA(
 	__shared__ float collected_conic[BLOCK_SIZE * 6];
 
 	float acc_weight = accumulated_weights[cell_id];
-	float dl_dout = dL_dcells[cell_id];
+	float dL_dout = dL_dcells[cell_id];
 	
 	// Iterate over batches
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
@@ -201,61 +202,92 @@ renderCUDA(
 		block.sync();
 
 		// Process current batch
-		for (int j = 0; !done && j < min(BLOCK_SIZE, toDo); j++)
+		for (int j = 0; j < min(BLOCK_SIZE, toDo); j++)
 		{
-			// Only process if we have meaningful gradients
-			if (inside && accumulated_weights[cell_id] > 1e-5)
-			{
-                int point_idx = collected_id[j];
+			float dL_dvalue = 0.0;
+			float dL_dw = 0.0;
+			float dL_dmean_x = 0.0;
+			float dL_dmean_y = 0.0;
+			float dL_dmean_z = 0.0;
+			float dL_dxx = 0.0;
+			float dL_dxy = 0.0;
+			float dL_dxz = 0.0;
+			float dL_dyy = 0.0;
+			float dL_dyz = 0.0;
+			float dL_dzz = 0.0;
+			int point_idx = collected_id[j];
+			if (!done) {
 				float3 d = make_float3(cell_pos.x - collected_means[j].x, cell_pos.y - collected_means[j].y, cell_pos.z - collected_means[j].z);
-                
-                // Compute quadratic form and weight as in forward pass
-                float quad_form = (
-                    d.x * (collected_conic[j * 6] * d.x + collected_conic[j * 6 + 1] * d.y + collected_conic[j * 6 + 2] * d.z) +
-                    d.y * (collected_conic[j * 6 + 1] * d.x + collected_conic[j * 6 + 3] * d.y + collected_conic[j * 6 + 4] * d.z) +
-                    d.z * (collected_conic[j * 6 + 2] * d.x + collected_conic[j * 6 + 4] * d.y + collected_conic[j * 6 + 5] * d.z)
-                );
+				
+				// Compute quadratic form and weight as in forward pass
+				float quad_form = (
+					d.x * (collected_conic[j * 6] * d.x + collected_conic[j * 6 + 1] * d.y + collected_conic[j * 6 + 2] * d.z) +
+					d.y * (collected_conic[j * 6 + 1] * d.x + collected_conic[j * 6 + 3] * d.y + collected_conic[j * 6 + 4] * d.z) +
+					d.z * (collected_conic[j * 6 + 2] * d.x + collected_conic[j * 6 + 4] * d.y + collected_conic[j * 6 + 5] * d.z)
+				);
 				float power = -0.5 * quad_form;
-				if (power < -14.0 || power > 0.0) continue;
-                float weight = collected_weights[j] * exp(power);
+				if (power > -14.0 && power < 0.0) {
+					float e = exp(power);
+					float weight = collected_weights[j] * e;
 
-                // Compute gradients
-                // dl_dvalue = dl_dout * dout_dvalue
-                float dl_dvalue = dl_dout * weight / acc_weight;
-				// If clamped don't add gradient (Pytorch rules)
-				if (!collected_clamped[j]) {
-                	atomicAdd(&dL_dvalues[point_idx], dl_dvalue);
+					// Compute gradients
+					dL_dvalue = dL_dout * weight / acc_weight;
+
+					// Gradient for weight terms
+					float dL_dweight = dL_dout * (collected_values[j] / acc_weight - out_cells[cell_id] / acc_weight);
+					dL_dw = dL_dweight * e;
+
+					float dweight_dquad = -0.5f * weight;
+					float dL_dquad = dL_dweight * dweight_dquad;
+					
+					// Gradients for means
+					dL_dmean_x = dL_dquad * 2 * -1 *
+						(collected_conic[j * 6] * d.x + collected_conic[j * 6 + 1] * d.y + collected_conic[j * 6 + 2] * d.z);
+					dL_dmean_y = dL_dquad * 2 * -1 *
+						(collected_conic[j * 6 + 1] * d.x + collected_conic[j * 6 + 3] * d.y + collected_conic[j * 6 + 4] * d.z);
+					dL_dmean_z = dL_dquad * 2 * -1 *
+						(collected_conic[j * 6 + 2] * d.x + collected_conic[j * 6 + 4] * d.y + collected_conic[j * 6 + 5] * d.z);
+
+					// Gradients for conic
+					dL_dxx = dL_dquad * d.x * d.x;
+					dL_dxy = dL_dquad * d.x * d.y;
+					dL_dxz = dL_dquad * d.x * d.z;
+					dL_dyy = dL_dquad * d.y * d.y;
+					dL_dyz = dL_dquad * d.y * d.z;
+					dL_dzz = dL_dquad * d.z * d.z;
 				}
+			}
+			
+			// If clamped don't add gradient (Pytorch rules)
+			if (!collected_clamped[j]) {
+				float block_dL_dvalue = cg::reduce(tile, dL_dvalue, cg::plus<float>());
+				if (block.thread_rank() == 0) { atomicAdd(&dL_dvalues[point_idx], dL_dvalue); }
+			}
+			float block_dL_dw = cg::reduce(tile, dL_dw, cg::plus<float>());
+			float block_dL_dmean_x = cg::reduce(tile, dL_dmean_x, cg::plus<float>());
+			float block_dL_dmean_y = cg::reduce(tile, dL_dmean_y, cg::plus<float>());
+			float block_dL_dmean_z = cg::reduce(tile, dL_dmean_z, cg::plus<float>());
+			float block_dL_dxx = cg::reduce(tile, dL_dxx, cg::plus<float>());
+			float block_dL_dxy = cg::reduce(tile, dL_dxy, cg::plus<float>());
+			float block_dL_dxz = cg::reduce(tile, dL_dxz, cg::plus<float>());
+			float block_dL_dyy = cg::reduce(tile, dL_dyy, cg::plus<float>());
+			float block_dL_dyz = cg::reduce(tile, dL_dyz, cg::plus<float>());
+			float block_dL_dzz = cg::reduce(tile, dL_dzz, cg::plus<float>());
 
-                // Gradient for weight terms
-                float dL_dweight = dl_dout * (collected_values[j] / acc_weight - out_cells[cell_id] / acc_weight);
-				float dL_dw = dL_dweight * exp(-0.5f * quad_form);
-				atomicAdd(&dL_dweights[point_idx], dL_dw);
+			if (block.thread_rank() == 0) {
+				atomicAdd(&dL_dweights[point_idx], block_dL_dw);
+				
+				atomicAdd(&dL_dmeans[point_idx].x, block_dL_dmean_x);
+				atomicAdd(&dL_dmeans[point_idx].y, block_dL_dmean_y);
+				atomicAdd(&dL_dmeans[point_idx].z, block_dL_dmean_z);
 
-                float dweight_dquad = -0.5f * weight;
-				float dL_dquad = dL_dweight * dweight_dquad;
-                
-                // Gradients for means
-                float3 dl_dmean;
-                dl_dmean.x = dL_dquad * 2 * -1 *
-                    (collected_conic[j * 6] * d.x + collected_conic[j * 6 + 1] * d.y + collected_conic[j * 6 + 2] * d.z);
-                dl_dmean.y = dL_dquad * 2 * -1 *
-                    (collected_conic[j * 6 + 1] * d.x + collected_conic[j * 6 + 3] * d.y + collected_conic[j * 6 + 4] * d.z);
-                dl_dmean.z = dL_dquad * 2 * -1 *
-                    (collected_conic[j * 6 + 2] * d.x + collected_conic[j * 6 + 4] * d.y + collected_conic[j * 6 + 5] * d.z);
-                
-                atomicAdd(&dL_dmeans[point_idx].x, dl_dmean.x);
-                atomicAdd(&dL_dmeans[point_idx].y, dl_dmean.y);
-                atomicAdd(&dL_dmeans[point_idx].z, dl_dmean.z);
-
-                // Gradients for conic matrix
-                atomicAdd(&dL_dconic[point_idx * 6], dL_dquad * d.x * d.x);      // xx
-                atomicAdd(&dL_dconic[point_idx * 6 + 1], dL_dquad * d.x * d.y);  // xy
-                atomicAdd(&dL_dconic[point_idx * 6 + 2], dL_dquad * d.x * d.z);  // xz
-                atomicAdd(&dL_dconic[point_idx * 6 + 3], dL_dquad * d.y * d.y);  // yy
-                atomicAdd(&dL_dconic[point_idx * 6 + 4], dL_dquad * d.y * d.z);  // yz
-                atomicAdd(&dL_dconic[point_idx * 6 + 5], dL_dquad * d.z * d.z);  // zz
-            }
+				atomicAdd(&dL_dconic[point_idx * 6], block_dL_dxx);
+				atomicAdd(&dL_dconic[point_idx * 6 + 1], block_dL_dxy);
+				atomicAdd(&dL_dconic[point_idx * 6 + 2], block_dL_dxz);
+				atomicAdd(&dL_dconic[point_idx * 6 + 3], block_dL_dyy);
+				atomicAdd(&dL_dconic[point_idx * 6 + 4], block_dL_dyz);
+				atomicAdd(&dL_dconic[point_idx * 6 + 5], block_dL_dzz);
+			}
         }
 	}
 }
@@ -271,7 +303,7 @@ void BACKWARD::preprocess(
 	glm::vec3* dL_dscale,
 	glm::vec4* dL_drot)
 {
-	// Propagate gradients for remaining steps: using dl_dconics
+	// Propagate gradients for remaining steps: using dL_dconics
 	// propagate back to scales and rotations
 	preprocessCUDA<NUM_CHANNELS> << < (P + 255) / 256, 256 >> > (
 		P,
