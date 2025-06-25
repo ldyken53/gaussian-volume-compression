@@ -163,7 +163,7 @@ renderCUDA(
 	// Check if this thread is associated with a valid cell or outside.
 	bool inside = cell.x < num_cells.x && cell.y < num_cells.y && cell.z < num_cells.z;
 	// Done threads can help with fetching, but don't rasterize
-	bool done = !inside || accumulated_weights[cell_id] < 1e-5;
+	bool done = !inside || accumulated_weights[cell_id] <= 1e-5;
 
 	// Load start/end range of IDs to process in bit sorted list.
 	uint2 range = ranges[block.group_index().z * grid.y * grid.x + block.group_index().y * grid.x + block.group_index().x];
@@ -226,7 +226,7 @@ renderCUDA(
 					d.z * (collected_conic[j * 6 + 2] * d.x + collected_conic[j * 6 + 4] * d.y + collected_conic[j * 6 + 5] * d.z)
 				);
 				float power = -0.5 * quad_form;
-				if (power > -14.0 && power < 0.0) {
+				if (power >= -14.0 && power <= 0.0) {
 					float e = exp(power);
 					float weight = collected_weights[j] * e;
 
@@ -261,7 +261,7 @@ renderCUDA(
 			// If clamped don't add gradient (Pytorch rules)
 			if (!collected_clamped[j]) {
 				float block_dL_dvalue = cg::reduce(tile, dL_dvalue, cg::plus<float>());
-				if (block.thread_rank() == 0) { atomicAdd(&dL_dvalues[point_idx], dL_dvalue); }
+				if (block.thread_rank() == 0) { atomicAdd(&dL_dvalues[point_idx], block_dL_dvalue); }
 			}
 			float block_dL_dw = cg::reduce(tile, dL_dw, cg::plus<float>());
 			float block_dL_dmean_x = cg::reduce(tile, dL_dmean_x, cg::plus<float>());
