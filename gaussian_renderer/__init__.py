@@ -51,7 +51,7 @@ def render(
     weights = pc.get_weight
 
     # Rasterize visible Gaussians to cells, obtain their radii
-    out_cells, radii = rasterizer(
+    out_cells, out_weights, radii = rasterizer(
         means3D=means3D,
         scales=scales,
         rotations=rotations,
@@ -63,6 +63,7 @@ def render(
     # They will be excluded from value updates used in the splitting criteria.
     out = {
         "cells": out_cells,
+        "weights": out_weights,
         "visibility_filter": (radii > 0).nonzero(),
         "radii": radii,
     }

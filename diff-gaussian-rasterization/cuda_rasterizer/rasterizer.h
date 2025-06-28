@@ -26,6 +26,7 @@ namespace CudaRasterizer
 			const uint3 num_cells,
 			const float cell_size,
 			float* out_cells,
+			float* out_weights,
 			int* radii = nullptr,
 			bool debug = false);
 
@@ -41,11 +42,13 @@ namespace CudaRasterizer
 			const float* values,
 			const float* weights,
 			const float* out_cells,
+			const float* out_weights,
 			const int* radii,
 			char* geom_buffer,
 			char* binning_buffer,
 			char* img_buffer,
 			const float* dL_dcells,
+			const float* dL_dcell_weights,
 			float* dL_dconic,
 			float* dL_dmean3D,
 			float* dL_dscale,

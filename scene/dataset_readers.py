@@ -17,7 +17,8 @@ def readData(path, fraction):
     global_min = mesh.points.min()
     global_max = mesh.points.max()
     mesh.translate(np.array([-global_min, -global_min, -global_min]), inplace=True)
-    mesh.scale(1.0/(global_max - global_min), inplace=True)
+    mesh.scale(0.98/(global_max - global_min), inplace=True)
+    mesh.translate(np.array([0.01,0.01,0.01]), inplace=True)
 
     num_points = mesh.points.shape[0]
     indices = np.random.choice(num_points, size=int(num_points * fraction), replace=False)

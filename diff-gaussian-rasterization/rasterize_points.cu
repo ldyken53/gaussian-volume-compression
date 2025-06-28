@@ -21,7 +21,7 @@
 		return lambda;
 	}
 
-	std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+	std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 	RasterizeGaussiansCUDA(
 		const torch::Tensor& means3D,
 		const torch::Tensor& scales,
@@ -50,6 +50,7 @@
 	);  
 	auto float_opts = means3D.options().dtype(torch::kFloat32);
 	torch::Tensor out_cells = torch::full({num_cells.x, num_cells.y, num_cells.z}, background, float_opts);
+	torch::Tensor out_weights = torch::full({num_cells.x, num_cells.y, num_cells.z}, background, float_opts);
 	torch::Tensor radii = torch::full({P}, 0, means3D.options().dtype(torch::kInt32));
 	torch::Device device(torch::kCUDA);
 	torch::TensorOptions options(torch::kByte);
@@ -79,10 +80,11 @@
 			num_cells,
 			cell_size,
 			out_cells.contiguous().data<float>(),
+			out_weights.contiguous().data<float>(),
 			radii.contiguous().data<int>(),
 			debug);
 	}
-	return std::make_tuple(rendered, out_cells, radii, geomBuffer, binningBuffer, imgBuffer);
+	return std::make_tuple(rendered, out_cells, out_weights, radii, geomBuffer, binningBuffer, imgBuffer);
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
@@ -94,12 +96,14 @@ RasterizeGaussiansBackwardCUDA(
 	const torch::Tensor& values,
 	const torch::Tensor& weights,
 	const torch::Tensor& out_cells,
+	const torch::Tensor& out_weights,
 	const float scale_modifier,
 	const float min_x, const float min_y, const float min_z, 
 	const float max_x, const float max_y, const float max_z,
 	const float cell_size,
 	const float background,
 	const torch::Tensor& dL_dout_cells,
+	const torch::Tensor& dL_dout_cell_weights,
 	const torch::Tensor& geomBuffer,
 	const int R,
 	const torch::Tensor& binningBuffer,
@@ -137,11 +141,13 @@ RasterizeGaussiansBackwardCUDA(
 		values.contiguous().data<float>(),
 		weights.contiguous().data<float>(),
 		out_cells.contiguous().data<float>(),
+		out_weights.contiguous().data<float>(),
 		radii.contiguous().data<int>(),
 		reinterpret_cast<char*>(geomBuffer.contiguous().data_ptr()),
 		reinterpret_cast<char*>(binningBuffer.contiguous().data_ptr()),
 		reinterpret_cast<char*>(imageBuffer.contiguous().data_ptr()),
 		dL_dout_cells.contiguous().data<float>(),
+		dL_dout_cell_weights.contiguous().data<float>(),
 		dL_dconic.contiguous().data<float>(),  
 		dL_dmeans3D.contiguous().data<float>(),
 		dL_dscales.contiguous().data<float>(),

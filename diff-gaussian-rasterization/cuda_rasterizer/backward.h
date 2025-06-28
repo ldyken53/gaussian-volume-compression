@@ -26,6 +26,7 @@ namespace BACKWARD
 		const float* accumulated_weights,
 		const uint32_t* n_contrib,
 		const float* dL_dcells,
+		const float* dL_dcell_weights,
 		float3* dL_dmean3D,
 		float* dL_dconic,
 		float* dL_dvalue,

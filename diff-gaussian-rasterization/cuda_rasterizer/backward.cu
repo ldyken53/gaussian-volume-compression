@@ -141,6 +141,7 @@ renderCUDA(
 	const float* __restrict__ accumulated_weights,
 	const uint32_t* __restrict__ n_contrib,
 	const float* __restrict__ dL_dcells,
+	const float* __restrict__ dL_dcell_weights,
 	float3* __restrict__ dL_dmeans,
 	float* __restrict__ dL_dconic,
 	float* __restrict__ dL_dvalues,
@@ -180,7 +181,8 @@ renderCUDA(
 	__shared__ float collected_conic[BLOCK_SIZE * 6];
 
 	float acc_weight = accumulated_weights[cell_id];
-	float dL_dout = dL_dcells[cell_id];
+	float dL_doutv = dL_dcells[cell_id];
+	float dL_doutw = dL_dcell_weights[cell_id];
 	
 	// Iterate over batches
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
@@ -231,14 +233,20 @@ renderCUDA(
 					float weight = collected_weights[j] * e;
 
 					// Compute gradients
-					dL_dvalue = dL_dout * weight / acc_weight;
+					dL_dvalue = dL_doutv * weight / acc_weight;
 
 					// Gradient for weight terms
-					float dL_dweight = dL_dout * (collected_values[j] / acc_weight - out_cells[cell_id] / acc_weight);
-					dL_dw = dL_dweight * e;
+					float dLv_dweight = dL_doutv * (collected_values[j] / acc_weight - out_cells[cell_id] / acc_weight);
+					float dLv_dw = dLv_dweight * e;
 
 					float dweight_dquad = -0.5f * weight;
-					float dL_dquad = dL_dweight * dweight_dquad;
+					float dLv_dquad = dLv_dweight * dweight_dquad;
+
+					float dLw_dw = dL_doutw * e;
+					float dLw_dquad = dL_doutw * dweight_dquad;
+
+					dL_dw = dLv_dw + dLw_dw;
+					float dL_dquad = dLw_dquad + dLv_dquad;
 					
 					// Gradients for means
 					dL_dmean_x = dL_dquad * 2 * -1 *
@@ -334,6 +342,7 @@ void BACKWARD::render(
 	const float* accumulated_weights,
 	const uint32_t* n_contrib,
 	const float* dL_dcells,
+	const float* dL_dcell_weights,
 	float3* dL_dmean3D,
 	float* dL_dconic,
 	float* dL_dvalue,
@@ -357,6 +366,7 @@ void BACKWARD::render(
 		accumulated_weights,
 		n_contrib,
 		dL_dcells,
+		dL_dcell_weights,
 		dL_dmean3D,
 		dL_dconic,
 		dL_dvalue,

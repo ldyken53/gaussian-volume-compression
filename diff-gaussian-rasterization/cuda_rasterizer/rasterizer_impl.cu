@@ -112,7 +112,6 @@ CudaRasterizer::GeometryState CudaRasterizer::GeometryState::fromChunk(char*& ch
 CudaRasterizer::ImageState CudaRasterizer::ImageState::fromChunk(char*& chunk, size_t N)
 {
 	ImageState img;
-	obtain(chunk, img.accum_alpha, N, 128);
 	obtain(chunk, img.n_contrib, N, 128);
 	obtain(chunk, img.ranges, N, 128);
 	return img;
@@ -151,6 +150,7 @@ int CudaRasterizer::Rasterizer::forward(
 	const uint3 num_cells,
 	const float cell_size,
 	float* out_cells,
+	float* out_weights,
 	int* radii,
 	bool debug)
 {
@@ -314,7 +314,7 @@ int CudaRasterizer::Rasterizer::forward(
 		geomState.weights,
 		geomState.volumes,
 		geomState.conic,
-		imgState.accum_alpha,
+		out_weights,
 		imgState.n_contrib,
 		out_cells), 
 		debug)
@@ -405,11 +405,13 @@ void CudaRasterizer::Rasterizer::backward(
 	const float* values,
 	const float* weights,
 	const float* out_cells,
+	const float* out_weights,
 	const int* radii,
 	char* geom_buffer,
 	char* binning_buffer,
 	char* img_buffer,
 	const float* dL_dcells,
+	const float* dL_dcell_weights,
 	float* dL_dconic,
 	float* dL_dmean3D,
 	float* dL_dscale,
@@ -455,9 +457,10 @@ void CudaRasterizer::Rasterizer::backward(
 		out_cells,
 		geomState.volumes,
 		geomState.conic,
-		imgState.accum_alpha,
+		out_weights,
 		imgState.n_contrib,
 		dL_dcells,
+		dL_dcell_weights,
 		(float3*)dL_dmean3D,
 		dL_dconic,
 		dL_dvalue,

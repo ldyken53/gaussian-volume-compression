@@ -60,7 +60,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         )
 
         # Invoke C++/CUDA rasterizer
-        num_rendered, cells, radii, geomBuffer, binningBuffer, imgBuffer = (
+        num_rendered, cells, cell_weights, radii, geomBuffer, binningBuffer, imgBuffer = (
             _C.rasterize_gaussians(*args)
         )
         # print(f"Num Rendered: {num_rendered}")
@@ -78,12 +78,13 @@ class _RasterizeGaussians(torch.autograd.Function):
             geomBuffer,
             binningBuffer,
             imgBuffer,
-            cells
+            cells,
+            cell_weights
         )
-        return cells, radii
+        return cells, cell_weights, radii
 
     @staticmethod
-    def backward(ctx, grad_out_cells, _):
+    def backward(ctx, grad_out_cells, grad_out_cell_weights, __):
 
         # Restore necessary values from context
         num_rendered = ctx.num_rendered
@@ -98,7 +99,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             geomBuffer,
             binningBuffer,
             imgBuffer,
-            cells
+            cells,
+            cell_weights
         ) = ctx.saved_tensors
 
         volume_mins_x, volume_mins_y, volume_mins_z = raster_settings.volume_mins
@@ -113,12 +115,14 @@ class _RasterizeGaussians(torch.autograd.Function):
             values,
             weights,
             cells,
+            cell_weights,
             raster_settings.scale_modifier,
             volume_mins_x, volume_mins_y, volume_mins_z,
             volume_maxes_x, volume_maxes_y, volume_maxes_z,
             raster_settings.cell_size,
             raster_settings.bg,
             grad_out_cells,
+            grad_out_cell_weights,
             geomBuffer,
             num_rendered,
             binningBuffer,
