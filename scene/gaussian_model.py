@@ -130,10 +130,14 @@ class GaussianModel:
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
 
         self.mins = [
-            0.0, 0.0, 0.0
+            pcd.points[:,0].min() - 0.01,
+            pcd.points[:,1].min() - 0.01,
+            pcd.points[:,2].min() - 0.01
         ]
         self.maxes = [
-            1.0, 1.0, 1.0
+            pcd.points[:,0].max() + 0.01,
+            pcd.points[:,1].max() + 0.01,
+            pcd.points[:,2].max() + 0.01
         ]
 
         print(

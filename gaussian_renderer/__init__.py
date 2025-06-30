@@ -23,7 +23,7 @@ from scene.gaussian_model import GaussianModel
 def render(
     pc: GaussianModel,
     pipe,
-    cell_size=0.01,
+    cell_count=100,
     bg=-1.0,
     scaling_modifier=1.0,
 ):
@@ -35,7 +35,7 @@ def render(
     raster_settings = GaussianRasterizationSettings(
         volume_mins=pc.mins,
         volume_maxes=pc.maxes,
-        cell_size=cell_size,
+        cell_count=cell_count,
         bg=bg,
         scale_modifier=scaling_modifier,
         debug=pipe.debug,
