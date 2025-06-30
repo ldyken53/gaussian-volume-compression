@@ -17,7 +17,7 @@ __global__ void preprocessCUDA(int P,
 	const float3 volume_mins,
 	const float3 volume_maxes,
 	const uint3 num_cells,
-	const float cell_size,
+	const float3 cell_size,
 	int* radii,
 	float3* means,
 	float* values_out,
@@ -130,9 +130,9 @@ __global__ void preprocessCUDA(int P,
     }
 
 	// Calculate block size in world coordinates
-	const float block_size_x = cell_size * BLOCK_X;
-	const float block_size_y = cell_size * BLOCK_Y;
-	const float block_size_z = cell_size * BLOCK_Z;
+	const float block_size_x = cell_size.x * BLOCK_X;
+	const float block_size_y = cell_size.y * BLOCK_Y;
+	const float block_size_z = cell_size.z * BLOCK_Z;
 
 	// Find which blocks the Gaussian intersects
 	uint3 start_block = make_uint3(
@@ -178,7 +178,7 @@ renderCUDA(
 	const dim3 grid,
 	const float3 volume_mins,
 	const uint3 num_cells,
-	const float cell_size,
+	const float3 cell_size,
 	const float3* __restrict__ means,
 	const float* __restrict__ values,
 	const float* __restrict__ weights,
@@ -194,9 +194,9 @@ renderCUDA(
 	uint3 cell_max = { min(cell_min.x + BLOCK_X, num_cells.x), min(cell_min.y + BLOCK_Y , num_cells.y), min(cell_min.z + BLOCK_Z , num_cells.z) };
 	uint3 cell = { cell_min.x + block.thread_index().x, cell_min.y + block.thread_index().y, cell_min.z + block.thread_index().z  };
 	float3 cell_pos =  make_float3(
-		(static_cast<float>(cell.x) + 0.5) * cell_size + volume_mins.x, 
-		(static_cast<float>(cell.y) + 0.5) * cell_size + volume_mins.y, 
-		(static_cast<float>(cell.z) + 0.5) * cell_size + volume_mins.z
+		static_cast<float>(cell.x) * cell_size.x + volume_mins.x, 
+		static_cast<float>(cell.y) * cell_size.y + volume_mins.y, 
+		static_cast<float>(cell.z) * cell_size.z + volume_mins.z
 	);
 	uint32_t cell_id = cell.z * num_cells.x * num_cells.y + cell.y * num_cells.x + cell.x;
 
@@ -292,7 +292,7 @@ void FORWARD::render(
 	const uint32_t* point_list,
 	const float3 volume_mins,
 	const uint3 num_cells,
-	const float cell_size,
+	const float3 cell_size,
 	const float3* means,
 	const float* values,
 	const float* weights,
@@ -330,7 +330,7 @@ void FORWARD::preprocess(int P,
 	const float3 volume_mins,
 	const float3 volume_maxes,
 	const uint3 num_cells,
-	const float cell_size,
+	const float3 cell_size,
 	int* radii,
 	float3* means,
 	float* values_out,

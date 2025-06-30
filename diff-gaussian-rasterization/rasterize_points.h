@@ -15,7 +15,7 @@ RasterizeGaussiansCUDA(
 	const float scale_modifier,
 	const float min_x, const float min_y, const float min_z, 
 	const float max_x, const float max_y, const float max_z,
-    const float cell_size,
+    const uint cell_count,
 	const float background,
 	const bool debug);
 
@@ -32,7 +32,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const float scale_modifier,
 	const float min_x, const float min_y, const float min_z, 
 	const float max_x, const float max_y, const float max_z,
-	const float cell_size,
+	const uint cell_count,
 	const float background,
 	const torch::Tensor& dL_dout_cells,
 	const torch::Tensor& dL_dout_cell_weights,

@@ -31,7 +31,7 @@
 		const float scale_modifier,
 		const float min_x, const float min_y, const float min_z, 
 		const float max_x, const float max_y, const float max_z,
-		const float cell_size,
+		const uint cell_count,
 		const float background,
 		const bool debug)
 	{
@@ -44,9 +44,9 @@
 	const int P = means3D.size(0);
 
 	const uint3 num_cells = make_uint3(
-		ceil((volume_maxes.x - volume_mins.x) / cell_size),
-		ceil((volume_maxes.y - volume_mins.y) / cell_size),
-		ceil((volume_maxes.z - volume_mins.z) / cell_size)
+		cell_count,
+		cell_count,
+		cell_count
 	);  
 	auto float_opts = means3D.options().dtype(torch::kFloat32);
 	torch::Tensor out_cells = torch::full({num_cells.x, num_cells.y, num_cells.z}, background, float_opts);
@@ -78,7 +78,6 @@
 			volume_mins,
 			volume_maxes,
 			num_cells,
-			cell_size,
 			out_cells.contiguous().data<float>(),
 			out_weights.contiguous().data<float>(),
 			radii.contiguous().data<int>(),
@@ -100,7 +99,7 @@ RasterizeGaussiansBackwardCUDA(
 	const float scale_modifier,
 	const float min_x, const float min_y, const float min_z, 
 	const float max_x, const float max_y, const float max_z,
-	const float cell_size,
+	const uint cell_count,
 	const float background,
 	const torch::Tensor& dL_dout_cells,
 	const torch::Tensor& dL_dout_cell_weights,
@@ -114,9 +113,9 @@ RasterizeGaussiansBackwardCUDA(
 	const float3 volume_mins = make_float3(min_x, min_y, min_z);
 	const float3 volume_maxes = make_float3(max_x, max_y, max_z);
 	const uint3 num_cells = make_uint3(
-		ceil((volume_maxes.x - volume_mins.x) / cell_size),
-		ceil((volume_maxes.y - volume_mins.y) / cell_size),
-		ceil((volume_maxes.z - volume_mins.z) / cell_size)
+		cell_count,
+		cell_count,
+		cell_count
 	);  
 	int M = 0;
 
@@ -136,7 +135,6 @@ RasterizeGaussiansBackwardCUDA(
 		num_cells,
 		volume_mins,
 		volume_maxes,
-		cell_size,
 		rotations.data_ptr<float>(),
 		values.contiguous().data<float>(),
 		weights.contiguous().data<float>(),

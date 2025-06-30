@@ -15,7 +15,7 @@ namespace BACKWARD
 		const uint32_t* point_list,
 		const float3 volume_mins,
 		const uint3 num_cells,
-		const float cell_size,
+		const float3 cell_size,
 		const bool* clamped,
 		const float3* means3D,
 		const float* values,

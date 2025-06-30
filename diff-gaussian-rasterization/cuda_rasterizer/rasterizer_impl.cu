@@ -148,12 +148,17 @@ int CudaRasterizer::Rasterizer::forward(
 	const float3 volume_mins,
 	const float3 volume_maxes,
 	const uint3 num_cells,
-	const float cell_size,
 	float* out_cells,
 	float* out_weights,
 	int* radii,
 	bool debug)
 {
+	const float3 cell_size = make_float3(
+		(volume_maxes.x - volume_mins.x) / float(num_cells.x - 1),
+		(volume_maxes.y - volume_mins.y) / float(num_cells.y - 1),
+		(volume_maxes.z - volume_mins.z) / float(num_cells.z - 1)
+	);
+	
 	// Create CUDA events for timing (only when debug is enabled)
 	cudaEvent_t events[14]; // 7 pairs of start/stop events
 	if (debug) {
@@ -400,7 +405,6 @@ void CudaRasterizer::Rasterizer::backward(
 	const float scale_modifier,
 	const uint3 num_cells,
 	const float3 volume_mins, const float3 volume_maxes,
-	const float cell_size,
 	const float* rotations,
 	const float* values,
 	const float* weights,
@@ -420,6 +424,12 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_dweights,
 	bool debug)
 {
+	const float3 cell_size = make_float3(
+		(volume_maxes.x - volume_mins.x) / float(num_cells.x - 1),
+		(volume_maxes.y - volume_mins.y) / float(num_cells.y - 1),
+		(volume_maxes.z - volume_mins.z) / float(num_cells.z - 1)
+	);
+
 	// Create CUDA events for timing (only when debug is enabled)
 	cudaEvent_t events[4]; // 2 pairs of start/stop events
 	if (debug) {

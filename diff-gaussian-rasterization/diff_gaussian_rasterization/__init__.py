@@ -54,7 +54,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.scale_modifier,
             volume_mins_x, volume_mins_y, volume_mins_z,
             volume_maxes_x, volume_maxes_y, volume_maxes_z,
-            raster_settings.cell_size,
+            raster_settings.cell_count,
             raster_settings.bg,
             raster_settings.debug,
         )
@@ -119,7 +119,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.scale_modifier,
             volume_mins_x, volume_mins_y, volume_mins_z,
             volume_maxes_x, volume_maxes_y, volume_maxes_z,
-            raster_settings.cell_size,
+            raster_settings.cell_count,
             raster_settings.bg,
             grad_out_cells,
             grad_out_cell_weights,
@@ -156,7 +156,7 @@ class _RasterizeGaussians(torch.autograd.Function):
 class GaussianRasterizationSettings(NamedTuple):
     volume_mins: tuple[float, float, float]
     volume_maxes: tuple[float, float, float]
-    cell_size: float
+    cell_count: int
     bg: float
     scale_modifier: float
     debug: bool

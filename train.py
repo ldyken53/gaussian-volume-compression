@@ -7,6 +7,7 @@ from random import randint
 import numpy as np
 
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
 import pyvista as pv
 
@@ -58,10 +59,18 @@ def training(
     ema_loss_for_log = 0.0
 
     # Make ground truth
-    v = np.linspace(0.005, 0.995, 100)
-    x, y, z = np.meshgrid(v, v, v, indexing='ij')
+    cell_count = 100
+    spacing = [
+        (gaussians.maxes[0] - gaussians.mins[0]) / (cell_count - 1),
+        (gaussians.maxes[1] - gaussians.mins[1]) / (cell_count - 1),
+        (gaussians.maxes[2] - gaussians.mins[2]) / (cell_count - 1)
+    ]
+    x = np.linspace(gaussians.mins[0], gaussians.maxes[0], cell_count)
+    y = np.linspace(gaussians.mins[1], gaussians.maxes[1], cell_count)
+    z = np.linspace(gaussians.mins[2], gaussians.maxes[2], cell_count)
+    x, y, z = np.meshgrid(x, y, z, indexing='ij')
     samples = np.vstack([x.ravel(), y.ravel(), z.ravel()]).T
-    samples_3d = samples.reshape(100,100,100, 3)
+    samples_3d = samples.reshape(cell_count, cell_count, cell_count, 3)
     rot = np.rot90(samples_3d, k=1, axes=(2,0))
     samples_tf = np.flip(rot, axis=2)
     samples_tf_flat = samples_tf.reshape(-1, 3)
@@ -69,12 +78,12 @@ def training(
     probed = gt_point_cloud.sample(gaussians.mesh)
     gt_cells = probed.point_data['value']
     gt_cells[probed.point_data['vtkValidPointMask'] == 0] = -1.0
-    gt_cells = gt_cells.reshape(100, 100, 100)
+    gt_cells = gt_cells.reshape(cell_count, cell_count, cell_count)
     print(f"Number of invalid samples: {np.count_nonzero(probed.point_data['vtkValidPointMask'] == 0)}")
-    tensor_to_vtk(gt_cells, "test_gt.vtk")
+    tensor_to_vtk(gt_cells, "test_gt.vtk", spacing)
     gt = torch.tensor(gt_cells.copy()).cuda()
-    gt_weights = probed.point_data['vtkValidPointMask'].copy().reshape(100, 100, 100)
-    tensor_to_vtk(gt_weights, "test_gt_weight.vtk")
+    gt_weights = probed.point_data['vtkValidPointMask'].astype(np.float32).copy().reshape(cell_count, cell_count, cell_count)
+    tensor_to_vtk(gt_weights, "test_gt_weight.vtk", spacing)
     gt_weights = torch.tensor(gt_weights).cuda()
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
@@ -90,7 +99,8 @@ def training(
 
         render_pkg = render(
             gaussians,
-            pipe
+            pipe,
+            cell_count
         )
         cells, weights, visibility_filter, radii = (
             render_pkg["cells"],
@@ -98,9 +108,12 @@ def training(
             render_pkg["visibility_filter"],
             render_pkg["radii"],
         )
-        l1_lv = l1_loss(cells[gt != -1], gt[gt != -1])
+        l1_lv = l1_loss(cells, gt)
+        k = 5  # Adjust this to control decay rate
+        false_negative = torch.exp(-k * weights) * gt_weights
+        # l1_lw = (10 * (1 - torch.exp(-k * weights)) * (1 - gt_weights)).mean()
         l1_lw = l1_loss(weights[gt == -1], gt_weights[gt == -1])
-        loss = 0.5 * l1_lv + 0.5 * l1_lw
+        loss = l1_lv + 0.1 * l1_lw
         loss.backward()
 
         iter_end.record()
@@ -147,10 +160,10 @@ def training(
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
                 cpu_cells = cells.cpu().numpy()
-                tensor_to_vtk(cpu_cells, f"test_{iteration}.vtk")
+                tensor_to_vtk(cpu_cells, f"test_{iteration}.vtk", spacing)
                 cpu_weights = weights.cpu().numpy()
-                tensor_to_vtk(cpu_weights, f"test_{iteration}_weight.vtk")
-
+                tensor_to_vtk(cpu_weights, f"test_{iteration}_weight.vtk", spacing)
+                
             # Densification
             if (iteration <= opt.densify_until_iter and
                 iteration >= opt.densify_from_iter and
