@@ -2,6 +2,7 @@ import os
 import sys
 import uuid
 import json
+import time
 from argparse import ArgumentParser, Namespace
 from random import randint
 import numpy as np
@@ -74,8 +75,11 @@ def training(
     rot = np.rot90(samples_3d, k=1, axes=(2,0))
     samples_tf = np.flip(rot, axis=2)
     samples_tf_flat = samples_tf.reshape(-1, 3)
+    start = time.time()
     gt_point_cloud = pv.PolyData(samples_tf_flat)
     probed = gt_point_cloud.sample(gaussians.mesh)
+    end = time.time()
+    print(f"Time to sample gt: {end - start}")
     gt_cells = probed.point_data['value']
     gt_cells[probed.point_data['vtkValidPointMask'] == 0] = -1.0
     gt_cells = gt_cells.reshape(cell_count, cell_count, cell_count)
@@ -90,6 +94,23 @@ def training(
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
         iter_start.record()
+
+        # if iteration % 1000 == 0:
+        #     start = time.time()
+        #     jitter = np.random.uniform(-0.5, 0.5, samples_tf.shape)
+        #     for i in range(3):
+        #         jitter[:,i] *= spacing[2 - i]
+        #     samples_tf_flat = (samples_tf + jitter).reshape(-1, 3)
+        #     gt_point_cloud = pv.PolyData(samples_tf_flat)
+        #     probed = gt_point_cloud.sample(gaussians.mesh)
+        #     gt_cells = probed.point_data['value']
+        #     gt_cells[probed.point_data['vtkValidPointMask'] == 0] = -1.0
+        #     gt_cells = gt_cells.reshape(cell_count, cell_count, cell_count)
+        #     gt = torch.tensor(gt_cells.copy()).cuda()
+        #     gt_weights = probed.point_data['vtkValidPointMask'].astype(np.float32).copy().reshape(cell_count, cell_count, cell_count)
+        #     gt_weights = torch.tensor(gt_weights).cuda()
+        #     end = time.time()
+        #     print(f"Jitter time: {end - start}")
 
         gaussians.update_learning_rate(iteration)
 
@@ -108,12 +129,12 @@ def training(
             render_pkg["visibility_filter"],
             render_pkg["radii"],
         )
-        l1_lv = l1_loss(cells, gt)
-        k = 5  # Adjust this to control decay rate
+        l1_lv = l1_loss(cells[gt != -1], gt[gt != -1])
+        k = 10  # Adjust this to control decay rate
         false_negative = torch.exp(-k * weights) * gt_weights
-        # l1_lw = (10 * (1 - torch.exp(-k * weights)) * (1 - gt_weights)).mean()
-        l1_lw = l1_loss(weights[gt == -1], gt_weights[gt == -1])
-        loss = l1_lv + 0.1 * l1_lw
+        # lw = ((1 - torch.exp(-k * weights)) * (1 - gt_weights) + false_negative).mean()
+        lw = l1_loss(weights[gt == -1 ], gt_weights[gt == -1])
+        loss = l1_lv
         loss.backward()
 
         iter_end.record()
@@ -131,7 +152,7 @@ def training(
                     "iteration": iteration,
                     "loss": loss.item(),
                     "l_v": l1_lv,
-                    "l_w": l1_lw,
+                    "l_w": lw,
                     "psnr": psnr.item(),
                     "psnr2": psnr2.item(),
                     "num_gaussians": num_gaussians
@@ -146,7 +167,7 @@ def training(
                     {
                         "Loss": f"{ema_loss_for_log:.{5}f}",
                         "L_v": f"{l1_lv:.{5}f}",
-                        "L_w": f"{l1_lw:.{5}f}",
+                        "L_w": f"{lw:.{5}f}",
                         "PSNR": f"{psnr:.{5}f}"
                     }
                 )
@@ -163,7 +184,7 @@ def training(
                 tensor_to_vtk(cpu_cells, f"test_{iteration}.vtk", spacing)
                 cpu_weights = weights.cpu().numpy()
                 tensor_to_vtk(cpu_weights, f"test_{iteration}_weight.vtk", spacing)
-                
+
             # Densification
             if (iteration <= opt.densify_until_iter and
                 iteration >= opt.densify_from_iter and
