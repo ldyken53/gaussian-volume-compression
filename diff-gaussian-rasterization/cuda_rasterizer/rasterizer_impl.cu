@@ -65,6 +65,66 @@ __global__ void duplicateWithKeys(
 	}
 }
 
+__global__ void duplicateWithKeysParallel(
+    int P,
+    const uint* aabbs,
+    const uint32_t* offsets,
+    const uint32_t* blocks_touched,
+    uint32_t* gaussian_keys_unsorted,
+    uint32_t* gaussian_values_unsorted,
+    int total_intersections,
+    dim3 grid)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= total_intersections) return;
+    
+    // Binary search to find which Gaussian this output belongs to
+    // Note: This is a simplified binary search - you may want to use a proper CUDA implementation
+    int left = 0, right = P - 1;
+    int gaussian_id = 0;
+    while (left <= right) {
+        int mid = (left + right) / 2;
+        uint32_t mid_offset = (mid == 0) ? 0 : offsets[mid - 1];
+        if (tid < mid_offset) {
+            right = mid - 1;
+        } else if (tid >= offsets[mid]) {
+            left = mid + 1;
+        } else {
+            gaussian_id = mid;
+            break;
+        }
+    }
+    
+    // Calculate the local index within this Gaussian's outputs
+    int local_idx = (gaussian_id == 0) ? tid : tid - offsets[gaussian_id - 1];
+    
+    // Decode which cell this local_idx corresponds to
+    int cells_per_gaussian = blocks_touched[gaussian_id];
+    uint3 aabb_min = make_uint3(aabbs[gaussian_id * 6], 
+                                 aabbs[gaussian_id * 6 + 1], 
+                                 aabbs[gaussian_id * 6 + 2]);
+    uint3 aabb_size = make_uint3(aabbs[gaussian_id * 6 + 3] - aabb_min.x,
+                                  aabbs[gaussian_id * 6 + 4] - aabb_min.y,
+                                  aabbs[gaussian_id * 6 + 5] - aabb_min.z);
+    
+    // Convert linear index to 3D position within the AABB
+    int z = local_idx / (aabb_size.x * aabb_size.y);
+    int y = (local_idx % (aabb_size.x * aabb_size.y)) / aabb_size.x;
+    int x = local_idx % aabb_size.x;
+    
+    // Calculate actual grid position
+    uint3 cell_pos = make_uint3(
+		aabb_min.x + x,
+		aabb_min.y + y,
+		aabb_min.z + z
+	);
+    
+    // Write the key-value pair
+    gaussian_keys_unsorted[tid] = cell_pos.z * grid.x * grid.y + 
+                                  cell_pos.y * grid.x + cell_pos.x;
+    gaussian_values_unsorted[tid] = gaussian_id;
+}
+
 // Check keys to see if it is at the start/end of one tile's range in 
 // the full sorted list. If yes, write start/end of this tile. 
 // Run once per instanced (duplicated) Gaussian ID.
@@ -266,13 +326,25 @@ int CudaRasterizer::Rasterizer::forward(
 
 	// Key duplication
 	if (debug) cudaEventRecord(events[4]);
-	duplicateWithKeys << <(P + 255) / 256, 256 >> > (
+	// duplicateWithKeys << <(P + 255) / 256, 256 >> > (
+	// 	P,
+	// 	geomState.aabbs,
+	// 	geomState.point_offsets,
+	// 	binningState.point_list_keys_unsorted,
+	// 	binningState.point_list_unsorted,
+	// 	block_grid);
+	int threads = 256;
+	int blocks = (num_intersections + threads - 1) / threads;
+	duplicateWithKeysParallel<<<blocks, threads>>>(
 		P,
 		geomState.aabbs,
 		geomState.point_offsets,
+		geomState.blocks_touched,
 		binningState.point_list_keys_unsorted,
 		binningState.point_list_unsorted,
-		block_grid);
+		num_intersections,
+		block_grid
+	);
 	CHECK_CUDA(, debug)
 	if (debug) cudaEventRecord(events[5]);
 
