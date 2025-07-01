@@ -129,12 +129,12 @@ def training(
             render_pkg["visibility_filter"],
             render_pkg["radii"],
         )
-        l1_lv = l1_loss(cells[gt != -1], gt[gt != -1])
+        l1_lv = l1_loss(cells, gt)
         k = 10  # Adjust this to control decay rate
-        false_negative = torch.exp(-k * weights) * gt_weights
-        # lw = ((1 - torch.exp(-k * weights)) * (1 - gt_weights) + false_negative).mean()
-        lw = l1_loss(weights[gt == -1 ], gt_weights[gt == -1])
-        loss = l1_lv
+        false_negative = (torch.exp(-k * weights) * gt_weights).mean()
+        false_positive = ((1 - torch.exp(-k * weights)) * (1 - gt_weights)).mean()
+        # lw = l1_loss(weights[gt == -1 ], gt_weights[gt == -1])
+        loss = l1_lv + false_positive + 0.0001 * false_negative
         loss.backward()
 
         iter_end.record()
@@ -152,7 +152,7 @@ def training(
                     "iteration": iteration,
                     "loss": loss.item(),
                     "l_v": l1_lv,
-                    "l_w": lw,
+                    "false_positive": false_positive,
                     "psnr": psnr.item(),
                     "psnr2": psnr2.item(),
                     "num_gaussians": num_gaussians
@@ -167,7 +167,7 @@ def training(
                     {
                         "Loss": f"{ema_loss_for_log:.{5}f}",
                         "L_v": f"{l1_lv:.{5}f}",
-                        "L_w": f"{lw:.{5}f}",
+                        "L_w": f"{false_positive:.{5}f}",
                         "PSNR": f"{psnr:.{5}f}"
                     }
                 )
@@ -191,7 +191,7 @@ def training(
                 iteration % opt.densification_interval == 0
             ):
                 cpu_cells = cells.cpu().numpy()
-                print(f"Number of cells that weren't seen: {np.count_nonzero(np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1))}")
+                print(f"Not seen: {np.count_nonzero(np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1))}, false positive: {np.count_nonzero(np.logical_and(cpu_cells.ravel() != -1, gt_cells.ravel() == -1))}")
                 mse = torch.mean((cells - gt) ** 2)
                 psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
                 mse2 = torch.mean((cells[torch.logical_and(cells != -1, gt != -1)] - gt[torch.logical_and(cells != -1, gt != -1)]) ** 2)
