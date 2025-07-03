@@ -35,7 +35,7 @@ def training(
     gaussians = GaussianModel()
     scene = Scene(dataset, gaussians, load_iteration=-1)
     # Make ground truth
-    cell_count = 100
+    cell_count = 200
     spacing = [
         (gaussians.maxes[0] - gaussians.mins[0]) / (cell_count - 1),
         (gaussians.maxes[1] - gaussians.mins[1]) / (cell_count - 1),
@@ -55,11 +55,25 @@ def training(
     gt_cells = probed.point_data['value']
     gt_cells[probed.point_data['vtkValidPointMask'] == 0] = -1.0
     gt_cells = gt_cells.reshape(cell_count, cell_count, cell_count)
+    gt = torch.tensor(gt_cells.copy()).cuda()
+    gt_weights = probed.point_data['vtkValidPointMask'].astype(np.float32).copy().reshape(cell_count, cell_count, cell_count)
+    gt_weights = torch.tensor(gt_weights).cuda()
+
+    jitter = np.random.uniform(-0.5, 0.5, samples_tf.shape)
+    for i in range(3):
+        jitter[...,i] *= spacing[i]
+    samples_tf_flat = (samples_tf + jitter).reshape(-1, 3)
+    gt_point_cloud = pv.PolyData(samples_tf_flat)
+    probed = gt_point_cloud.sample(gaussians.mesh)
+    gt_cells = probed.point_data['value']
+    gt_cells[probed.point_data['vtkValidPointMask'] == 0] = -1.0
+    gt_cells = gt_cells.reshape(cell_count, cell_count, cell_count)
     tensor_to_vtk(gt_cells, "test_gt.vtk", spacing)
     gt = torch.tensor(gt_cells.copy()).cuda()
     gt_weights = probed.point_data['vtkValidPointMask'].astype(np.float32).copy().reshape(cell_count, cell_count, cell_count)
-    tensor_to_vtk(gt_weights, "test_gt_weight.vtk", spacing)
     gt_weights = torch.tensor(gt_weights).cuda()
+    tensor_to_vtk(gt_weights, "test_gt_weight.vtk", spacing)
+
     
     # print(samples.shape)
     # print(samples)
@@ -73,7 +87,8 @@ def training(
     render_pkg = render(
         gaussians,
         pipe,
-        cell_count
+        torch.tensor(jitter.ravel(), dtype=torch.float, device="cuda").requires_grad_(False),
+        cell_count,
     )
     cells, weights, visibility_filter, radii = (
         render_pkg["cells"],
@@ -94,7 +109,7 @@ def training(
     print(f"L2 loss: {mse}")
     print(f"PSNR: {psnr}")
     print(f"PSNR without false positives/negatives: {psnr2}")
-    tensor_to_vtk(cells.detach().cpu().numpy(), f"test.vtk")
+    tensor_to_vtk(cells.detach().cpu().numpy(), f"test.vtk", spacing)
 
 if __name__ == "__main__":
     window = create_window()

@@ -41,6 +41,7 @@ namespace FORWARD
 		const float3 volume_mins,
 		const uint3 num_cells,
 		const float3 cell_size,
+		const float* jitter,
 		const float3* means,
 		const float* values,
 		const float* weights,

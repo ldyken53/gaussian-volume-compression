@@ -23,6 +23,7 @@ from scene.gaussian_model import GaussianModel
 def render(
     pc: GaussianModel,
     pipe,
+    jitter,
     cell_count=100,
     bg=-1.0,
     scaling_modifier=1.0,
@@ -56,7 +57,8 @@ def render(
         scales=scales,
         rotations=rotations,
         values=values,
-        weights=weights
+        weights=weights,
+        jitter=jitter
     )
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.

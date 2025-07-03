@@ -18,6 +18,7 @@ def rasterize_gaussians(
     rotations,
     values,
     weights,
+    jitter,
     raster_settings,
 ):
     return _RasterizeGaussians.apply(
@@ -26,6 +27,7 @@ def rasterize_gaussians(
         rotations,
         values,
         weights,
+        jitter,
         raster_settings,
     )
 
@@ -39,6 +41,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         rotations,
         values,
         weights,
+        jitter,
         raster_settings,
     ):
         volume_mins_x, volume_mins_y, volume_mins_z = raster_settings.volume_mins
@@ -51,6 +54,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             rotations,
             values,
             weights,
+            jitter,
             raster_settings.scale_modifier,
             volume_mins_x, volume_mins_y, volume_mins_z,
             volume_maxes_x, volume_maxes_y, volume_maxes_z,
@@ -74,6 +78,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             rotations,
             values,
             weights,
+            jitter,
             radii,
             geomBuffer,
             binningBuffer,
@@ -95,6 +100,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             rotations,
             values,
             weights,
+            jitter,
             radii,
             geomBuffer,
             binningBuffer,
@@ -114,6 +120,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             rotations,
             values,
             weights,
+            jitter,
             cells,
             cell_weights,
             raster_settings.scale_modifier,
@@ -148,6 +155,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             grad_values,
             grad_weights,
             None,
+            None
         )
 
         return grads
@@ -173,7 +181,8 @@ class GaussianRasterizer(nn.Module):
         scales=None,
         rotations=None,
         values=None,
-        weights=None
+        weights=None,
+        jitter=None
     ):
         raster_settings = self.raster_settings
 
@@ -196,6 +205,8 @@ class GaussianRasterizer(nn.Module):
             scales = torch.Tensor([])
         if rotations is None:
             rotations = torch.Tensor([])
+        if jitter is None:
+            jitter = torch.Tensor([])
 
         # Invoke C++/CUDA rasterization routine
         return rasterize_gaussians(
@@ -204,5 +215,6 @@ class GaussianRasterizer(nn.Module):
             rotations,
             values,
             weights,
+            jitter,
             raster_settings,
         )

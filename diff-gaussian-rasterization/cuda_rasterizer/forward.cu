@@ -180,6 +180,7 @@ renderCUDA(
 	const float3 volume_mins,
 	const uint3 num_cells,
 	const float3 cell_size,
+	const float* __restrict__ jitter,
 	const float3* __restrict__ means,
 	const float* __restrict__ values,
 	const float* __restrict__ weights,
@@ -194,12 +195,12 @@ renderCUDA(
 	uint3 cell_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y, block.group_index().z * BLOCK_Z};
 	uint3 cell_max = { min(cell_min.x + BLOCK_X, num_cells.x), min(cell_min.y + BLOCK_Y , num_cells.y), min(cell_min.z + BLOCK_Z , num_cells.z) };
 	uint3 cell = { cell_min.x + block.thread_index().x, cell_min.y + block.thread_index().y, cell_min.z + block.thread_index().z  };
-	float3 cell_pos =  make_float3(
-		static_cast<float>(cell.x) * cell_size.x + volume_mins.x, 
-		static_cast<float>(cell.y) * cell_size.y + volume_mins.y, 
-		static_cast<float>(cell.z) * cell_size.z + volume_mins.z
-	);
 	uint32_t cell_id = cell.z * num_cells.x * num_cells.y + cell.y * num_cells.x + cell.x;
+	float3 cell_pos =  make_float3(
+		static_cast<float>(cell.x) * cell_size.x + volume_mins.x + jitter[cell_id * 3], 
+		static_cast<float>(cell.y) * cell_size.y + volume_mins.y + jitter[cell_id * 3 + 1], 
+		static_cast<float>(cell.z) * cell_size.z + volume_mins.z + jitter[cell_id * 3 + 2]
+	);
 
 	// Check if this thread is associated with a valid cell or outside.
 	bool inside = cell.x < num_cells.x && cell.y < num_cells.y && cell.z < num_cells.z;
@@ -294,6 +295,7 @@ void FORWARD::render(
 	const float3 volume_mins,
 	const uint3 num_cells,
 	const float3 cell_size,
+	const float* jitter,
 	const float3* means,
 	const float* values,
 	const float* weights,
@@ -310,6 +312,7 @@ void FORWARD::render(
 		volume_mins,
 		num_cells,
 		cell_size,
+		jitter,
 		means,
 		values,
 		weights,

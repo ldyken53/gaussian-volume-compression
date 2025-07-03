@@ -16,6 +16,7 @@ namespace BACKWARD
 		const float3 volume_mins,
 		const uint3 num_cells,
 		const float3 cell_size,
+		const float* jitter,
 		const bool* clamped,
 		const float3* means3D,
 		const float* values,
