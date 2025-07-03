@@ -1,6 +1,4 @@
-import os
 import sys
-import uuid
 from argparse import ArgumentParser, Namespace
 from random import randint
 import numpy as np
@@ -8,9 +6,10 @@ import numpy as np
 import torch
 from tqdm import tqdm
 import piq
+import pyvista as pv
 
 from arguments import ModelParams, OptimizationParams, PipelineParams
-from gaussian_renderer import network_gui, render
+from gaussian_renderer import render
 from scene import GaussianModel, Scene
 from utils.debug_utils import tensor_to_vtk
 from utils.general_utils import get_expon_lr_func, safe_state
@@ -32,61 +31,69 @@ def training(
     opt,
     pipe,
 ):
-    first_iter = 0
+    
     gaussians = GaussianModel()
-    scene = Scene(dataset, gaussians, load_iteration=-1, normalize=True)
-
+    scene = Scene(dataset, gaussians, load_iteration=-1)
     # Make ground truth
-    cell_size = 0.02
-    num_cells = [
-        int(np.ceil((gaussians.maxes[0] - gaussians.mins[0]) / cell_size)),
-        int(np.ceil((gaussians.maxes[1] - gaussians.mins[1]) / cell_size)),
-        int(np.ceil((gaussians.maxes[2] - gaussians.mins[2]) / cell_size))
+    cell_count = 100
+    spacing = [
+        (gaussians.maxes[0] - gaussians.mins[0]) / (cell_count - 1),
+        (gaussians.maxes[1] - gaussians.mins[1]) / (cell_count - 1),
+        (gaussians.maxes[2] - gaussians.mins[2]) / (cell_count - 1)
     ]
-    v1 = np.flip(np.arange(gaussians.mins[0] + cell_size/2, 
-                      gaussians.mins[0] + cell_size * num_cells[0],
-                      cell_size))
-    v2 = np.flip(np.arange(gaussians.mins[1] + cell_size/2, 
-                      gaussians.mins[1] + cell_size * num_cells[1],
-                      cell_size))
-    v3 = np.arange(gaussians.mins[2] + cell_size/2, 
-                      gaussians.mins[2] + cell_size * num_cells[2],
-                      cell_size)
-    print(gaussians._xyz.detach().cpu().numpy().shape)
-    print(v1.shape)
-    print(num_cells)
-    z, y, x = np.meshgrid(v3, v2, v1, indexing='ij')
-    samples = np.stack((x.ravel(), y.ravel(), z.ravel()), axis=1)
-    # print(x)
+    x = np.linspace(gaussians.mins[0], gaussians.maxes[0], cell_count)
+    y = np.linspace(gaussians.mins[1], gaussians.maxes[1], cell_count)
+    z = np.linspace(gaussians.mins[2], gaussians.maxes[2], cell_count)
+    x, y, z = np.meshgrid(x, y, z, indexing='ij')
+    samples = np.vstack([x.ravel(), y.ravel(), z.ravel()]).T
+    samples_3d = samples.reshape(cell_count, cell_count, cell_count, 3)
+    rot = np.rot90(samples_3d, k=1, axes=(2,0))
+    samples_tf = np.flip(rot, axis=2)
+    samples_tf_flat = samples_tf.reshape(-1, 3)
+    gt_point_cloud = pv.PolyData(samples_tf_flat)
+    probed = gt_point_cloud.sample(gaussians.mesh)
+    gt_cells = probed.point_data['value']
+    gt_cells[probed.point_data['vtkValidPointMask'] == 0] = -1.0
+    gt_cells = gt_cells.reshape(cell_count, cell_count, cell_count)
+    tensor_to_vtk(gt_cells, "test_gt.vtk", spacing)
+    gt = torch.tensor(gt_cells.copy()).cuda()
+    gt_weights = probed.point_data['vtkValidPointMask'].astype(np.float32).copy().reshape(cell_count, cell_count, cell_count)
+    tensor_to_vtk(gt_weights, "test_gt_weight.vtk", spacing)
+    gt_weights = torch.tensor(gt_weights).cuda()
+    
     # print(samples.shape)
     # print(samples)
-    gt_cells = gaussians.interpolator(samples).reshape(num_cells)
     # print(gt_cells.shape)
     # print(gt_cells)
     # flipped_tensor = np.flip(gt_cells, axis=1)
     # rotated_tensor = np.rot90(gt_cells, k=1, axes=(2, 0))
-    tensor_to_vtk(gt_cells, "test_gt.vtk")
-    gt = torch.tensor(gt_cells.copy()).cuda()
+
 
     pipe.debug = True
     render_pkg = render(
         gaussians,
         pipe,
-        cell_size
+        cell_count
     )
-    cells, visibility_filter, radii = (
+    cells, weights, visibility_filter, radii = (
         render_pkg["cells"],
+        render_pkg["weights"],
         render_pkg["visibility_filter"],
         render_pkg["radii"],
     )
-    print(cells.shape)
 
     l1_l = l1_loss(cells, gt)
     mse = torch.mean((cells - gt) ** 2)
     psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
+    print(f"Percent invalid samples: {np.count_nonzero(probed.point_data['vtkValidPointMask'] == 0) / cell_count ** 3}")
+    print(f"False negative percent: {torch.count_nonzero(torch.logical_and(cells == -1, gt != -1)) / cell_count ** 3}")
+    print(f"false positive percent: {torch.count_nonzero(torch.logical_and(cells != -1, gt == -1)) / cell_count ** 3}")
+    mse2 = torch.mean((cells[torch.logical_and(gt != -1, cells != -1)] - gt[torch.logical_and(gt != -1, cells != -1)]) ** 2)
+    psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
     print(f"L1 loss: {l1_l.item()}")
     print(f"L2 loss: {mse}")
     print(f"PSNR: {psnr}")
+    print(f"PSNR without false positives/negatives: {psnr2}")
     tensor_to_vtk(cells.detach().cpu().numpy(), f"test.vtk")
 
 if __name__ == "__main__":
