@@ -93,7 +93,8 @@ __global__ void preprocessCUDA(int P,
     conic[idx * 6 + 5] = (a * d - b * b) * det_inv;
 
 	// Scale S by 3 to include up to three std from Gaussian position
-	const float m = 3.0;
+	// const float m = 3.0;
+	float m = sqrtf(-2 * logf((0.1 * WEIGHT_CUTOFF) / weights[idx]));
 	const float3 scaled_S = { S[0][0] * m, S[1][1] * m, S[2][2] * m };
 
  	// Create array for corner computations
@@ -273,7 +274,7 @@ renderCUDA(
 	{
 		// This both gives a dropoff where we have to have a certain weight to set a value
 		// and prevents numerical issues of dividing by something close to 0
-		if (accumulated_weight > 1e-5) {
+		if (accumulated_weight > WEIGHT_CUTOFF) {
 			out_cells[cell_id] = accumulated_value / accumulated_weight;
 			accumulated_weights[cell_id] = accumulated_weight;
 			n_contrib[cell_id] = n_contributor;

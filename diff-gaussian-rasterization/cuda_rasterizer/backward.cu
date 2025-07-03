@@ -164,7 +164,7 @@ renderCUDA(
 	// Check if this thread is associated with a valid cell or outside.
 	bool inside = cell.x < num_cells.x && cell.y < num_cells.y && cell.z < num_cells.z;
 	// Done threads can help with fetching, but don't rasterize
-	bool done = !inside || accumulated_weights[cell_id] <= 1e-5;
+	bool done = !inside || accumulated_weights[cell_id] <= WEIGHT_CUTOFF;
 
 	// Load start/end range of IDs to process in bit sorted list.
 	uint2 range = ranges[block.group_index().z * grid.y * grid.x + block.group_index().y * grid.x + block.group_index().x];
