@@ -44,7 +44,7 @@ class Scene:
                     "iteration_" + str(self.loaded_iter),
                     "point_cloud.ply",
                 ),
-                pcd,
+                mesh,
                 normalize,
                 args.train_test_exp,
             )

@@ -262,7 +262,7 @@ class GaussianModel:
         optimizable_tensors = self.replace_tensor_to_optimizer(weights_new, "weight")
         self._weight = optimizable_tensors["weight"]
 
-    def load_ply(self, path, pcd, normalize=False, use_train_test_exp=False):
+    def load_ply(self, path, mesh, normalize=False, use_train_test_exp=False):
         plydata = PlyData.read(path)
         print(
             f"Number of points at initialisation : {plydata.elements[0]['x'].shape[0]}"
@@ -279,18 +279,17 @@ class GaussianModel:
             xyz[:,0] = (xyz[:,0] + 1) / 2
             xyz[:,1] = (xyz[:,1] + 1) / 2
             xyz[:,2] = (xyz[:,2] - 2) / 2
+        xmin, xmax, ymin, ymax, zmin, zmax = mesh.bounds
         self.mins = [
-            xyz[:,0].min(),
-            xyz[:,1].min(),
-            xyz[:,2].min()
+            xmin - 0.01,
+            ymin - 0.01,
+            zmin - 0.01
         ]
         self.maxes = [
-            xyz[:,0].max(),
-            xyz[:,1].max(),
-            xyz[:,2].max()
+            xmax + 0.01,
+            ymax + 0.01,
+            zmax + 0.01
         ]
-        # self.mins = [0,0,0]
-        # self.maxes = [1,1,1]
         print(self.mins)
         print(self.maxes)
         weights = np.asarray(plydata.elements[0]["weight"])[..., np.newaxis]
@@ -332,6 +331,7 @@ class GaussianModel:
         self._values = nn.Parameter(
             torch.tensor(values, dtype=torch.float, device="cuda").requires_grad_(True)
         )
+        self.mesh = mesh
 
         self.last_interpolated_xyz = self._xyz.clone()
         self.interpolation_mask = np.full(len(self._values), True)
