@@ -10,6 +10,8 @@
 #include <cub/device/device_radix_sort.cuh>
 #define GLM_FORCE_CUDA
 #include <glm/glm.hpp>
+#define CUBQL_GPU_BUILDER_IMPLEMENTATION 1
+#include <cuBQL/bvh.h>
 
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
@@ -270,6 +272,8 @@ int CudaRasterizer::Rasterizer::forward(
 		geomState.blocks_touched
 	), debug)
 	if (debug) cudaEventRecord(events[1]);
+
+	cuBQL::bvh3f bvh;
 
 	// Prefix sum computation
 	if (debug) cudaEventRecord(events[2]);
