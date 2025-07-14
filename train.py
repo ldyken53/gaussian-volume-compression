@@ -60,7 +60,7 @@ def training(
     ema_loss_for_log = 0.0
 
     # Make ground truth
-    cell_count = 100
+    cell_count = 50
     spacing = [
         (gaussians.maxes[0] - gaussians.mins[0]) / (cell_count - 1),
         (gaussians.maxes[1] - gaussians.mins[1]) / (cell_count - 1),
@@ -96,20 +96,20 @@ def training(
     for iteration in range(first_iter, opt.iterations + 1):
         iter_start.record()
 
-        # if iteration % 10 == 0:
-        #     jitter = np.random.uniform(-0.5, 0.5, samples_tf.shape)
-        #     for i in range(3):
-        #         jitter[...,i] *= spacing[i]
-        #     jitter_cuda = torch.tensor(jitter.ravel(), dtype=torch.float, device="cuda").requires_grad_(False)
-        #     samples_tf_flat = (samples_tf + jitter).reshape(-1, 3)
-        #     gt_point_cloud = pv.PolyData(samples_tf_flat)
-        #     probed = gt_point_cloud.sample(gaussians.mesh)
-        #     gt_cells = probed.point_data['value']
-        #     gt_cells[probed.point_data['vtkValidPointMask'] == 0] = -1.0
-        #     gt_cells = gt_cells.reshape(cell_count, cell_count, cell_count)
-        #     gt = torch.tensor(gt_cells.copy()).cuda()
-        #     gt_weights = probed.point_data['vtkValidPointMask'].astype(np.float32).copy().reshape(cell_count, cell_count, cell_count)
-        #     gt_weights = torch.tensor(gt_weights).cuda()
+        if iteration % 100 == 0:
+            jitter = np.random.uniform(-0.5, 0.5, samples_tf.shape)
+            for i in range(3):
+                jitter[...,i] *= spacing[i]
+            jitter_cuda = torch.tensor(jitter.ravel(), dtype=torch.float, device="cuda").requires_grad_(False)
+            samples_tf_flat = (samples_tf + jitter).reshape(-1, 3)
+            gt_point_cloud = pv.PolyData(samples_tf_flat)
+            probed = gt_point_cloud.sample(gaussians.mesh)
+            gt_cells = probed.point_data['value']
+            gt_cells[probed.point_data['vtkValidPointMask'] == 0] = -1.0
+            gt_cells = gt_cells.reshape(cell_count, cell_count, cell_count)
+            gt = torch.tensor(gt_cells.copy()).cuda()
+            gt_weights = probed.point_data['vtkValidPointMask'].astype(np.float32).copy().reshape(cell_count, cell_count, cell_count)
+            gt_weights = torch.tensor(gt_weights).cuda()
 
         gaussians.update_learning_rate(iteration)
 
@@ -131,7 +131,7 @@ def training(
         )
         l1_lv = l1_loss(cells, gt)
         k = 10  # Adjust this to control decay rate
-        false_negative = (0.1 * torch.exp(-k * weights[gt != -1])).mean()
+        false_negative = (10 * torch.exp(-k * weights[gt != -1])).mean()
         false_positive = (1000 * (1 - torch.exp(-k * weights[gt == -1]))).mean()
         # false_positive = l1_loss(weights[gt == -1 ], gt_weights[gt == -1])
         loss = l1_lv + false_positive + false_negative
@@ -258,7 +258,7 @@ if __name__ == "__main__":
         "--test_iterations", nargs="+", type=int, default=[7_000, 30_000]
     )
     parser.add_argument(
-        "--save_iterations", nargs="+", type=int, default=[4_000, 8_000]
+        "--save_iterations", nargs="+", type=int, default=[2_000, 4_000, 8_000, 16_000]
     )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--log_to_file", action="store_true")

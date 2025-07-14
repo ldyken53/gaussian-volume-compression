@@ -139,6 +139,16 @@ class GaussianModel:
             pcd.points[:,1].max() + 0.01,
             pcd.points[:,2].max() + 0.01
         ]
+        # self.mins = [
+        #     pcd.points[:,0].min(),
+        #     pcd.points[:,1].min(),
+        #     pcd.points[:,2].min()
+        # ]
+        # self.maxes = [
+        #     pcd.points[:,0].max(),
+        #     pcd.points[:,1].max(),
+        #     pcd.points[:,2].max()
+        # ]
 
         print(
             f"Number of points at initialisation : {fused_point_cloud.shape[0]}"
@@ -290,6 +300,16 @@ class GaussianModel:
             ymax + 0.01,
             zmax + 0.01
         ]
+        # self.mins = [
+        #     xmin,
+        #     ymin,
+        #     zmin
+        # ]
+        # self.maxes = [
+        #     xmax,
+        #     ymax,
+        #     zmax
+        # ]
         print(self.mins)
         print(self.maxes)
         weights = np.asarray(plydata.elements[0]["weight"])[..., np.newaxis]
