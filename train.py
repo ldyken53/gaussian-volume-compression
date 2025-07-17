@@ -14,6 +14,7 @@ import pyvista as pv
 
 from arguments import ModelParams, OptimizationParams, PipelineParams
 from gaussian_renderer import render
+from gpu_mesh_sampling import gpu_sample
 from scene import GaussianModel, Scene
 from utils.debug_utils import tensor_to_vtk, analyze_array
 from utils.general_utils import get_expon_lr_func, safe_state
@@ -76,40 +77,48 @@ def training(
     samples_tf = np.flip(rot, axis=2)
     samples_tf_flat = samples_tf.reshape(-1, 3)
     start = time.time()
-    gt_point_cloud = pv.PolyData(samples_tf_flat)
-    probed = gt_point_cloud.sample(gaussians.mesh)
+    num_jitters = 1000
+    big_samples = np.tile(samples_tf_flat, (num_jitters, 1))
+    big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
+    big_jitter *= np.array(spacing)[None, :]
+    big_samples = big_samples + big_jitter
+    big_gt = gpu_sample(
+        gaussians.mesh.points, 
+        gaussians.mesh.cell_connectivity.astype(np.int64),
+        gaussians.mesh.point_data['value'],
+        big_samples
+    )
+    big_gt = big_gt.reshape(num_jitters, cell_count**3)
+    big_gt_weights = big_gt.copy()
+    big_gt_weights[big_gt_weights != -1] = 1
+    big_gt_weights[big_gt_weights == -1] = 0
+    big_samples = big_samples.reshape(num_jitters, cell_count**3, 3)
+    big_jitter = big_jitter.reshape(num_jitters, cell_count**3, 3)
     end = time.time()
     print(f"Time to sample gt: {end - start}")
-    gt_cells = probed.point_data['value']
-    gt_cells[probed.point_data['vtkValidPointMask'] == 0] = -1.0
-    gt_cells = gt_cells.reshape(cell_count, cell_count, cell_count)
-    print(f"Number of invalid samples: {np.count_nonzero(probed.point_data['vtkValidPointMask'] == 0)}")
+    gt_cells = big_gt[0].reshape(cell_count, cell_count, cell_count)
+    print(f"Number of invalid samples: {np.count_nonzero(gt_cells == -1)}")
     tensor_to_vtk(gt_cells, "test_gt.vtk", spacing)
-    gt = torch.tensor(gt_cells.copy()).cuda()
-    gt_weights = probed.point_data['vtkValidPointMask'].astype(np.float32).copy().reshape(cell_count, cell_count, cell_count)
+    gt = torch.tensor(gt_cells).cuda()
+    gt_weights = big_gt_weights[0].reshape(cell_count, cell_count, cell_count)
     tensor_to_vtk(gt_weights, "test_gt_weight.vtk", spacing)
     gt_weights = torch.tensor(gt_weights).cuda()
-    jitter_cuda = torch.tensor(np.zeros(samples_tf.shape).ravel(), dtype=torch.float, device="cuda").requires_grad_(False)
+    jitter_cuda = torch.tensor(big_jitter[0].ravel(), dtype=torch.float, device="cuda")
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
         iter_start.record()
 
-        if iteration % 100 == 0:
-            jitter = np.random.uniform(-0.5, 0.5, samples_tf.shape)
-            for i in range(3):
-                jitter[...,i] *= spacing[i]
-            jitter_cuda = torch.tensor(jitter.ravel(), dtype=torch.float, device="cuda").requires_grad_(False)
-            samples_tf_flat = (samples_tf + jitter).reshape(-1, 3)
-            gt_point_cloud = pv.PolyData(samples_tf_flat)
-            probed = gt_point_cloud.sample(gaussians.mesh)
-            gt_cells = probed.point_data['value']
-            gt_cells[probed.point_data['vtkValidPointMask'] == 0] = -1.0
-            gt_cells = gt_cells.reshape(cell_count, cell_count, cell_count)
-            gt = torch.tensor(gt_cells.copy()).cuda()
-            gt_weights = probed.point_data['vtkValidPointMask'].astype(np.float32).copy().reshape(cell_count, cell_count, cell_count)
+        if iteration % 1 == 0:
+            jit_idx = np.random.randint(0, num_jitters)
+            jitter = big_jitter[jit_idx]
+            jitter_cuda = torch.tensor(jitter.ravel(), dtype=torch.float, device="cuda")
+            gt_cells = big_gt[jit_idx].reshape(cell_count, cell_count, cell_count)
+            gt = torch.tensor(gt_cells).cuda()
+            gt_weights = big_gt_weights[jit_idx].reshape(cell_count, cell_count, cell_count)
             gt_weights = torch.tensor(gt_weights).cuda()
+            samples_tf_flat = big_samples[jit_idx]
 
         gaussians.update_learning_rate(iteration)
 
@@ -258,7 +267,7 @@ if __name__ == "__main__":
         "--test_iterations", nargs="+", type=int, default=[7_000, 30_000]
     )
     parser.add_argument(
-        "--save_iterations", nargs="+", type=int, default=[2_000, 4_000, 8_000, 16_000]
+        "--save_iterations", nargs="+", type=int, default=[1, 2_000, 4_000, 8_000, 16_000]
     )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--log_to_file", action="store_true")

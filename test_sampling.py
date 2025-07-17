@@ -3,7 +3,7 @@ import sys
 import time
 import numpy as np
 import pyvista as pv
-from gpu_mesh_sampling import test_sample
+from gpu_mesh_sampling import gpu_sample
 
 def main():
     if len(sys.argv) != 2:
@@ -27,7 +27,7 @@ def main():
     # ————————————————————————————————
     # 2) Build a 10×10×10 grid of points in [0,1]^3
     t2_start = time.perf_counter()
-    N = 500
+    N = 5
     coords = np.linspace(0.0, 1.0, N)
     X, Y, Z = np.meshgrid(coords, coords, coords, indexing='ij')
     samps = np.column_stack((X.ravel(), Y.ravel(), Z.ravel()))
@@ -39,7 +39,7 @@ def main():
     pts = mesh.points
     conn = mesh.cell_connectivity.astype(np.int64)
     values = mesh.point_data['value']
-    vals = test_sample(pts, conn, values, samps)
+    vals = gpu_sample(pts, conn, values, samps)
     print(np.count_nonzero(vals == -1) / vals.shape[0])
 
     # ————————————————————————————————
