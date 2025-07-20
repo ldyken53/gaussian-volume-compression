@@ -44,6 +44,7 @@ def training(
     fraction,
     min_weight
 ):
+    vtk_files = []
     log_data = []
     first_iter = 0
     prepare_output(dataset)
@@ -61,7 +62,7 @@ def training(
     ema_loss_for_log = 0.0
 
     # Make ground truth
-    cell_count = 50
+    cell_count = 100
     spacing = [
         (gaussians.maxes[0] - gaussians.mins[0]) / (cell_count - 1),
         (gaussians.maxes[1] - gaussians.mins[1]) / (cell_count - 1),
@@ -77,10 +78,11 @@ def training(
     samples_tf = np.flip(rot, axis=2)
     samples_tf_flat = samples_tf.reshape(-1, 3)
     start = time.time()
-    num_jitters = 1000
+    num_jitters = 500
     big_samples = np.tile(samples_tf_flat, (num_jitters, 1))
     big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
     big_jitter *= np.array(spacing)[None, :]
+    big_jitter[: cell_count**3, :] = 0
     big_samples = big_samples + big_jitter
     big_gt = gpu_sample(
         gaussians.mesh.points, 
@@ -110,15 +112,16 @@ def training(
     for iteration in range(first_iter, opt.iterations + 1):
         iter_start.record()
 
-        if iteration % 1 == 0:
+        jit_idx = 0
+        if iteration not in saving_iterations:
             jit_idx = np.random.randint(0, num_jitters)
-            jitter = big_jitter[jit_idx]
-            jitter_cuda = torch.tensor(jitter.ravel(), dtype=torch.float, device="cuda")
-            gt_cells = big_gt[jit_idx].reshape(cell_count, cell_count, cell_count)
-            gt = torch.tensor(gt_cells).cuda()
-            gt_weights = big_gt_weights[jit_idx].reshape(cell_count, cell_count, cell_count)
-            gt_weights = torch.tensor(gt_weights).cuda()
-            samples_tf_flat = big_samples[jit_idx]
+        jitter = big_jitter[jit_idx]
+        jitter_cuda = torch.tensor(jitter.ravel(), dtype=torch.float, device="cuda")
+        gt_cells = big_gt[jit_idx].reshape(cell_count, cell_count, cell_count)
+        gt = torch.tensor(gt_cells).cuda()
+        gt_weights = big_gt_weights[jit_idx].reshape(cell_count, cell_count, cell_count)
+        gt_weights = torch.tensor(gt_weights).cuda()
+        samples_tf_flat = big_samples[jit_idx]
 
         gaussians.update_learning_rate(iteration)
 
@@ -139,9 +142,18 @@ def training(
             render_pkg["radii"],
         )
         l1_lv = l1_loss(cells, gt)
+        # TODO: FIX FP AND FN FOR CHANGING CELL COUNTS
         k = 10  # Adjust this to control decay rate
-        false_negative = (10 * torch.exp(-k * weights[gt != -1])).mean()
-        false_positive = (1000 * (1 - torch.exp(-k * weights[gt == -1]))).mean()
+        fn_mask = (gt != -1)
+        if fn_mask.any():
+            false_negative = 10 * torch.exp(-k * weights[fn_mask]).mean()
+        else:
+            false_negative = torch.tensor(0., device="cuda")
+        mask = torch.logical_and(gt == -1, weights > 0)
+        if mask.any():
+            false_positive = (1 * (1 - torch.exp(-k * weights[mask]))).mean()
+        else:
+            false_positive = torch.tensor(0., device="cuda")
         # false_positive = l1_loss(weights[gt == -1 ], gt_weights[gt == -1])
         loss = l1_lv + false_positive + false_negative
         loss.backward()
@@ -152,7 +164,7 @@ def training(
             # Logging
             if log_to_file and iteration % 20 == 0:
                 cpu_cells = cells.cpu().numpy()
-                mse = torch.mean((cells[gt != -1] - gt[gt != -1]) ** 2)
+                mse = torch.mean((cells - gt) ** 2)
                 psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
                 mse2 = torch.mean((cells[torch.logical_and(cells != -1, gt != -1)] - gt[torch.logical_and(cells != -1, gt != -1)]) ** 2)
                 psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
@@ -160,8 +172,8 @@ def training(
                 log_data.append({
                     "iteration": iteration,
                     "loss": loss.item(),
-                    "l_v": l1_lv,
-                    "false_positive": false_positive,
+                    "l_v": l1_lv.item(),
+                    "false_positive": false_positive.item(),
                     "psnr": psnr.item(),
                     "psnr2": psnr2.item(),
                     "num_gaussians": num_gaussians
@@ -170,7 +182,7 @@ def training(
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             if iteration % 500 == 0:
-                mse = torch.mean((cells[gt != -1] - gt[gt != -1]) ** 2)
+                mse = torch.mean((cells - gt) ** 2)
                 psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
                 progress_bar.set_postfix(
                     {
@@ -191,9 +203,13 @@ def training(
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
                 cpu_cells = cells.cpu().numpy()
-                tensor_to_vtk(cpu_cells, f"test_{iteration}.vtk", spacing)
+                tensor_to_vtk(cpu_cells, f"out_vtk/test_{iteration}.vtk", spacing)
                 cpu_weights = weights.cpu().numpy()
-                tensor_to_vtk(cpu_weights, f"test_{iteration}_weight.vtk", spacing)
+                tensor_to_vtk(cpu_weights, f"out_vtk/test_{iteration}_weight.vtk", spacing)
+                vtk_files.append({
+                    "name": f"test_{iteration}.vtk",
+                    "time": float(saving_iterations.index(iteration))
+                })
 
             # Densification
             if (iteration <= opt.densify_until_iter and
@@ -202,7 +218,7 @@ def training(
             ):
                 cpu_cells = cells.cpu().numpy()
                 print(f"False negative: {np.count_nonzero(np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1))}, false positive: {np.count_nonzero(np.logical_and(cpu_cells.ravel() != -1, gt_cells.ravel() == -1))}")
-                mse = torch.mean((cells[gt != -1] - gt[gt != -1]) ** 2)
+                mse = torch.mean((cells - gt) ** 2)
                 psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
                 mse2 = torch.mean((cells[torch.logical_and(cells != -1, gt != -1)] - gt[torch.logical_and(cells != -1, gt != -1)]) ** 2)
                 psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
@@ -230,6 +246,13 @@ def training(
                     (gaussians.capture(), iteration),
                     os.path.join(scene.model_path, "/chkpnt{iteration}.pth"),
                 )
+    series = {
+        "file-series-version": "1.0",
+        "files": vtk_files
+    }
+
+    with open("out_vtk/test.vtk.series", "w") as jf:
+        json.dump(series, jf, indent=2)
 
     if log_to_file:
         log_file_path = os.path.join(scene.model_path, 'training_log.json')
@@ -267,7 +290,7 @@ if __name__ == "__main__":
         "--test_iterations", nargs="+", type=int, default=[7_000, 30_000]
     )
     parser.add_argument(
-        "--save_iterations", nargs="+", type=int, default=[1, 2_000, 4_000, 8_000, 16_000]
+        "--save_iterations", nargs="+", type=int, default=[1, 16, 32, 64, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
     )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--log_to_file", action="store_true")
