@@ -45,6 +45,7 @@ def training(
     min_weight
 ):
     vtk_files = []
+    vtk_files_loss = []
     log_data = []
     first_iter = 0
     prepare_output(dataset)
@@ -60,9 +61,13 @@ def training(
     iter_end = torch.cuda.Event(enable_timing=True)
 
     ema_loss_for_log = 0.0
+    ema_lv_for_log = 0.0
+    ema_lfp_for_log = 0.0
+    ema_lfn_for_log = 0.0
+    ema_lpsnr_for_log = 0.0
 
     # Make ground truth
-    cell_count = 100
+    cell_count = 50
     spacing = [
         (gaussians.maxes[0] - gaussians.mins[0]) / (cell_count - 1),
         (gaussians.maxes[1] - gaussians.mins[1]) / (cell_count - 1),
@@ -78,7 +83,7 @@ def training(
     samples_tf = np.flip(rot, axis=2)
     samples_tf_flat = samples_tf.reshape(-1, 3)
     start = time.time()
-    num_jitters = 500
+    num_jitters = 1000
     big_samples = np.tile(samples_tf_flat, (num_jitters, 1))
     big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
     big_jitter *= np.array(spacing)[None, :]
@@ -151,7 +156,7 @@ def training(
             false_negative = torch.tensor(0., device="cuda")
         mask = torch.logical_and(gt == -1, weights > 0)
         if mask.any():
-            false_positive = (1 * (1 - torch.exp(-k * weights[mask]))).mean()
+            false_positive = (2 * (1 - torch.exp(-k * weights[mask]))).mean()
         else:
             false_positive = torch.tensor(0., device="cuda")
         # false_positive = l1_loss(weights[gt == -1 ], gt_weights[gt == -1])
@@ -181,16 +186,20 @@ def training(
             
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+            mse = torch.mean((cells - gt) ** 2)
+            psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
+            ema_lv_for_log = 0.4 * l1_lv + 0.6 * ema_lv_for_log
+            ema_lfp_for_log = 0.4 * false_positive + 0.6 * ema_lfp_for_log
+            ema_lfn_for_log = 0.4 * false_negative + 0.6 * ema_lfn_for_log
+            ema_lpsnr_for_log = 0.4 * psnr + 0.6 * ema_lpsnr_for_log
             if iteration % 500 == 0:
-                mse = torch.mean((cells - gt) ** 2)
-                psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
                 progress_bar.set_postfix(
                     {
                         "Loss": f"{ema_loss_for_log:.{5}f}",
-                        "L_v": f"{l1_lv:.{5}f}",
-                        "L_fp": f"{false_positive:.{5}f}",
-                        "L_fn": f"{false_negative:.{5}f}",
-                        "PSNR": f"{psnr:.{5}f}"
+                        "L_v": f"{ema_lv_for_log:.{5}f}",
+                        "L_fp": f"{ema_lfp_for_log:.{5}f}",
+                        "L_fn": f"{ema_lfn_for_log:.{5}f}",
+                        "PSNR": f"{ema_lpsnr_for_log:.{5}f}"
                     }
                 )
                 progress_bar.update(500)
@@ -204,10 +213,13 @@ def training(
                 scene.save(iteration)
                 cpu_cells = cells.cpu().numpy()
                 tensor_to_vtk(cpu_cells, f"out_vtk/test_{iteration}.vtk", spacing)
-                cpu_weights = weights.cpu().numpy()
-                tensor_to_vtk(cpu_weights, f"out_vtk/test_{iteration}_weight.vtk", spacing)
+                tensor_to_vtk(torch.abs((cells - gt)).cpu().numpy(), f"out_vtk/test_{iteration}_loss.vtk", spacing)
                 vtk_files.append({
                     "name": f"test_{iteration}.vtk",
+                    "time": float(saving_iterations.index(iteration))
+                })                
+                vtk_files_loss.append({
+                    "name": f"test_{iteration}_loss.vtk",
                     "time": float(saving_iterations.index(iteration))
                 })
 
@@ -250,9 +262,15 @@ def training(
         "file-series-version": "1.0",
         "files": vtk_files
     }
-
     with open("out_vtk/test.vtk.series", "w") as jf:
         json.dump(series, jf, indent=2)
+
+    series_loss = {
+        "file-series-version": "1.0",
+        "files": vtk_files_loss
+    }
+    with open("out_vtk/test_loss.vtk.series", "w") as jf:
+        json.dump(series_loss, jf, indent=2)
 
     if log_to_file:
         log_file_path = os.path.join(scene.model_path, 'training_log.json')
@@ -289,8 +307,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--test_iterations", nargs="+", type=int, default=[7_000, 30_000]
     )
+    # parser.add_argument(
+    #     "--save_iterations", nargs="+", type=int, default=[1, 16, 32, 64, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
+    # )
     parser.add_argument(
-        "--save_iterations", nargs="+", type=int, default=[1, 16, 32, 64, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
+        "--save_iterations", nargs="+", type=int, default=[8_000, 16_000]
     )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--log_to_file", action="store_true")
