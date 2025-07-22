@@ -10,7 +10,6 @@
 #include <cub/device/device_radix_sort.cuh>
 #define GLM_FORCE_CUDA
 #include <glm/glm.hpp>
-#define CUBQL_GPU_BUILDER_IMPLEMENTATION 1
 #include <cuBQL/bvh.h>
 
 #include <cooperative_groups.h>
@@ -39,6 +38,24 @@ uint32_t getHigherMsb(uint32_t n)
 		msb++;
 	return msb;
 }
+
+// Each thread writes one sample
+__global__ void generateUniformGrid(cuBQL::box3f* aabbs) {
+	int N = 10;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N^3) return;
+
+    // Decode 1D index into 3D coordinates (x,y,z) in [0..N-1]
+    int z = idx / (N * N);
+    int rem = idx % (N * N);
+    int y = rem / N;
+    int x = rem % N;
+
+    // Map to [0,1] using inclusive endpoints
+    float inv = 1.0f / float(N - 1);
+    aabbs[idx] = cuBQL::box3f(cuBQL::vec3f(x * inv, y * inv, z * inv));
+}
+
 
 // Generates one key/value pair for all Gaussian / tile overlaps. 
 // Run once per Gaussian (1:N mapping).
@@ -213,6 +230,7 @@ int CudaRasterizer::Rasterizer::forward(
 	const uint3 num_cells,
 	float* out_cells,
 	float* out_weights,
+	const cuBQL::bvh3f& bvh,
 	int* radii,
 	bool debug)
 {
@@ -223,9 +241,9 @@ int CudaRasterizer::Rasterizer::forward(
 	);
 	
 	// Create CUDA events for timing (only when debug is enabled)
-	cudaEvent_t events[14]; // 7 pairs of start/stop events
+	cudaEvent_t events[16]; // 8 pairs of start/stop events
 	if (debug) {
-		for (int i = 0; i < 14; i++) {
+		for (int i = 0; i < 16; i++) {
 			cudaEventCreate(&events[i]);
 		}
 	}
@@ -269,16 +287,25 @@ int CudaRasterizer::Rasterizer::forward(
 		geomState.conic,
 		geomState.aabbs,
 		block_grid,
-		geomState.blocks_touched
+		geomState.blocks_touched,
+		bvh
 	), debug)
 	if (debug) cudaEventRecord(events[1]);
-
-	cuBQL::bvh3f bvh;
+	// cuBQL::box3f* d_boxes;
+	// int NT = 10;
+	// CHECK_CUDA(cudaMalloc(&d_boxes, NT^3 * sizeof(cuBQL::box3f)), debug);
+	// int threadsPerBlock = 256;
+	// int dblocks = (NT^3 + threadsPerBlock - 1) / threadsPerBlock;
+	// generateUniformGrid<<<dblocks, threadsPerBlock>>>(d_boxes);
+	if (debug) cudaEventRecord(events[2]);
+	// cuBQL::bvh3f bvh;
+	// cuBQL::gpuBuilder(bvh, d_boxes, NT^3, cuBQL::BuildConfig());
+	if (debug) cudaEventRecord(events[3]);
 
 	// Prefix sum computation
-	if (debug) cudaEventRecord(events[2]);
-	CHECK_CUDA(cub::DeviceScan::InclusiveSum(geomState.scanning_space, geomState.scan_size, geomState.blocks_touched, geomState.point_offsets, P), debug)
-	if (debug) cudaEventRecord(events[3]);
+	if (debug) cudaEventRecord(events[4]);
+	CHECK_CUDA(cub::DeviceScan::InclusiveSum(geomState.scanning_space, geomState.scan_size, geomState.blocks_touched, geomState.point_offsets, P), debug);
+	if (debug) cudaEventRecord(events[5]);
 
 	// Retrieve total number of Gaussian instances to launch and resize aux buffers
 	int num_intersections;
@@ -330,7 +357,7 @@ int CudaRasterizer::Rasterizer::forward(
 	BinningState binningState = BinningState::fromChunk(binning_chunkptr, num_intersections);
 
 	// Key duplication
-	if (debug) cudaEventRecord(events[4]);
+	if (debug) cudaEventRecord(events[6]);
 	// duplicateWithKeys << <(P + 255) / 256, 256 >> > (
 	// 	P,
 	// 	geomState.aabbs,
@@ -351,39 +378,39 @@ int CudaRasterizer::Rasterizer::forward(
 		block_grid
 	);
 	CHECK_CUDA(, debug)
-	if (debug) cudaEventRecord(events[5]);
+	if (debug) cudaEventRecord(events[7]);
 
 	int bit = getHigherMsb(block_grid.x * block_grid.y * block_grid.z);
 
 	// Sorting
-	if (debug) cudaEventRecord(events[6]);
+	if (debug) cudaEventRecord(events[8]);
 	CHECK_CUDA(cub::DeviceRadixSort::SortPairs(
 		binningState.list_sorting_space,
 		binningState.sorting_size,
 		binningState.point_list_keys_unsorted, binningState.point_list_keys,
 		binningState.point_list_unsorted, binningState.point_list,
 		num_intersections, 0, bit), debug)
-	if (debug) cudaEventRecord(events[7]);
+	if (debug) cudaEventRecord(events[9]);
 
 	// Number of blocks in each dimension
-	if (debug) cudaEventRecord(events[8]);
+	if (debug) cudaEventRecord(events[10]);
 	CHECK_CUDA(cudaMemset(imgState.ranges, 0, block_grid.x * block_grid.y * block_grid.z * sizeof(uint2)), debug);
-	if (debug) cudaEventRecord(events[9]);
+	if (debug) cudaEventRecord(events[11]);
 
 	// Tile range identification
 	if (num_intersections > 0) {
-		if (debug) cudaEventRecord(events[10]);
+		if (debug) cudaEventRecord(events[12]);
 		identifyTileRanges << <(num_intersections + 255) / 256, 256 >> > (
 			num_intersections,
 			binningState.point_list_keys,
 			imgState.ranges);
 		CHECK_CUDA(, debug)
-		if (debug) cudaEventRecord(events[11]);
+		if (debug) cudaEventRecord(events[13]);
 	}
 
 	// Rendering
 	const float* feature_ptr = geomState.values;
-	if (debug) cudaEventRecord(events[12]);
+	if (debug) cudaEventRecord(events[14]);
 	CHECK_CUDA(FORWARD::render(
 		block_grid, block,
 		imgState.ranges,
@@ -401,7 +428,7 @@ int CudaRasterizer::Rasterizer::forward(
 		imgState.n_contrib,
 		out_cells), 
 		debug)
-	if (debug) cudaEventRecord(events[13]);
+	if (debug) cudaEventRecord(events[15]);
 
 	if (debug) {
 		// allocate host array and copy back the per‐cell counts
@@ -455,12 +482,12 @@ int CudaRasterizer::Rasterizer::forward(
 		
 		float elapsed_time;
 		const char* operation_names[] = {
-			"Preprocessing", "Prefix sum", "Key duplication", 
+			"Preprocessing", "BVH build", "Prefix sum", "Key duplication", 
 			"Sorting", "Memory set", "Tile range identification", "Rendering"
 		};
 		
-		for (int i = 0; i < 7; i++) {
-			if (i == 5 && num_intersections == 0) continue; // Skip tile range if no intersections
+		for (int i = 0; i < 8; i++) {
+			if (i == 6 && num_intersections == 0) continue; // Skip tile range if no intersections
 			cudaEventElapsedTime(&elapsed_time, events[i*2], events[i*2+1]);
 			std::cout << operation_names[i] << " time: " << elapsed_time << " ms" << std::endl;
 		}

@@ -171,9 +171,10 @@ class GaussianRasterizationSettings(NamedTuple):
 
 
 class GaussianRasterizer(nn.Module):
-    def __init__(self, raster_settings):
+    def __init__(self, raster_settings, samples):
         super().__init__()
         self.raster_settings = raster_settings
+        _C.build_bvh(samples)
 
     def forward(
         self,

@@ -3,6 +3,24 @@
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
 namespace cg = cooperative_groups;
+#include <cuBQL/bvh.h>
+#include <cuBQL/traversal/fixedBoxQuery.h>
+
+struct CountPrims {
+  int *d_count;
+
+  __host__ __device__
+  int operator()(int /*primID*/) const {
+    // // On the device, atomically add 1
+    // #if __CUDA_ARCH__
+    //   atomicAdd(d_count, 1);
+    // #else
+    //   // if ever called on the host, just do a plain increment
+    //   ++(*d_count);
+    // #endif
+    return 0;
+  }
+};
 
 // Perform initial steps for each Gaussian prior to rasterization.
 template<int C>
@@ -26,7 +44,8 @@ __global__ void preprocessCUDA(int P,
 	float* conic,
 	uint* aabbs,
 	const dim3 grid,
-	uint32_t* blocks_touched)
+	uint32_t* blocks_touched,
+	const cuBQL::bvh3f bvh)
 {
 	auto idx = cg::this_grid().thread_rank();
 	if (idx >= P)
@@ -130,6 +149,16 @@ __global__ void preprocessCUDA(int P,
         }
     }
 
+	int count = 0;
+	// cuBQL::fixedBoxQuery::forEachPrim<float,3>(
+	// [&](int primID) {
+	// 	count++;
+	// 	return 0;
+    // },
+	// 	bvh,
+	// 	cuBQL::box3f(cuBQL::vec3f(mins.x, mins.y, mins.z), cuBQL::vec3f(maxes.x, maxes.y, maxes.z))
+	// );
+
 	// Calculate block size in world coordinates
 	const float block_size_x = cell_size.x * BLOCK_X;
 	const float block_size_y = cell_size.y * BLOCK_Y;
@@ -165,7 +194,7 @@ __global__ void preprocessCUDA(int P,
 	clamped[idx] = (values[idx] < 0.0f) || (values[idx] > 1.0f);
     values_out[idx] = glm::clamp(values[idx], 0.0f, 1.0f); 
 	weights_out[idx] = glm::clamp(weights[idx], 0.0f, 1.0f); 
-    volumes[idx] = static_cast<float>(block_dims.x * block_dims.y * block_dims.z);
+    volumes[idx] = float(count);
 }
 
 // Main rasterization method. Collaboratively works on one tile per
@@ -343,7 +372,8 @@ void FORWARD::preprocess(int P,
 	float* conic,
 	uint* aabbs,
 	const dim3 grid,
-	uint32_t* blocks_touched)
+	uint32_t* blocks_touched,
+	const cuBQL::bvh3f& bvh)
 {
 	preprocessCUDA<NUM_CHANNELS> <<<(P + 255) / 256, 256>>> (
 		P,
@@ -366,6 +396,7 @@ void FORWARD::preprocess(int P,
 		conic,
 		aabbs,
 		grid,
-		blocks_touched
+		blocks_touched,
+		bvh
 	);
 }

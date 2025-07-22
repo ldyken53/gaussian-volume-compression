@@ -25,7 +25,7 @@ setup(
             "cuda_rasterizer/forward.cu",
             "cuda_rasterizer/backward.cu",
             "rasterize_points.cu",
-            "ext.cpp"],
+            "ext.cu"],
             depends=[
                 "cuda_rasterizer/config.h"
             ],

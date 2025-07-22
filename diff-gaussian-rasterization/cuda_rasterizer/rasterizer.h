@@ -3,6 +3,7 @@
 
 #include <vector>
 #include <functional>
+#include <cuBQL/bvh.h>
 
 namespace CudaRasterizer
 {
@@ -27,8 +28,10 @@ namespace CudaRasterizer
 			const uint3 num_cells,
 			float* out_cells,
 			float* out_weights,
+			const cuBQL::bvh3f& bvh,
 			int* radii = nullptr,
-			bool debug = false);
+			bool debug = false
+		);
 
 		static void backward(
 			const int P, int R,

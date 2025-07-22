@@ -6,6 +6,7 @@
 #include "device_launch_parameters.h"
 #define GLM_FORCE_CUDA
 #include <glm/glm.hpp>
+#include <cuBQL/bvh.h>
 
 namespace FORWARD
 {
@@ -31,7 +32,8 @@ namespace FORWARD
 		float* conic,
 		uint* aabbs,
 		const dim3 grid,
-		uint32_t* blocks_touched);
+		uint32_t* blocks_touched,
+		const cuBQL::bvh3f& bvh);
 
 	// Main rasterization method.
 	void render(

@@ -1,41 +1,43 @@
-	#include <math.h>
-	#include <torch/extension.h>
-	#include <cstdio>
-	#include <sstream>
-	#include <iostream>
-	#include <tuple>
-	#include <stdio.h>
-	#include <cuda_runtime_api.h>
-	#include <memory>
-	#include "cuda_rasterizer/config.h"
-	#include "cuda_rasterizer/rasterizer.h"
-	#include <fstream>
-	#include <string>
-	#include <functional>
+#include <math.h>
+#include <torch/extension.h>
+#include <cstdio>
+#include <sstream>
+#include <iostream>
+#include <tuple>
+#include <stdio.h>
+#include <cuda_runtime_api.h>
+#include <memory>
+#include "cuda_rasterizer/config.h"
+#include "cuda_rasterizer/rasterizer.h"
+#include <fstream>
+#include <string>
+#include <functional>
+#include <cuBQL/bvh.h>
 
-	std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
-		auto lambda = [&t](size_t N) {
-			t.resize_({(long long)N});
-			return reinterpret_cast<char*>(t.contiguous().data_ptr());
-		};
-		return lambda;
-	}
+std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
+	auto lambda = [&t](size_t N) {
+		t.resize_({(long long)N});
+		return reinterpret_cast<char*>(t.contiguous().data_ptr());
+	};
+	return lambda;
+}
 
-	std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
-	RasterizeGaussiansCUDA(
-		const torch::Tensor& means3D,
-		const torch::Tensor& scales,
-		const torch::Tensor& rotations,
-		const torch::Tensor& values,
-		const torch::Tensor& weights,
-		const torch::Tensor& jitter,
-		const float scale_modifier,
-		const float min_x, const float min_y, const float min_z, 
-		const float max_x, const float max_y, const float max_z,
-		const uint cell_count,
-		const float background,
-		const bool debug)
-	{
+std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+RasterizeGaussiansCUDA(
+	const torch::Tensor& means3D,
+	const torch::Tensor& scales,
+	const torch::Tensor& rotations,
+	const torch::Tensor& values,
+	const torch::Tensor& weights,
+	const torch::Tensor& jitter,
+	const float scale_modifier,
+	const float min_x, const float min_y, const float min_z, 
+	const float max_x, const float max_y, const float max_z,
+	const uint cell_count,
+	const float background,
+	const bool debug,
+	const cuBQL::bvh3f& bvh
+) {
 	if (means3D.ndimension() != 2 || means3D.size(1) != 3) {
 		AT_ERROR("means3D must have dimensions (num_points, 3)");
 	}
@@ -82,6 +84,7 @@
 			num_cells,
 			out_cells.contiguous().data<float>(),
 			out_weights.contiguous().data<float>(),
+			bvh,
 			radii.contiguous().data<int>(),
 			debug);
 	}
@@ -110,8 +113,9 @@ RasterizeGaussiansBackwardCUDA(
 	const int R,
 	const torch::Tensor& binningBuffer,
 	const torch::Tensor& imageBuffer,
-	const bool debug) 
-{
+	const bool debug,
+	const cuBQL::bvh3f& bvh
+) {
 	const int P = means3D.size(0);
 	const float3 volume_mins = make_float3(min_x, min_y, min_z);
 	const float3 volume_maxes = make_float3(max_x, max_y, max_z);

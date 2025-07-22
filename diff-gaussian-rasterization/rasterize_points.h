@@ -4,6 +4,7 @@
 #include <tuple>
 #include <string>
 #include <vector_types.h>
+#include <cuBQL/bvh.h>
 	
 std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansCUDA(
@@ -18,7 +19,9 @@ RasterizeGaussiansCUDA(
 	const float max_x, const float max_y, const float max_z,
     const uint cell_count,
 	const float background,
-	const bool debug);
+	const bool debug,
+	const cuBQL::bvh3f& bvh
+);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
  RasterizeGaussiansBackwardCUDA(
@@ -42,4 +45,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const int R,
 	const torch::Tensor& binningBuffer,
 	const torch::Tensor& imageBuffer,
-	const bool debug);
+	const bool debug,
+	const cuBQL::bvh3f& bvh
+);
