@@ -47,18 +47,16 @@ void BuildBVH(const torch::Tensor& samples) {
     cudaEventElapsedTime(&msBoxes, gpuStart, gpuStop);
     std::cout << "BVH time: " << msBoxes << " ms\n";
 }
-std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor>
 RasterizeGaussiansCUDAWrapper(
 	const torch::Tensor& means3D,
 	const torch::Tensor& scales,
 	const torch::Tensor& rotations,
 	const torch::Tensor& values,
 	const torch::Tensor& weights,
-	const torch::Tensor& jitter,
 	const float scale_modifier,
 	const float min_x, const float min_y, const float min_z, 
 	const float max_x, const float max_y, const float max_z,
-    const uint cell_count,
 	const float background,
 	const bool debug
 ) {
@@ -68,11 +66,9 @@ RasterizeGaussiansCUDAWrapper(
         rotations,
         values,
         weights,
-        jitter,
         scale_modifier,
         min_x, min_y, min_z,
         max_x, max_y, max_z,
-        cell_count,
         background,
         debug,
         stored_samples,
@@ -83,48 +79,34 @@ RasterizeGaussiansCUDAWrapper(
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
  RasterizeGaussiansBackwardCUDAWrapper(
 	const torch::Tensor& means3D,
-	const torch::Tensor& radii,
 	const torch::Tensor& scales,
 	const torch::Tensor& rotations,
 	const torch::Tensor& values,
 	const torch::Tensor& weights,
-	const torch::Tensor& jitter,
 	const torch::Tensor& out_cells,
 	const torch::Tensor& out_weights,
 	const float scale_modifier,
 	const float min_x, const float min_y, const float min_z, 
 	const float max_x, const float max_y, const float max_z,
-	const uint cell_count,
 	const float background,
 	const torch::Tensor& dL_dout_cells,
 	const torch::Tensor& dL_dout_cell_weights,
-	const torch::Tensor& geomBuffer,
-	const int R,
-	const torch::Tensor& binningBuffer,
-	const torch::Tensor& imageBuffer,
 	const bool debug
 ) {
     return RasterizeGaussiansBackwardCUDA(
         means3D,
-        radii,
         scales,
         rotations,
         values,
         weights,
-        jitter,
         out_cells,
         out_weights,
         scale_modifier,
         min_x, min_y, min_z, 
         max_x, max_y, max_z,
-        cell_count,
         background,
         dL_dout_cells,
         dL_dout_cell_weights,
-        geomBuffer,
-        R,
-        binningBuffer,
-        imageBuffer,
         debug,
         stored_samples,
         bvh

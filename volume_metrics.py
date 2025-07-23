@@ -8,7 +8,7 @@ from tqdm import tqdm
 import pyvista as pv
 
 from arguments import ModelParams, OptimizationParams, PipelineParams
-from gaussian_renderer import render
+from gaussian_renderer import init_rasterizer, render
 from scene import GaussianModel, Scene
 from gpu_mesh_sampling import gpu_sample
 from utils.debug_utils import tensor_to_vtk
@@ -33,7 +33,7 @@ def training(
 ):
     
     gaussians = GaussianModel()
-    scene = Scene(dataset, gaussians, load_iteration=16000)
+    scene = Scene(dataset, gaussians, load_iteration=-1)
     # Make ground truth
     cell_count = 50
     spacing = [
@@ -51,39 +51,43 @@ def training(
 
     samples_tf = np.flip(rot, axis=2)
     samples_tf_flat = samples_tf.reshape(-1, 3)
-    jitter = np.random.uniform(-0.5, 0.5, samples_tf.shape)
-    for i in range(3):
-        jitter[...,i] *= spacing[i]
+    jitter = np.random.uniform(-0.5, 0.5, samples_tf_flat.shape)
+    jitter *= np.array(spacing)[None, :]
+    samples_tf_flat = samples_tf_flat + jitter
     gt_cells = gpu_sample(
         gaussians.mesh.points, 
         gaussians.mesh.cell_connectivity.astype(np.int64),
         gaussians.mesh.point_data['value'],
         samples_tf_flat
     )
-    gt_cells = gt_cells.reshape(cell_count, cell_count, cell_count)
+    # gt_cells = gt_cells.reshape(cell_count, cell_count, cell_count)
     gt_weights = gt_cells.copy()
     gt = torch.tensor(gt_cells).cuda()
     gt_weights[gt_weights != -1] = 1
     gt_weights[gt_weights == -1] = 0
     gt_weights = torch.tensor(gt_weights).cuda()
-    tensor_to_vtk(gt_cells, "test_gt.vtk", spacing)
-    tensor_to_vtk(gt_weights, "test_gt_weight.vtk", spacing)
+    # tensor_to_vtk(gt_cells, "test_gt.vtk", spacing)
+    # tensor_to_vtk(gt_weights, "test_gt_weight.vtk", spacing)
 
     pipe.debug = True
+    init_rasterizer(
+        gaussians,
+        pipe,
+        torch.tensor(samples_tf_flat, dtype=torch.float, device="cuda"),
+        cell_count,
+    )
     render_pkg = render(
         gaussians,
         pipe,
         torch.tensor(np.zeros_like(jitter).ravel(), dtype=torch.float, device="cuda"),
         cell_count,
     )
-    cells, weights, visibility_filter, radii = (
+    cells, weights = (
         render_pkg["cells"],
-        render_pkg["weights"],
-        render_pkg["visibility_filter"],
-        render_pkg["radii"],
+        render_pkg["weights"]
     )
-
     l1_l = l1_loss(cells, gt)
+    l1_l.backward()
     mse = torch.mean((cells - gt) ** 2)
     psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
     print(f"Percent invalid samples: {np.count_nonzero(gt_cells == -1) / cell_count ** 3}")
@@ -95,7 +99,7 @@ def training(
     print(f"L2 loss: {mse}")
     print(f"PSNR: {psnr}")
     print(f"PSNR without false positives/negatives: {psnr2}")
-    tensor_to_vtk(cells.detach().cpu().numpy(), f"test.vtk", spacing)
+    # tensor_to_vtk(cells.detach().cpu().numpy(), f"test.vtk", spacing)
 
 if __name__ == "__main__":
     window = create_window()

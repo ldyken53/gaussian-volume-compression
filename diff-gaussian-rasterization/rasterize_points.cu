@@ -14,26 +14,16 @@
 #include <functional>
 #include <cuBQL/bvh.h>
 
-std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
-	auto lambda = [&t](size_t N) {
-		t.resize_({(long long)N});
-		return reinterpret_cast<char*>(t.contiguous().data_ptr());
-	};
-	return lambda;
-}
-
-std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor>
 RasterizeGaussiansCUDA(
 	const torch::Tensor& means3D,
 	const torch::Tensor& scales,
 	const torch::Tensor& rotations,
 	const torch::Tensor& values,
 	const torch::Tensor& weights,
-	const torch::Tensor& jitter,
 	const float scale_modifier,
 	const float min_x, const float min_y, const float min_z, 
 	const float max_x, const float max_y, const float max_z,
-	const uint cell_count,
 	const float background,
 	const bool debug,
 	const torch::Tensor& samples,
@@ -46,80 +36,50 @@ RasterizeGaussiansCUDA(
 	const float3 volume_maxes = make_float3(max_x, max_y, max_z);
 	
 	const int P = means3D.size(0);
+	const int S = samples.size(0);
 
-	const uint3 num_cells = make_uint3(
-		cell_count,
-		cell_count,
-		cell_count
-	);  
 	auto float_opts = means3D.options().dtype(torch::kFloat32);
-	torch::Tensor out_cells = torch::full({num_cells.x, num_cells.y, num_cells.z}, background, float_opts);
-	torch::Tensor out_test = torch::zeros({samples.size(0)}, float_opts);
-	torch::Tensor out_testw = torch::zeros({samples.size(0)}, float_opts);
-	torch::Tensor out_weights = torch::full({num_cells.x, num_cells.y, num_cells.z}, background, float_opts);
-	torch::Tensor radii = torch::full({P}, 0, means3D.options().dtype(torch::kInt32));
+	torch::Tensor out_test = torch::zeros({S}, float_opts);
+	torch::Tensor out_testw = torch::zeros({S}, float_opts);
 	torch::Device device(torch::kCUDA);
 	torch::TensorOptions options(torch::kByte);
-	torch::Tensor geomBuffer = torch::empty({0}, options.device(device));
-	torch::Tensor binningBuffer = torch::empty({0}, options.device(device));
-	torch::Tensor imgBuffer = torch::empty({0}, options.device(device));
-	std::function<char*(size_t)> geomFunc = resizeFunctional(geomBuffer);
-	std::function<char*(size_t)> binningFunc = resizeFunctional(binningBuffer);
-	std::function<char*(size_t)> imgFunc = resizeFunctional(imgBuffer);
 	
-	
-	int rendered = 0;
 	if(P != 0)
 	{
-		rendered = CudaRasterizer::Rasterizer::forward(
-			geomFunc,
-			binningFunc,
-			imgFunc,
-			P,
+		CudaRasterizer::Rasterizer::forward(
+			P, S,
 			means3D.contiguous().data<float>(),
 			scales.contiguous().data_ptr<float>(),
 			scale_modifier,
 			rotations.contiguous().data_ptr<float>(),
 			values.contiguous().data<float>(),
 			weights.contiguous().data<float>(),
-			jitter.contiguous().data<float>(),
 			volume_mins,
 			volume_maxes,
-			num_cells,
-			out_cells.contiguous().data<float>(),
-			out_weights.contiguous().data<float>(),
 			samples.contiguous().data<float>(),
 			bvh,
 			out_test.contiguous().data<float>(),
 			out_testw.contiguous().data<float>(),
-			radii.contiguous().data<int>(),
 			debug);
 	}
-	return std::make_tuple(rendered, out_cells, out_weights, out_test, geomBuffer, binningBuffer, imgBuffer, out_testw);
+	return std::make_tuple(out_test, out_testw);
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansBackwardCUDA(
 	const torch::Tensor& means3D,
-	const torch::Tensor& radii,
 	const torch::Tensor& scales,
 	const torch::Tensor& rotations,
 	const torch::Tensor& values,
 	const torch::Tensor& weights,
-	const torch::Tensor& jitter,
 	const torch::Tensor& out_cells,
 	const torch::Tensor& out_weights,
 	const float scale_modifier,
 	const float min_x, const float min_y, const float min_z, 
 	const float max_x, const float max_y, const float max_z,
-	const uint cell_count,
 	const float background,
 	const torch::Tensor& dL_dout_cells,
 	const torch::Tensor& dL_dout_cell_weights,
-	const torch::Tensor& geomBuffer,
-	const int R,
-	const torch::Tensor& binningBuffer,
-	const torch::Tensor& imageBuffer,
 	const bool debug,
 	const torch::Tensor& samples,
 	const cuBQL::bvh3f& bvh
@@ -127,15 +87,8 @@ RasterizeGaussiansBackwardCUDA(
 	const int P = means3D.size(0);
 	const float3 volume_mins = make_float3(min_x, min_y, min_z);
 	const float3 volume_maxes = make_float3(max_x, max_y, max_z);
-	const uint3 num_cells = make_uint3(
-		cell_count,
-		cell_count,
-		cell_count
-	);  
-	int M = 0;
 
 	torch::Tensor dL_dmeans3D = torch::zeros({P, 3}, means3D.options());
-	torch::Tensor dL_dconic = torch::zeros({P, 6}, means3D.options());
 	torch::Tensor dL_dweights = torch::zeros({P, 1}, means3D.options());
 	torch::Tensor dL_dscales = torch::zeros({P, 3}, means3D.options());
 	torch::Tensor dL_drotations = torch::zeros({P, 4}, means3D.options());
@@ -143,32 +96,27 @@ RasterizeGaussiansBackwardCUDA(
 
 	if(P != 0)
 	{  
-		CudaRasterizer::Rasterizer::backward(P, R,
-		means3D.contiguous().data<float>(),
-		scales.data_ptr<float>(),
-		scale_modifier,
-		num_cells,
-		volume_mins,
-		volume_maxes,
-		rotations.data_ptr<float>(),
-		values.contiguous().data<float>(),
-		weights.contiguous().data<float>(),
-		jitter.contiguous().data<float>(),
-		out_cells.contiguous().data<float>(),
-		out_weights.contiguous().data<float>(),
-		radii.contiguous().data<int>(),
-		reinterpret_cast<char*>(geomBuffer.contiguous().data_ptr()),
-		reinterpret_cast<char*>(binningBuffer.contiguous().data_ptr()),
-		reinterpret_cast<char*>(imageBuffer.contiguous().data_ptr()),
-		dL_dout_cells.contiguous().data<float>(),
-		dL_dout_cell_weights.contiguous().data<float>(),
-		dL_dconic.contiguous().data<float>(),  
-		dL_dmeans3D.contiguous().data<float>(),
-		dL_dscales.contiguous().data<float>(),
-		dL_drotations.contiguous().data<float>(),
-		dL_dvalues.contiguous().data<float>(),
-		dL_dweights.contiguous().data<float>(),
-		debug);
+		CudaRasterizer::Rasterizer::backward(P,
+			means3D.contiguous().data<float>(),
+			scales.data_ptr<float>(),
+			scale_modifier,
+			volume_mins,
+			volume_maxes,
+			rotations.data_ptr<float>(),
+			values.contiguous().data<float>(),
+			weights.contiguous().data<float>(),
+			samples.contiguous().data<float>(),
+			bvh,
+			out_cells.contiguous().data<float>(),
+			out_weights.contiguous().data<float>(),
+			dL_dout_cells.contiguous().data<float>(),
+			dL_dout_cell_weights.contiguous().data<float>(),
+			dL_dmeans3D.contiguous().data<float>(),
+			dL_dscales.contiguous().data<float>(),
+			dL_drotations.contiguous().data<float>(),
+			dL_dvalues.contiguous().data<float>(),
+			dL_dweights.contiguous().data<float>(),
+			debug);
 	}
 
 	return std::make_tuple(dL_dmeans3D, dL_dscales, dL_drotations, dL_dvalues, dL_dweights);

@@ -16,44 +16,6 @@ namespace CudaRasterizer
 		chunk = reinterpret_cast<char*>(ptr + count);
 	}
 
-	struct GeometryState
-	{
-		size_t scan_size;
-		char* scanning_space;
-		bool* clamped;
-		int* internal_radii;
-		float* values;
-		float* weights;
-		float* volumes;
-		float3* means;
-		float* conic;
-		uint* aabbs;
-		uint32_t* point_offsets;
-		uint32_t* blocks_touched;
-
-		static GeometryState fromChunk(char*& chunk, size_t P);
-	};
-
-	struct ImageState
-	{
-		uint2* ranges;
-		uint32_t* n_contrib;
-
-		static ImageState fromChunk(char*& chunk, size_t N);
-	};
-
-	struct BinningState
-	{
-		size_t sorting_size;
-		uint32_t* point_list_keys_unsorted;
-		uint32_t* point_list_keys;
-		uint32_t* point_list_unsorted;
-		uint32_t* point_list;
-		char* list_sorting_space;
-
-		static BinningState fromChunk(char*& chunk, size_t P);
-	};
-
 	template<typename T> 
 	size_t required(size_t P)
 	{

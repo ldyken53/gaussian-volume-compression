@@ -13,7 +13,7 @@ from tqdm import tqdm
 import pyvista as pv
 
 from arguments import ModelParams, OptimizationParams, PipelineParams
-from gaussian_renderer import render
+from gaussian_renderer import init_rasterizer, render
 from gpu_mesh_sampling import gpu_sample
 from scene import GaussianModel, Scene
 from utils.debug_utils import tensor_to_vtk, analyze_array
@@ -88,7 +88,7 @@ def training(
     big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
     big_jitter *= np.array(spacing)[None, :]
     big_jitter[: cell_count**3, :] = 0
-    big_samples = big_samples + big_jitter
+    # big_samples = big_samples + big_jitter
     big_gt = gpu_sample(
         gaussians.mesh.points, 
         gaussians.mesh.cell_connectivity.astype(np.int64),
@@ -100,25 +100,31 @@ def training(
     big_jitter = big_jitter.reshape(num_jitters, cell_count**3, 3)
     end = time.time()
     print(f"Time to sample gt: {end - start}")
-    gt_cells = big_gt[0].reshape(cell_count, cell_count, cell_count)
+    gt_cells = big_gt[0]
     print(f"Number of invalid samples: {np.count_nonzero(gt_cells == -1)}")
-    tensor_to_vtk(gt_cells, "test_gt.vtk", spacing)
+    tensor_to_vtk(gt_cells.reshape(cell_count, cell_count, cell_count), "test_gt.vtk", spacing)
     gt = torch.tensor(gt_cells).cuda()
     jitter_cuda = torch.tensor(big_jitter[0].ravel(), dtype=torch.float, device="cuda")
+    init_rasterizer(
+        gaussians,
+        pipe,
+        torch.tensor(samples_tf_flat, dtype=torch.float, device="cuda"),
+        cell_count,
+    )
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
         iter_start.record()
 
-        jit_idx = 0
-        if iteration not in saving_iterations:
-            jit_idx = np.random.randint(0, num_jitters)
-        jitter = big_jitter[jit_idx]
-        jitter_cuda = torch.tensor(jitter.ravel(), dtype=torch.float, device="cuda")
-        gt_cells = big_gt[jit_idx].reshape(cell_count, cell_count, cell_count)
-        gt = torch.tensor(gt_cells).cuda()
-        samples_tf_flat = big_samples[jit_idx]
+        # jit_idx = 0
+        # if iteration not in saving_iterations:
+        #     jit_idx = np.random.randint(0, num_jitters)
+        # jitter = big_jitter[jit_idx]
+        # jitter_cuda = torch.tensor(jitter.ravel(), dtype=torch.float, device="cuda")
+        # gt_cells = big_gt[jit_idx]
+        # gt = torch.tensor(gt_cells).cuda()
+        # samples_tf_flat = big_samples[jit_idx]
 
         gaussians.update_learning_rate(iteration)
 
@@ -132,16 +138,14 @@ def training(
             jitter_cuda,
             cell_count
         )
-        cells, weights, visibility_filter, radii = (
+        cells, weights= (
             render_pkg["cells"],
-            render_pkg["weights"],
-            render_pkg["visibility_filter"],
-            render_pkg["radii"],
+            render_pkg["weights"]
         )
         l1_lv = l1_loss(cells, gt)
         # TODO: FIX FP AND FN FOR CHANGING CELL COUNTS
         k = 10  # Adjust this to control decay rate
-        fn_mask = torch.logical_and(gt != -1, weights < 0.015)
+        fn_mask = (gt != -1)
         if fn_mask.any():
             false_negative = 1 * torch.exp(-k * weights[fn_mask]).mean()
         else:
@@ -169,7 +173,7 @@ def training(
                     "iteration": iteration,
                     "loss": loss.item(),
                     "l_v": l1_lv.item(),
-                    "false_positive": false_positive.item(),
+                    # "false_positive": false_positive.item(),
                     "psnr": psnr.item(),
                     "psnr2": psnr2.item(),
                     "num_gaussians": num_gaussians
@@ -180,8 +184,8 @@ def training(
             mse = torch.mean((cells - gt) ** 2)
             psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
             ema_lv_for_log = 0.4 * l1_lv + 0.6 * ema_lv_for_log
-            ema_lfp_for_log = 0.4 * false_positive + 0.6 * ema_lfp_for_log
-            ema_lfn_for_log = 0.4 * false_negative + 0.6 * ema_lfn_for_log
+            # ema_lfp_for_log = 0.4 * false_positive + 0.6 * ema_lfp_for_log
+            # ema_lfn_for_log = 0.4 * false_negative + 0.6 * ema_lfn_for_log
             ema_lpsnr_for_log = 0.4 * psnr + 0.6 * ema_lpsnr_for_log
             if iteration % 500 == 0:
                 progress_bar.set_postfix(
@@ -203,8 +207,8 @@ def training(
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
                 cpu_cells = cells.cpu().numpy()
-                tensor_to_vtk(cpu_cells, f"out_vtk/test_{iteration}.vtk", spacing)
-                tensor_to_vtk(torch.abs((cells - gt)).cpu().numpy(), f"out_vtk/test_{iteration}_loss.vtk", spacing)
+                tensor_to_vtk(cpu_cells.reshape(cell_count, cell_count, cell_count), f"out_vtk/test_{iteration}.vtk", spacing)
+                tensor_to_vtk(torch.abs((cells - gt)).cpu().numpy().reshape(cell_count, cell_count, cell_count), f"out_vtk/test_{iteration}_loss.vtk", spacing)
                 vtk_files.append({
                     "name": f"test_{iteration}.vtk",
                     "time": float(saving_iterations.index(iteration))
@@ -214,24 +218,24 @@ def training(
                     "time": float(saving_iterations.index(iteration))
                 })
 
-            # Densification
-            if (iteration <= opt.densify_until_iter and
-                iteration >= opt.densify_from_iter and
-                iteration % opt.densification_interval == 0
-            ):
-                cpu_cells = cells.cpu().numpy()
-                print(f"False negative: {np.count_nonzero(np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1))}, false positive: {np.count_nonzero(np.logical_and(cpu_cells.ravel() != -1, gt_cells.ravel() == -1))}")
-                mse = torch.mean((cells - gt) ** 2)
-                psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
-                mse2 = torch.mean((cells[torch.logical_and(cells != -1, gt != -1)] - gt[torch.logical_and(cells != -1, gt != -1)]) ** 2)
-                psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
-                print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr without empty: {psnr2}")
-                gaussians.densify_and_prune(
-                    opt.densify_grad_threshold,
-                    min_weight,
-                    samples_tf_flat[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)],
-                    gt_cells.ravel()[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)].reshape(-1, 1)
-                )
+            # # Densification
+            # if (iteration <= opt.densify_until_iter and
+            #     iteration >= opt.densify_from_iter and
+            #     iteration % opt.densification_interval == 0
+            # ):
+            #     cpu_cells = cells.cpu().numpy()
+            #     print(f"False negative: {np.count_nonzero(np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1))}, false positive: {np.count_nonzero(np.logical_and(cpu_cells.ravel() != -1, gt_cells.ravel() == -1))}")
+            #     mse = torch.mean((cells - gt) ** 2)
+            #     psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
+            #     mse2 = torch.mean((cells[torch.logical_and(cells != -1, gt != -1)] - gt[torch.logical_and(cells != -1, gt != -1)]) ** 2)
+            #     psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
+            #     print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr without empty: {psnr2}")
+            #     gaussians.densify_and_prune(
+            #         opt.densify_grad_threshold,
+            #         min_weight,
+            #         samples_tf_flat[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)],
+            #         gt_cells.ravel()[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)].reshape(-1, 1)
+            #     )
 
                 # if iteration % opt.weight_reset_interval == 0 or (
                 #     dataset.white_background and iteration == opt.densify_from_iter

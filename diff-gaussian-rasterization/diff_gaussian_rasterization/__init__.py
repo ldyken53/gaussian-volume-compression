@@ -54,45 +54,35 @@ class _RasterizeGaussians(torch.autograd.Function):
             rotations,
             values,
             weights,
-            jitter,
             raster_settings.scale_modifier,
             volume_mins_x, volume_mins_y, volume_mins_z,
             volume_maxes_x, volume_maxes_y, volume_maxes_z,
-            raster_settings.cell_count,
             raster_settings.bg,
             raster_settings.debug,
         )
 
         # Invoke C++/CUDA rasterizer
-        num_rendered, cells, cell_weights, out_test, geomBuffer, binningBuffer, imgBuffer, out_testw = (
+        cells, cell_weights = (
             _C.rasterize_gaussians(*args)
         )
-        # print(f"Num Rendered: {num_rendered}")
 
         # Keep relevant tensors for backward
         ctx.raster_settings = raster_settings
-        ctx.num_rendered = num_rendered
         ctx.save_for_backward(
             means3D,
             scales,
             rotations,
             values,
             weights,
-            jitter,
-            out_test,
-            geomBuffer,
-            binningBuffer,
-            imgBuffer,
             cells,
             cell_weights
         )
-        return cells, cell_weights, out_test, out_testw
+        return cells, cell_weights
 
     @staticmethod
-    def backward(ctx, grad_out_cells, grad_out_cell_weights, __):
+    def backward(ctx, grad_out_cells, grad_out_cell_weights):
 
         # Restore necessary values from context
-        num_rendered = ctx.num_rendered
         raster_settings = ctx.raster_settings
         (
             means3D,
@@ -100,11 +90,6 @@ class _RasterizeGaussians(torch.autograd.Function):
             rotations,
             values,
             weights,
-            jitter,
-            out_test,
-            geomBuffer,
-            binningBuffer,
-            imgBuffer,
             cells,
             cell_weights
         ) = ctx.saved_tensors
@@ -115,25 +100,18 @@ class _RasterizeGaussians(torch.autograd.Function):
         # Restructure args as C++ method expects them
         args = (
             means3D,
-            out_test,
             scales,
             rotations,
             values,
             weights,
-            jitter,
             cells,
             cell_weights,
             raster_settings.scale_modifier,
             volume_mins_x, volume_mins_y, volume_mins_z,
             volume_maxes_x, volume_maxes_y, volume_maxes_z,
-            raster_settings.cell_count,
             raster_settings.bg,
             grad_out_cells,
             grad_out_cell_weights,
-            geomBuffer,
-            num_rendered,
-            binningBuffer,
-            imgBuffer,
             raster_settings.debug,
         )
 
