@@ -33,7 +33,9 @@ namespace FORWARD
 		uint* aabbs,
 		const dim3 grid,
 		uint32_t* blocks_touched,
-		const cuBQL::bvh3f& bvh);
+		const float* samples,
+		const cuBQL::bvh3f& bvh,
+		float* out_test);
 
 	// Main rasterization method.
 	void render(

@@ -36,6 +36,7 @@ RasterizeGaussiansCUDA(
 	const uint cell_count,
 	const float background,
 	const bool debug,
+	const torch::Tensor& samples,
 	const cuBQL::bvh3f& bvh
 ) {
 	if (means3D.ndimension() != 2 || means3D.size(1) != 3) {
@@ -53,6 +54,7 @@ RasterizeGaussiansCUDA(
 	);  
 	auto float_opts = means3D.options().dtype(torch::kFloat32);
 	torch::Tensor out_cells = torch::full({num_cells.x, num_cells.y, num_cells.z}, background, float_opts);
+	torch::Tensor out_test = torch::zeros({samples.size(0)}, float_opts);
 	torch::Tensor out_weights = torch::full({num_cells.x, num_cells.y, num_cells.z}, background, float_opts);
 	torch::Tensor radii = torch::full({P}, 0, means3D.options().dtype(torch::kInt32));
 	torch::Device device(torch::kCUDA);
@@ -63,6 +65,7 @@ RasterizeGaussiansCUDA(
 	std::function<char*(size_t)> geomFunc = resizeFunctional(geomBuffer);
 	std::function<char*(size_t)> binningFunc = resizeFunctional(binningBuffer);
 	std::function<char*(size_t)> imgFunc = resizeFunctional(imgBuffer);
+	
 	
 	int rendered = 0;
 	if(P != 0)
@@ -84,11 +87,13 @@ RasterizeGaussiansCUDA(
 			num_cells,
 			out_cells.contiguous().data<float>(),
 			out_weights.contiguous().data<float>(),
+			samples.contiguous().data<float>(),
 			bvh,
+			out_test.contiguous().data<float>(),
 			radii.contiguous().data<int>(),
 			debug);
 	}
-	return std::make_tuple(rendered, out_cells, out_weights, radii, geomBuffer, binningBuffer, imgBuffer);
+	return std::make_tuple(rendered, out_cells, out_weights, out_test, geomBuffer, binningBuffer, imgBuffer);
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
@@ -114,6 +119,7 @@ RasterizeGaussiansBackwardCUDA(
 	const torch::Tensor& binningBuffer,
 	const torch::Tensor& imageBuffer,
 	const bool debug,
+	const torch::Tensor& samples,
 	const cuBQL::bvh3f& bvh
 ) {
 	const int P = means3D.size(0);

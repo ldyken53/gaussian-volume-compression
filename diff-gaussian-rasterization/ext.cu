@@ -2,9 +2,11 @@
 #include <cuda_runtime.h>
 #define CUBQL_GPU_BUILDER_IMPLEMENTATION 1
 #include <cuBQL/bvh.h>
+#include "cuBQL/builder/cuda.h"
 #include "rasterize_points.h"
 
 static cuBQL::bvh3f bvh;
+static torch::Tensor stored_samples;
 
 // buildBoxes: one thread per sample; packs (x,y,z) into a box3f at that point
 __global__ void buildBoxes(
@@ -23,14 +25,13 @@ __global__ void buildBoxes(
 
 // Host entrypoint: alloc → kernel → build BVH → free temp buffer
 void BuildBVH(const torch::Tensor& samples) {
+    stored_samples = samples.contiguous();
     cudaEvent_t gpuStart, gpuStop;
     cudaEventCreate(&gpuStart);
     cudaEventCreate(&gpuStop);
     cudaEventRecord(gpuStart, 0);
-
-    auto samp = samples.contiguous();
-    int  N = samp.size(0);
-    auto ptr = samp.data_ptr<float>();
+    int  N = stored_samples.size(0);
+    auto ptr = stored_samples.data_ptr<float>();
 
     cuBQL::box3f* d_boxes;
     cudaMalloc(&d_boxes, N * sizeof(cuBQL::box3f));
@@ -38,7 +39,7 @@ void BuildBVH(const torch::Tensor& samples) {
     const int threads = 256;
     const int blocks  = (N + threads - 1) / threads;
     buildBoxes<<<blocks, threads>>>(d_boxes, ptr, N);
-    cuBQL::gpuBuilder(bvh, d_boxes, N, cuBQL::BuildConfig());
+    cuBQL::cuda::radixBuilder(bvh, d_boxes, N, cuBQL::BuildConfig());
 
     cudaEventRecord(gpuStop, 0);
     cudaEventSynchronize(gpuStop);  
@@ -74,6 +75,7 @@ RasterizeGaussiansCUDAWrapper(
         cell_count,
         background,
         debug,
+        stored_samples,
         bvh
     );
 }
@@ -124,6 +126,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
         binningBuffer,
         imageBuffer,
         debug,
+        stored_samples,
         bvh
     );
 }

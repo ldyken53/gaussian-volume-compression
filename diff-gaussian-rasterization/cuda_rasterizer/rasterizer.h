@@ -28,7 +28,9 @@ namespace CudaRasterizer
 			const uint3 num_cells,
 			float* out_cells,
 			float* out_weights,
+			const float* samples,
 			const cuBQL::bvh3f& bvh,
+			float* out_test,
 			int* radii = nullptr,
 			bool debug = false
 		);

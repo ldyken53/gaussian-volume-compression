@@ -20,6 +20,7 @@ RasterizeGaussiansCUDA(
     const uint cell_count,
 	const float background,
 	const bool debug,
+	const torch::Tensor& samples,
 	const cuBQL::bvh3f& bvh
 );
 
@@ -46,5 +47,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const torch::Tensor& binningBuffer,
 	const torch::Tensor& imageBuffer,
 	const bool debug,
+	const torch::Tensor& samples,
 	const cuBQL::bvh3f& bvh
 );

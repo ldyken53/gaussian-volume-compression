@@ -45,7 +45,9 @@ __global__ void preprocessCUDA(int P,
 	uint* aabbs,
 	const dim3 grid,
 	uint32_t* blocks_touched,
-	const cuBQL::bvh3f bvh)
+	const float* samples,
+	const cuBQL::bvh3f bvh,
+	float* out_test)
 {
 	auto idx = cg::this_grid().thread_rank();
 	if (idx >= P)
@@ -150,14 +152,27 @@ __global__ void preprocessCUDA(int P,
     }
 
 	int count = 0;
-	// cuBQL::fixedBoxQuery::forEachPrim<float,3>(
-	// [&](int primID) {
-	// 	count++;
-	// 	return 0;
-    // },
-	// 	bvh,
-	// 	cuBQL::box3f(cuBQL::vec3f(mins.x, mins.y, mins.z), cuBQL::vec3f(maxes.x, maxes.y, maxes.z))
-	// );
+	cuBQL::fixedBoxQuery::forEachPrim<float,3>(
+	[&](int primID) {
+		float3 d = make_float3(
+			samples[primID * 3] - position.x, 
+			samples[primID * 3 + 1] - position.y, 
+			samples[primID * 3 + 2] - position.z
+		);
+		float quad_form = (
+			d.x * (conic[idx * 6] * d.x + conic[idx * 6 + 1] * d.y + conic[idx * 6 + 2] * d.z) +
+			d.y * (conic[idx * 6 + 1] * d.x + conic[idx * 6 + 3] * d.y + conic[idx * 6 + 4] * d.z) +
+			d.z * (conic[idx * 6 + 2] * d.x + conic[idx * 6 + 4] * d.y + conic[idx * 6 + 5] * d.z)
+		);
+		float power = -0.5 * quad_form;
+		if (power < -14.0 || power > 0.0) return 0;
+		float weight = weights[idx] * exp(power);
+		atomicAdd(&out_test[primID], weight);
+		return 0;
+    },
+		bvh,
+		cuBQL::box3f(cuBQL::vec3f(mins.x, mins.y, mins.z), cuBQL::vec3f(maxes.x, maxes.y, maxes.z))
+	);
 
 	// Calculate block size in world coordinates
 	const float block_size_x = cell_size.x * BLOCK_X;
@@ -373,7 +388,9 @@ void FORWARD::preprocess(int P,
 	uint* aabbs,
 	const dim3 grid,
 	uint32_t* blocks_touched,
-	const cuBQL::bvh3f& bvh)
+	const float* samples,
+	const cuBQL::bvh3f& bvh,
+	float* out_test)
 {
 	preprocessCUDA<NUM_CHANNELS> <<<(P + 255) / 256, 256>>> (
 		P,
@@ -397,6 +414,8 @@ void FORWARD::preprocess(int P,
 		aabbs,
 		grid,
 		blocks_touched,
-		bvh
+		samples,
+		bvh,
+		out_test
 	);
 }
