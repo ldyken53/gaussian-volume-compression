@@ -31,6 +31,7 @@ namespace CudaRasterizer
 			const float* samples,
 			const cuBQL::bvh3f& bvh,
 			float* out_test,
+			float* out_testw,
 			int* radii = nullptr,
 			bool debug = false
 		);

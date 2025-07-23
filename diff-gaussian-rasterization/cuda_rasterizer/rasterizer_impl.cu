@@ -233,6 +233,7 @@ int CudaRasterizer::Rasterizer::forward(
 	const float* samples,
 	const cuBQL::bvh3f& bvh,
 	float* out_test,
+	float* out_testw,
 	int* radii,
 	bool debug)
 {
@@ -292,7 +293,8 @@ int CudaRasterizer::Rasterizer::forward(
 		geomState.blocks_touched,
 		samples,
 		bvh,
-		out_test
+		out_test,
+		out_testw
 	), debug)
 	if (debug) cudaEventRecord(events[1]);
 	// cuBQL::box3f* d_boxes;

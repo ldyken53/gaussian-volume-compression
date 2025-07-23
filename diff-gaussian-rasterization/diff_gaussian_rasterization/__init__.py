@@ -64,7 +64,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         )
 
         # Invoke C++/CUDA rasterizer
-        num_rendered, cells, cell_weights, out_test, geomBuffer, binningBuffer, imgBuffer = (
+        num_rendered, cells, cell_weights, out_test, geomBuffer, binningBuffer, imgBuffer, out_testw = (
             _C.rasterize_gaussians(*args)
         )
         # print(f"Num Rendered: {num_rendered}")
@@ -86,7 +86,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             cells,
             cell_weights
         )
-        return cells, cell_weights, out_test
+        return cells, cell_weights, out_test, out_testw
 
     @staticmethod
     def backward(ctx, grad_out_cells, grad_out_cell_weights, __):

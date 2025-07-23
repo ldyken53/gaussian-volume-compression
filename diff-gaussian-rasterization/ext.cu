@@ -47,7 +47,7 @@ void BuildBVH(const torch::Tensor& samples) {
     cudaEventElapsedTime(&msBoxes, gpuStart, gpuStop);
     std::cout << "BVH time: " << msBoxes << " ms\n";
 }
-std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansCUDAWrapper(
 	const torch::Tensor& means3D,
 	const torch::Tensor& scales,

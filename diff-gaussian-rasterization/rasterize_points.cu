@@ -22,7 +22,7 @@ std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
 	return lambda;
 }
 
-std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansCUDA(
 	const torch::Tensor& means3D,
 	const torch::Tensor& scales,
@@ -55,6 +55,7 @@ RasterizeGaussiansCUDA(
 	auto float_opts = means3D.options().dtype(torch::kFloat32);
 	torch::Tensor out_cells = torch::full({num_cells.x, num_cells.y, num_cells.z}, background, float_opts);
 	torch::Tensor out_test = torch::zeros({samples.size(0)}, float_opts);
+	torch::Tensor out_testw = torch::zeros({samples.size(0)}, float_opts);
 	torch::Tensor out_weights = torch::full({num_cells.x, num_cells.y, num_cells.z}, background, float_opts);
 	torch::Tensor radii = torch::full({P}, 0, means3D.options().dtype(torch::kInt32));
 	torch::Device device(torch::kCUDA);
@@ -90,10 +91,11 @@ RasterizeGaussiansCUDA(
 			samples.contiguous().data<float>(),
 			bvh,
 			out_test.contiguous().data<float>(),
+			out_testw.contiguous().data<float>(),
 			radii.contiguous().data<int>(),
 			debug);
 	}
-	return std::make_tuple(rendered, out_cells, out_weights, out_test, geomBuffer, binningBuffer, imgBuffer);
+	return std::make_tuple(rendered, out_cells, out_weights, out_test, geomBuffer, binningBuffer, imgBuffer, out_testw);
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>

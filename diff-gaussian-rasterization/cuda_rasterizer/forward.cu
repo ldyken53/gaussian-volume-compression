@@ -47,7 +47,8 @@ __global__ void preprocessCUDA(int P,
 	uint32_t* blocks_touched,
 	const float* samples,
 	const cuBQL::bvh3f bvh,
-	float* out_test)
+	float* out_test,
+	float* out_testw)
 {
 	auto idx = cg::this_grid().thread_rank();
 	if (idx >= P)
@@ -167,7 +168,8 @@ __global__ void preprocessCUDA(int P,
 		float power = -0.5 * quad_form;
 		if (power < -14.0 || power > 0.0) return 0;
 		float weight = weights[idx] * exp(power);
-		atomicAdd(&out_test[primID], weight);
+		atomicAdd(&out_testw[primID], weight);
+		atomicAdd(&out_test[primID], weight * values[idx]);
 		return 0;
     },
 		bvh,
@@ -390,7 +392,8 @@ void FORWARD::preprocess(int P,
 	uint32_t* blocks_touched,
 	const float* samples,
 	const cuBQL::bvh3f& bvh,
-	float* out_test)
+	float* out_test,
+	float* out_testw)
 {
 	preprocessCUDA<NUM_CHANNELS> <<<(P + 255) / 256, 256>>> (
 		P,
@@ -416,6 +419,7 @@ void FORWARD::preprocess(int P,
 		blocks_touched,
 		samples,
 		bvh,
-		out_test
+		out_test,
+		out_testw
 	);
 }
