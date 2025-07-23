@@ -83,7 +83,7 @@ def training(
     samples_tf = np.flip(rot, axis=2)
     samples_tf_flat = samples_tf.reshape(-1, 3)
     start = time.time()
-    num_jitters = 1000
+    num_jitters = 1
     big_samples = np.tile(samples_tf_flat, (num_jitters, 1))
     big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
     big_jitter *= np.array(spacing)[None, :]
@@ -96,9 +96,6 @@ def training(
         big_samples
     )
     big_gt = big_gt.reshape(num_jitters, cell_count**3)
-    big_gt_weights = big_gt.copy()
-    big_gt_weights[big_gt_weights != -1] = 1
-    big_gt_weights[big_gt_weights == -1] = 0
     big_samples = big_samples.reshape(num_jitters, cell_count**3, 3)
     big_jitter = big_jitter.reshape(num_jitters, cell_count**3, 3)
     end = time.time()
@@ -107,9 +104,6 @@ def training(
     print(f"Number of invalid samples: {np.count_nonzero(gt_cells == -1)}")
     tensor_to_vtk(gt_cells, "test_gt.vtk", spacing)
     gt = torch.tensor(gt_cells).cuda()
-    gt_weights = big_gt_weights[0].reshape(cell_count, cell_count, cell_count)
-    tensor_to_vtk(gt_weights, "test_gt_weight.vtk", spacing)
-    gt_weights = torch.tensor(gt_weights).cuda()
     jitter_cuda = torch.tensor(big_jitter[0].ravel(), dtype=torch.float, device="cuda")
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
@@ -124,8 +118,6 @@ def training(
         jitter_cuda = torch.tensor(jitter.ravel(), dtype=torch.float, device="cuda")
         gt_cells = big_gt[jit_idx].reshape(cell_count, cell_count, cell_count)
         gt = torch.tensor(gt_cells).cuda()
-        gt_weights = big_gt_weights[jit_idx].reshape(cell_count, cell_count, cell_count)
-        gt_weights = torch.tensor(gt_weights).cuda()
         samples_tf_flat = big_samples[jit_idx]
 
         gaussians.update_learning_rate(iteration)
@@ -149,17 +141,16 @@ def training(
         l1_lv = l1_loss(cells, gt)
         # TODO: FIX FP AND FN FOR CHANGING CELL COUNTS
         k = 10  # Adjust this to control decay rate
-        fn_mask = (gt != -1)
+        fn_mask = torch.logical_and(gt != -1, weights < 0.015)
         if fn_mask.any():
-            false_negative = 10 * torch.exp(-k * weights[fn_mask]).mean()
+            false_negative = 1 * torch.exp(-k * weights[fn_mask]).mean()
         else:
             false_negative = torch.tensor(0., device="cuda")
         mask = torch.logical_and(gt == -1, weights > 0)
         if mask.any():
-            false_positive = (2 * (1 - torch.exp(-k * weights[mask]))).mean()
+            false_positive = (1 * (1 - torch.exp(-k * weights[mask]))).mean()
         else:
             false_positive = torch.tensor(0., device="cuda")
-        # false_positive = l1_loss(weights[gt == -1 ], gt_weights[gt == -1])
         loss = l1_lv + false_positive + false_negative
         loss.backward()
 
