@@ -81,23 +81,36 @@ def training(
     samples_3d = samples.reshape(cell_count, cell_count, cell_count, 3)
     rot = np.rot90(samples_3d, k=1, axes=(2,0))
     samples_tf = np.flip(rot, axis=2)
-    samples_tf_flat = samples_tf.reshape(-1, 3)
+    save_cell = samples_tf.reshape(-1, 3)
+    save_gt = gpu_sample(
+        gaussians.mesh.points, 
+        gaussians.mesh.cell_connectivity.astype(np.int64),
+        gaussians.mesh.point_data['value'],
+        save_cell
+    )
+    samples_tf_flat = gaussians.mesh.points
+    P, D = gaussians.mesh.points.shape
+    size = 125000
     start = time.time()
     num_jitters = 100
-    big_samples = np.tile(samples_tf_flat, (num_jitters, 1))
-    big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
+    idx = np.random.choice(P, size=(num_jitters, size), replace=True)
+    big_samples = gaussians.mesh.points[idx].reshape(-1, D)
+    big_samples2 = np.tile(save_cell, (num_jitters, 1))
+    big_jitter = np.random.uniform(-0.5, 0.5, big_samples2.shape)
     big_jitter *= np.array(spacing)[None, :]
-    big_jitter[: cell_count**3, :] = 0
-    big_samples = big_samples + big_jitter
+    # big_jitter = np.random.uniform(-0.0001, 0.0001, big_samples.shape)
+    # big_jitter = np.ones_like(big_samples) * 0.00001
+    # big_jitter[: size, :] = 0
+    big_samples2 = big_samples2 + big_jitter
+    big_samples = big_samples2
     big_gt = gpu_sample(
         gaussians.mesh.points, 
         gaussians.mesh.cell_connectivity.astype(np.int64),
         gaussians.mesh.point_data['value'],
         big_samples
     )
-    big_gt = big_gt.reshape(num_jitters, cell_count**3)
-    big_samples = big_samples.reshape(num_jitters, cell_count**3, 3)
-    big_jitter = big_jitter.reshape(num_jitters, cell_count**3, 3)
+    big_gt = big_gt.reshape(num_jitters, size)
+    big_samples = big_samples.reshape(num_jitters, size, 3)
     end = time.time()
     print(f"Time to sample gt: {end - start}")
     gt_cells = big_gt[0]
@@ -111,21 +124,25 @@ def training(
         pipe,
         cell_count,
     )
-    build_bvh(torch.tensor(samples_tf_flat, dtype=torch.float, device="cuda"))
+    build_bvh(torch.tensor(big_samples[0], dtype=torch.float, device="cuda"))
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
         iter_start.record()
 
-        # if iteration % 10 == 0 or iteration in saving_iterations:
         jit_idx = 0
-        if iteration not in saving_iterations:
+        if iteration in saving_iterations:
+            gt_cells = save_gt
+            gt = torch.tensor(gt_cells).cuda()
+            samples_tf_flat = save_cell
+            build_bvh(torch.tensor(samples_tf_flat, dtype=torch.float, device="cuda"))
+        elif iteration % 10 == 0:
             jit_idx = np.random.randint(0, num_jitters)
-        gt_cells = big_gt[jit_idx]
-        gt = torch.tensor(gt_cells).cuda()
-        samples_tf_flat = big_samples[jit_idx]
-        build_bvh(torch.tensor(samples_tf_flat, dtype=torch.float, device="cuda"))
+            gt_cells = big_gt[jit_idx]
+            gt = torch.tensor(gt_cells).cuda()
+            samples_tf_flat = big_samples[jit_idx]
+            build_bvh(torch.tensor(samples_tf_flat, dtype=torch.float, device="cuda"))
 
         gaussians.update_learning_rate(iteration)
 
@@ -180,10 +197,10 @@ def training(
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             mse = torch.mean((cells - gt) ** 2)
             psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
-            ema_lv_for_log = 0.4 * l1_lv + 0.6 * ema_lv_for_log
-            ema_lfp_for_log = 0.4 * false_positive + 0.6 * ema_lfp_for_log
-            ema_lfn_for_log = 0.4 * false_negative + 0.6 * ema_lfn_for_log
-            ema_lpsnr_for_log = 0.4 * psnr + 0.6 * ema_lpsnr_for_log
+            ema_lv_for_log = 0.1 * l1_lv + 0.9 * ema_lv_for_log
+            ema_lfp_for_log = 0.1 * false_positive + 0.9 * ema_lfp_for_log
+            ema_lfn_for_log = 0.1 * false_negative + 0.9 * ema_lfn_for_log
+            ema_lpsnr_for_log = 0.1 * psnr + 0.9 * ema_lpsnr_for_log
             if iteration % 500 == 0:
                 progress_bar.set_postfix(
                     {
@@ -299,12 +316,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--test_iterations", nargs="+", type=int, default=[7_000, 30_000]
     )
-    # parser.add_argument(
-    #     "--save_iterations", nargs="+", type=int, default=[1, 16, 32, 64, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
-    # )
     parser.add_argument(
-        "--save_iterations", nargs="+", type=int, default=[8_000, 16_000]
+        "--save_iterations", nargs="+", type=int, default=[1, 16, 32, 64, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
     )
+    # parser.add_argument(
+    #     "--save_iterations", nargs="+", type=int, default=[1, 1000, 8_000, 16_000]
+    # )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--log_to_file", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])

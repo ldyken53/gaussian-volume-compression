@@ -53,7 +53,7 @@ def training(
     samples_tf_flat = samples_tf.reshape(-1, 3)
     jitter = np.random.uniform(-0.5, 0.5, samples_tf_flat.shape)
     jitter *= np.array(spacing)[None, :]
-    samples_tf_flat = samples_tf_flat + jitter
+    # samples_tf_flat = samples_tf_flat + jitter
     gt_cells = gpu_sample(
         gaussians.mesh.points, 
         gaussians.mesh.cell_connectivity.astype(np.int64),
@@ -101,7 +101,7 @@ def training(
     print(f"L2 loss: {mse}")
     print(f"PSNR: {psnr}")
     print(f"PSNR without false positives/negatives: {psnr2}")
-    # tensor_to_vtk(cells.detach().cpu().numpy(), f"test.vtk", spacing)
+    tensor_to_vtk(cells.detach().cpu().numpy().reshape(cell_count, cell_count, cell_count), f"test.vtk", spacing)
 
 if __name__ == "__main__":
     window = create_window()
