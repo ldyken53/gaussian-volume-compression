@@ -13,7 +13,7 @@ from tqdm import tqdm
 import pyvista as pv
 
 from arguments import ModelParams, OptimizationParams, PipelineParams
-from gaussian_renderer import init_rasterizer, render
+from gaussian_renderer import init_rasterizer, render, build_bvh
 from gpu_mesh_sampling import gpu_sample
 from scene import GaussianModel, Scene
 from utils.debug_utils import tensor_to_vtk, analyze_array
@@ -83,12 +83,12 @@ def training(
     samples_tf = np.flip(rot, axis=2)
     samples_tf_flat = samples_tf.reshape(-1, 3)
     start = time.time()
-    num_jitters = 1
+    num_jitters = 100
     big_samples = np.tile(samples_tf_flat, (num_jitters, 1))
     big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
     big_jitter *= np.array(spacing)[None, :]
     big_jitter[: cell_count**3, :] = 0
-    # big_samples = big_samples + big_jitter
+    big_samples = big_samples + big_jitter
     big_gt = gpu_sample(
         gaussians.mesh.points, 
         gaussians.mesh.cell_connectivity.astype(np.int64),
@@ -102,40 +102,37 @@ def training(
     print(f"Time to sample gt: {end - start}")
     gt_cells = big_gt[0]
     print(f"Number of invalid samples: {np.count_nonzero(gt_cells == -1)}")
-    tensor_to_vtk(gt_cells.reshape(cell_count, cell_count, cell_count), "test_gt.vtk", spacing)
+    # tensor_to_vtk(gt_cells.reshape(cell_count, cell_count, cell_count), "test_gt.vtk", spacing)
     gt = torch.tensor(gt_cells).cuda()
-    jitter_cuda = torch.tensor(big_jitter[0].ravel(), dtype=torch.float, device="cuda")
+    if debug_from == 0:
+        pipe.debug = True
     init_rasterizer(
         gaussians,
         pipe,
-        torch.tensor(samples_tf_flat, dtype=torch.float, device="cuda"),
         cell_count,
     )
+    build_bvh(torch.tensor(samples_tf_flat, dtype=torch.float, device="cuda"))
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
         iter_start.record()
 
-        # jit_idx = 0
-        # if iteration not in saving_iterations:
-        #     jit_idx = np.random.randint(0, num_jitters)
-        # jitter = big_jitter[jit_idx]
-        # jitter_cuda = torch.tensor(jitter.ravel(), dtype=torch.float, device="cuda")
-        # gt_cells = big_gt[jit_idx]
-        # gt = torch.tensor(gt_cells).cuda()
-        # samples_tf_flat = big_samples[jit_idx]
+        # if iteration % 10 == 0 or iteration in saving_iterations:
+        jit_idx = 0
+        if iteration not in saving_iterations:
+            jit_idx = np.random.randint(0, num_jitters)
+        gt_cells = big_gt[jit_idx]
+        gt = torch.tensor(gt_cells).cuda()
+        samples_tf_flat = big_samples[jit_idx]
+        build_bvh(torch.tensor(samples_tf_flat, dtype=torch.float, device="cuda"))
 
         gaussians.update_learning_rate(iteration)
 
         # Render
-        if (iteration - 1) == debug_from:
-            pipe.debug = True
-
         render_pkg = render(
             gaussians,
             pipe,
-            jitter_cuda,
             cell_count
         )
         cells, weights= (
@@ -173,7 +170,7 @@ def training(
                     "iteration": iteration,
                     "loss": loss.item(),
                     "l_v": l1_lv.item(),
-                    # "false_positive": false_positive.item(),
+                    "false_positive": false_positive.item(),
                     "psnr": psnr.item(),
                     "psnr2": psnr2.item(),
                     "num_gaussians": num_gaussians
@@ -184,8 +181,8 @@ def training(
             mse = torch.mean((cells - gt) ** 2)
             psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
             ema_lv_for_log = 0.4 * l1_lv + 0.6 * ema_lv_for_log
-            # ema_lfp_for_log = 0.4 * false_positive + 0.6 * ema_lfp_for_log
-            # ema_lfn_for_log = 0.4 * false_negative + 0.6 * ema_lfn_for_log
+            ema_lfp_for_log = 0.4 * false_positive + 0.6 * ema_lfp_for_log
+            ema_lfn_for_log = 0.4 * false_negative + 0.6 * ema_lfn_for_log
             ema_lpsnr_for_log = 0.4 * psnr + 0.6 * ema_lpsnr_for_log
             if iteration % 500 == 0:
                 progress_bar.set_postfix(

@@ -8,7 +8,7 @@ from tqdm import tqdm
 import pyvista as pv
 
 from arguments import ModelParams, OptimizationParams, PipelineParams
-from gaussian_renderer import init_rasterizer, render
+from gaussian_renderer import init_rasterizer, render, build_bvh
 from scene import GaussianModel, Scene
 from gpu_mesh_sampling import gpu_sample
 from utils.debug_utils import tensor_to_vtk
@@ -35,7 +35,7 @@ def training(
     gaussians = GaussianModel()
     scene = Scene(dataset, gaussians, load_iteration=-1)
     # Make ground truth
-    cell_count = 50
+    cell_count = 200
     spacing = [
         (gaussians.maxes[0] - gaussians.mins[0]) / (cell_count - 1),
         (gaussians.maxes[1] - gaussians.mins[1]) / (cell_count - 1),
@@ -73,8 +73,10 @@ def training(
     init_rasterizer(
         gaussians,
         pipe,
-        torch.tensor(samples_tf_flat, dtype=torch.float, device="cuda"),
         cell_count,
+    )
+    build_bvh(
+        torch.tensor(samples_tf_flat, dtype=torch.float, device="cuda")
     )
     render_pkg = render(
         gaussians,
@@ -86,8 +88,8 @@ def training(
         render_pkg["cells"],
         render_pkg["weights"]
     )
+
     l1_l = l1_loss(cells, gt)
-    l1_l.backward()
     mse = torch.mean((cells - gt) ** 2)
     psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
     print(f"Percent invalid samples: {np.count_nonzero(gt_cells == -1) / cell_count ** 3}")
