@@ -34,6 +34,10 @@ void BuildBVH(const torch::Tensor& samples, const bool debug) {
     auto ptr = stored_samples.data_ptr<float>();
 
     cuBQL::cuda::free(bvh);
+    bvh.nodes    = nullptr;
+    bvh.primIDs  = nullptr;
+    bvh.numNodes = 0;
+    bvh.numPrims = 0;
     bvh = cuBQL::bvh3f();
     cuBQL::box3f* d_boxes;
     cudaMalloc(&d_boxes, N * sizeof(cuBQL::box3f));
@@ -42,6 +46,7 @@ void BuildBVH(const torch::Tensor& samples, const bool debug) {
     const int blocks  = (N + threads - 1) / threads;
     buildBoxes<<<blocks, threads>>>(d_boxes, ptr, N);
     cuBQL::cuda::radixBuilder(bvh, d_boxes, N, cuBQL::BuildConfig());
+    cudaFree(d_boxes);
 
     cudaEventRecord(gpuStop, 0);
     cudaEventSynchronize(gpuStop);  
