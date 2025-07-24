@@ -24,7 +24,7 @@ __global__ void buildBoxes(
 }
 
 // Host entrypoint: alloc → kernel → build BVH → free temp buffer
-void BuildBVH(const torch::Tensor& samples) {
+void BuildBVH(const torch::Tensor& samples, const bool debug) {
     stored_samples = samples.contiguous();
     cudaEvent_t gpuStart, gpuStop;
     cudaEventCreate(&gpuStart);
@@ -33,6 +33,8 @@ void BuildBVH(const torch::Tensor& samples) {
     int  N = stored_samples.size(0);
     auto ptr = stored_samples.data_ptr<float>();
 
+    cuBQL::cuda::free(bvh);
+    bvh = cuBQL::bvh3f();
     cuBQL::box3f* d_boxes;
     cudaMalloc(&d_boxes, N * sizeof(cuBQL::box3f));
 
@@ -45,8 +47,11 @@ void BuildBVH(const torch::Tensor& samples) {
     cudaEventSynchronize(gpuStop);  
     float msBoxes = 0.f;
     cudaEventElapsedTime(&msBoxes, gpuStart, gpuStop);
-    std::cout << "BVH time: " << msBoxes << " ms\n";
+    if (debug) {
+        std::cout << "BVH time: " << msBoxes << " ms\n";
+    }
 }
+
 std::tuple<torch::Tensor, torch::Tensor>
 RasterizeGaussiansCUDAWrapper(
 	const torch::Tensor& means3D,

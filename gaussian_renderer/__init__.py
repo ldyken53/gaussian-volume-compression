@@ -11,7 +11,6 @@ _rasterizer: GaussianRasterizer | None = None
 def init_rasterizer(
     pc: GaussianModel,
     pipe,
-    samples,
     cell_count=100,
     bg=-1.0,
     scaling_modifier=1.0
@@ -34,14 +33,16 @@ def init_rasterizer(
     # store the rasterizer; we'll patch the settings per-call
     _rasterizer = GaussianRasterizer(
         raster_settings=raster_settings,
-        samples=samples
     )
+
+
+def build_bvh(samples):
+    _rasterizer.build_bvh(samples)
 
 
 def render(
     pc: GaussianModel,
     pipe,
-    jitter,
     cell_count=100,
     bg=-1.0,
     scaling_modifier=1.0
@@ -63,7 +64,6 @@ def render(
         rotations=rotations,
         values=values,
         weights=weights,
-        jitter=jitter
     )
 
     out = {
