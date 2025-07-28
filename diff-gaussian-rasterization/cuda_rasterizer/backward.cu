@@ -9,7 +9,7 @@ namespace cg = cooperative_groups;
 // Perform initial steps for each Gaussian prior to rasterization.
 template<int C>
 __global__ void preprocessCUDA(int P,
-	const float3* means3D,
+	const float* means3D,
 	const glm::vec3* scales,
 	const float scale_modifier,
 	const glm::vec4* rotations,
@@ -23,7 +23,7 @@ __global__ void preprocessCUDA(int P,
 	const float* out_weights,
 	const float* dL_dsamples,
 	const float* dL_dsample_weights,
-	float3* dL_dmeans,
+	float* dL_dmeans,
 	float* dL_dvalues,
 	float* dL_dweights,
 	glm::vec3* dL_dscales,
@@ -98,7 +98,7 @@ __global__ void preprocessCUDA(int P,
     const float n[2] = {-1.0f, 1.0f};
     
     // Initialize mins and maxes with gaussian position
-	const float3 position = means3D[idx];
+	const float3 position = { means3D[3 * idx], means3D[3 * idx + 1], means3D[3 * idx + 2] };
     float3 mins = position;
     float3 maxes = position;
 
@@ -197,9 +197,9 @@ __global__ void preprocessCUDA(int P,
 
 	dL_dvalues[idx] = dL_dvalue;
 	dL_dweights[idx] = dL_dw;
-	dL_dmeans[idx].x = dL_dmean_x;
-	dL_dmeans[idx].y = dL_dmean_y;	
-	dL_dmeans[idx].z = dL_dmean_z;
+	dL_dmeans[idx * 3] = dL_dmean_x;
+	dL_dmeans[idx * 3 + 1] = dL_dmean_y;	
+	dL_dmeans[idx * 3 + 2] = dL_dmean_z;
 
 	float dL_dconic[6] = {
 		dL_dxx,
@@ -263,7 +263,7 @@ __global__ void preprocessCUDA(int P,
 
 void BACKWARD::preprocess(
 	int P,
-	const float3* means3D,
+	const float* means3D,
 	const glm::vec3* scales,
 	const float scale_modifier,
 	const glm::vec4* rotations,
@@ -277,7 +277,7 @@ void BACKWARD::preprocess(
 	const float* out_weights,
 	const float* dL_dsamples,
 	const float* dL_dsample_weights,
-	float3* dL_dmean3D,
+	float* dL_dmean3D,
 	float* dL_dvalue,
 	float* dL_dweights,
 	glm::vec3* dL_dscale,

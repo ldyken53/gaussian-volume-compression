@@ -122,7 +122,7 @@ void CudaRasterizer::Rasterizer::backward(
 	// Take care of the rest of preprocessing, compute loss w.r.t
 	// scales and rotation from conic gradients.
 	CHECK_CUDA(BACKWARD::preprocess(P,
-		(float3*) means3D,
+		means3D,
 		(glm::vec3*)scales,
 		scale_modifier,
 		(glm::vec4*)rotations,
@@ -135,7 +135,7 @@ void CudaRasterizer::Rasterizer::backward(
 		out_weights,
 		dL_dsamples,
 		dL_dsample_weights,
-		(float3*) dL_dmean3D,
+		dL_dmean3D,
 		dL_dvalue,
 		dL_dweights,
 		(glm::vec3*)dL_dscale,

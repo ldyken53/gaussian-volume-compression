@@ -12,7 +12,7 @@ namespace BACKWARD
 {
 	void preprocess(
 		int P,
-		const float3* means3D,
+		const float* means3D,
 		const glm::vec3* scales,
 		const float scale_modifier,
 		const glm::vec4* rotations,
@@ -26,7 +26,7 @@ namespace BACKWARD
 		const float* out_weights,
 		const float* dL_dsamples,
 		const float* dL_dsample_weights,
-		float3* dL_dmean3D,
+		float* dL_dmean3D,
 		float* dL_dvalue,
 		float* dL_dweights,
 		glm::vec3* dL_dscale,
