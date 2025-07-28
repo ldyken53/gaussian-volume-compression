@@ -33,9 +33,9 @@ def training(
 ):
     
     gaussians = GaussianModel()
-    scene = Scene(dataset, gaussians, load_iteration=16000)
+    scene = Scene(dataset, gaussians, load_iteration=-1)
     # Make ground truth
-    cell_count = 50
+    cell_count = 200
     spacing = [
         (gaussians.maxes[0] - gaussians.mins[0]) / (cell_count - 1),
         (gaussians.maxes[1] - gaussians.mins[1]) / (cell_count - 1),
@@ -56,7 +56,7 @@ def training(
         jitter[...,i] *= spacing[i]
     gt_cells = gpu_sample(
         gaussians.mesh.points, 
-        gaussians.mesh.cell_connectivity.astype(np.int64),
+        gaussians.mesh.dimensions,
         gaussians.mesh.point_data['value'],
         samples_tf_flat
     )
@@ -66,8 +66,8 @@ def training(
     gt_weights[gt_weights != -1] = 1
     gt_weights[gt_weights == -1] = 0
     gt_weights = torch.tensor(gt_weights).cuda()
-    tensor_to_vtk(gt_cells, "test_gt.vtk", spacing)
-    tensor_to_vtk(gt_weights, "test_gt_weight.vtk", spacing)
+    # tensor_to_vtk(gt_cells, "test_gt.vtk", spacing)
+    # tensor_to_vtk(gt_weights, "test_gt_weight.vtk", spacing)
 
     pipe.debug = True
     render_pkg = render(

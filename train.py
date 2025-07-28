@@ -83,7 +83,7 @@ def training(
     samples_tf = np.flip(rot, axis=2)
     samples_tf_flat = samples_tf.reshape(-1, 3)
     start = time.time()
-    num_jitters = 1000
+    num_jitters = 100
     big_samples = np.tile(samples_tf_flat, (num_jitters, 1))
     big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
     big_jitter *= np.array(spacing)[None, :]
@@ -91,7 +91,7 @@ def training(
     big_samples = big_samples + big_jitter
     big_gt = gpu_sample(
         gaussians.mesh.points, 
-        gaussians.mesh.cell_connectivity.astype(np.int64),
+        gaussians.mesh.dimensions,
         gaussians.mesh.point_data['value'],
         big_samples
     )
@@ -160,7 +160,7 @@ def training(
         else:
             false_positive = torch.tensor(0., device="cuda")
         # false_positive = l1_loss(weights[gt == -1 ], gt_weights[gt == -1])
-        loss = l1_lv + false_positive + false_negative
+        loss = l1_lv + false_negative + false_positive
         loss.backward()
 
         iter_end.record()
@@ -311,7 +311,7 @@ if __name__ == "__main__":
     #     "--save_iterations", nargs="+", type=int, default=[1, 16, 32, 64, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
     # )
     parser.add_argument(
-        "--save_iterations", nargs="+", type=int, default=[8_000, 16_000]
+        "--save_iterations", nargs="+", type=int, default=[]
     )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--log_to_file", action="store_true")
