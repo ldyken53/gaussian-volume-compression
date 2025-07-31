@@ -88,7 +88,7 @@ def training(
     big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
     big_jitter *= np.array(spacing)[None, :]
     big_jitter[: cell_count**3, :] = 0
-    big_samples = big_samples + big_jitter
+    big_samples = np.clip(big_samples + big_jitter, 0.0, 1.0)
     big_gt = gpu_sample(
         gaussians.mesh.points, 
         gaussians.mesh.dimensions,
@@ -160,7 +160,7 @@ def training(
         else:
             false_positive = torch.tensor(0., device="cuda")
         # false_positive = l1_loss(weights[gt == -1 ], gt_weights[gt == -1])
-        loss = l1_lv + false_negative + false_positive
+        loss = l1_lv
         loss.backward()
 
         iter_end.record()
