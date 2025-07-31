@@ -67,7 +67,7 @@ def training(
     ema_lpsnr_for_log = 0.0
 
     # Make ground truth
-    cell_count = 50
+    cell_count = 25
     spacing = [
         (gaussians.maxes[0] - gaussians.mins[0]) / (cell_count - 1),
         (gaussians.maxes[1] - gaussians.mins[1]) / (cell_count - 1),
@@ -84,31 +84,34 @@ def training(
     save_cell = samples_tf.reshape(-1, 3)
     save_gt = gpu_sample(
         gaussians.mesh.points, 
-        gaussians.mesh.cell_connectivity.astype(np.int64),
+        gaussians.mesh.dimensions,
         gaussians.mesh.point_data['value'],
         save_cell
     )
     samples_tf_flat = gaussians.mesh.points
     P, D = gaussians.mesh.points.shape
-    size = 125000
+    size = cell_count ** 3
     start = time.time()
-    num_jitters = 100
+    num_jitters = 1000
     idx = np.random.choice(P, size=(num_jitters, size), replace=True)
-    big_samples = gaussians.mesh.points[idx].reshape(-1, D)
-    big_samples2 = np.tile(save_cell, (num_jitters, 1))
-    big_jitter = np.random.uniform(-0.5, 0.5, big_samples2.shape)
-    big_jitter *= np.array(spacing)[None, :]
-    # big_jitter = np.random.uniform(-0.0001, 0.0001, big_samples.shape)
-    # big_jitter = np.ones_like(big_samples) * 0.00001
+    mesh_samples = gaussians.mesh.points[idx]
+    cell_samples = np.broadcast_to(save_cell, (num_jitters, size, D))
+    jitter = np.random.uniform(-0.5, 0.5, size=(num_jitters, size, D))
+    jitter *= np.array(spacing)[None, None, :]    
+    uniform_samples = cell_samples + jitter
+    # big_jitter = np.random.uniform(-0.0001, 0.0001, size=(num_jitters, size, D))
+    # mesh_samples = mesh_samples + big_jitter
     # big_jitter[: size, :] = 0
-    big_samples2 = big_samples2 + big_jitter
-    big_samples = big_samples2
+    # big_samples2 = big_samples2 + big_jitter
+    # big_samples = np.concatenate([mesh_samples, uniform_samples], axis=1).reshape(-1, D)
+    big_samples = np.clip(uniform_samples, 0.0, 1.0).reshape(-1, D)
     big_gt = gpu_sample(
         gaussians.mesh.points, 
-        gaussians.mesh.cell_connectivity.astype(np.int64),
+        gaussians.mesh.dimensions,
         gaussians.mesh.point_data['value'],
         big_samples
     )
+    print(big_gt.shape)
     big_gt = big_gt.reshape(num_jitters, size)
     big_samples = big_samples.reshape(num_jitters, size, 3)
     end = time.time()
@@ -126,23 +129,32 @@ def training(
     )
     build_bvh(torch.tensor(big_samples[0], dtype=torch.float, device="cuda"))
 
+    loss_idx = (gt_cells == 2)
+    loss_samples = big_samples[0][loss_idx]
+    loss_gt = gt_cells[loss_idx]
+
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
         iter_start.record()
 
-        jit_idx = 0
         if iteration in saving_iterations:
             gt_cells = save_gt
             gt = torch.tensor(gt_cells).cuda()
-            samples_tf_flat = save_cell
-            build_bvh(torch.tensor(samples_tf_flat, dtype=torch.float, device="cuda"))
-        elif iteration % 10 == 0:
+            current_samples = save_cell
+        else:
+            num_loss = loss_samples.shape[0]
             jit_idx = np.random.randint(0, num_jitters)
-            gt_cells = big_gt[jit_idx]
+            gt_cells = np.concatenate([
+                loss_gt,
+                big_gt[jit_idx][:(size - num_loss)]
+            ])
             gt = torch.tensor(gt_cells).cuda()
-            samples_tf_flat = big_samples[jit_idx]
-            build_bvh(torch.tensor(samples_tf_flat, dtype=torch.float, device="cuda"))
+            current_samples = np.concatenate([
+                loss_samples,
+                big_samples[jit_idx][:(size - num_loss)]
+            ])
+        build_bvh(torch.tensor(current_samples, dtype=torch.float, device="cuda"))
 
         gaussians.update_learning_rate(iteration)
 
@@ -159,7 +171,7 @@ def training(
         l1_lv = l1_loss(cells, gt)
         # TODO: FIX FP AND FN FOR CHANGING CELL COUNTS
         k = 10  # Adjust this to control decay rate
-        fn_mask = (gt != -1)
+        fn_mask = torch.logical_and(gt != -1, weights < 10)
         if fn_mask.any():
             false_negative = 1 * torch.exp(-k * weights[fn_mask]).mean()
         else:
@@ -171,8 +183,27 @@ def training(
             false_positive = torch.tensor(0., device="cuda")
         loss = l1_lv + false_positive + false_negative
         loss.backward()
-
         iter_end.record()
+        recon_mask = torch.logical_and(cells != -1, gt != -1)
+        loss_idx = torch.logical_and(
+        # torch.logical_or(
+            # torch.logical_or(
+            #     torch.logical_and(gt == -1, weights > 0.07),
+            #     torch.logical_and(gt != -1, torch.logical_and(
+            #         weights > 0,
+            #         weights < 0.07
+            #         )
+            # ),
+            # torch.logical_and(
+                torch.abs((cells - gt) > 0.01),
+                recon_mask
+            # )
+        ).cpu()
+        # if iteration not in saving_iterations:
+        #     loss_samples = current_samples[loss_idx]
+        #     loss_gt = gt_cells[loss_idx]
+        if iteration % 500 == 0:
+            print(f"Fraction of samples that are lossy: {loss_samples.shape[0] / size}")
 
         with torch.no_grad():
             # Logging
@@ -317,10 +348,10 @@ if __name__ == "__main__":
         "--test_iterations", nargs="+", type=int, default=[7_000, 30_000]
     )
     parser.add_argument(
-        "--save_iterations", nargs="+", type=int, default=[1, 16, 32, 64, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
+        "--save_iterations", nargs="+", type=int, default=[1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 48_000, 64_000]
     )
     # parser.add_argument(
-    #     "--save_iterations", nargs="+", type=int, default=[1, 1000, 8_000, 16_000]
+    #     "--save_iterations", nargs="+", type=int, default=[8_000, 16_000]
     # )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--log_to_file", action="store_true")

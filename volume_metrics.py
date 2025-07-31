@@ -53,10 +53,10 @@ def training(
     samples_tf_flat = samples_tf.reshape(-1, 3)
     jitter = np.random.uniform(-0.5, 0.5, samples_tf_flat.shape)
     jitter *= np.array(spacing)[None, :]
-    # samples_tf_flat = samples_tf_flat + jitter
+    samples_tf_flat = np.clip(samples_tf_flat + jitter, 0.0, 1.0)
     gt_cells = gpu_sample(
         gaussians.mesh.points, 
-        gaussians.mesh.cell_connectivity.astype(np.int64),
+        gaussians.mesh.dimensions,
         gaussians.mesh.point_data['value'],
         samples_tf_flat
     )
@@ -66,7 +66,7 @@ def training(
     gt_weights[gt_weights != -1] = 1
     gt_weights[gt_weights == -1] = 0
     gt_weights = torch.tensor(gt_weights).cuda()
-    # tensor_to_vtk(gt_cells, "test_gt.vtk", spacing)
+    # tensor_to_vtk(gt_cells.reshape(cell_count, cell_count, cell_count), "test_gt.vtk", spacing)
     # tensor_to_vtk(gt_weights, "test_gt_weight.vtk", spacing)
 
     pipe.debug = True
@@ -81,7 +81,6 @@ def training(
     render_pkg = render(
         gaussians,
         pipe,
-        torch.tensor(np.zeros_like(jitter).ravel(), dtype=torch.float, device="cuda"),
         cell_count,
     )
     cells, weights = (
@@ -101,7 +100,7 @@ def training(
     print(f"L2 loss: {mse}")
     print(f"PSNR: {psnr}")
     print(f"PSNR without false positives/negatives: {psnr2}")
-    tensor_to_vtk(cells.detach().cpu().numpy().reshape(cell_count, cell_count, cell_count), f"test.vtk", spacing)
+    # tensor_to_vtk(cells.detach().cpu().numpy().reshape(cell_count, cell_count, cell_count), f"test.vtk", spacing)
 
 if __name__ == "__main__":
     window = create_window()

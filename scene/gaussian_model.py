@@ -129,26 +129,26 @@ class GaussianModel:
         print(pcd.points.max())
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
 
-        self.mins = [
-            pcd.points[:,0].min() - 0.01,
-            pcd.points[:,1].min() - 0.01,
-            pcd.points[:,2].min() - 0.01
-        ]
-        self.maxes = [
-            pcd.points[:,0].max() + 0.01,
-            pcd.points[:,1].max() + 0.01,
-            pcd.points[:,2].max() + 0.01
-        ]
         # self.mins = [
-        #     pcd.points[:,0].min(),
-        #     pcd.points[:,1].min(),
-        #     pcd.points[:,2].min()
+        #     pcd.points[:,0].min() - 0.01,
+        #     pcd.points[:,1].min() - 0.01,
+        #     pcd.points[:,2].min() - 0.01
         # ]
         # self.maxes = [
-        #     pcd.points[:,0].max(),
-        #     pcd.points[:,1].max(),
-        #     pcd.points[:,2].max()
+        #     pcd.points[:,0].max() + 0.01,
+        #     pcd.points[:,1].max() + 0.01,
+        #     pcd.points[:,2].max() + 0.01
         # ]
+        self.mins = [
+            pcd.points[:,0].min(),
+            pcd.points[:,1].min(),
+            pcd.points[:,2].min()
+        ]
+        self.maxes = [
+            pcd.points[:,0].max(),
+            pcd.points[:,1].max(),
+            pcd.points[:,2].max()
+        ]
 
         print(
             f"Number of points at initialisation : {fused_point_cloud.shape[0]}"
@@ -290,26 +290,26 @@ class GaussianModel:
             xyz[:,1] = (xyz[:,1] + 1) / 2
             xyz[:,2] = (xyz[:,2] - 2) / 2
         xmin, xmax, ymin, ymax, zmin, zmax = mesh.bounds
-        self.mins = [
-            xmin - 0.01,
-            ymin - 0.01,
-            zmin - 0.01
-        ]
-        self.maxes = [
-            xmax + 0.01,
-            ymax + 0.01,
-            zmax + 0.01
-        ]
         # self.mins = [
-        #     xmin,
-        #     ymin,
-        #     zmin
+        #     xmin - 0.01,
+        #     ymin - 0.01,
+        #     zmin - 0.01
         # ]
         # self.maxes = [
-        #     xmax,
-        #     ymax,
-        #     zmax
+        #     xmax + 0.01,
+        #     ymax + 0.01,
+        #     zmax + 0.01
         # ]
+        self.mins = [
+            xmin,
+            ymin,
+            zmin
+        ]
+        self.maxes = [
+            xmax,
+            ymax,
+            zmax
+        ]
         print(self.mins)
         print(self.maxes)
         weights = np.asarray(plydata.elements[0]["weight"])[..., np.newaxis]

@@ -1,5 +1,6 @@
 #include <viskores/cont/Initialize.h>
 #include <viskores/cont/DataSetBuilderExplicit.h>
+#include <viskores/cont/DataSetBuilderRectilinear.h>
 #include <viskores/io/VTKDataSetReader.h>
 #include <viskores/filter/resampling/Probe.h>
 #include <viskores/filter/mesh_info/MeshQuality.h>
@@ -8,7 +9,7 @@
 #include <viskores/rendering/MapperRayTracer.h>
 #include <viskores/rendering/Scene.h>
 #include <viskores/rendering/View3D.h>
-#include <viskores/cont/Timer.h> // for timing :contentReference[oaicite:1]{index=1}
+#include <viskores/cont/Timer.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
@@ -42,25 +43,65 @@ py::array_t<double> sample_mesh(
   auto conn_buf  = conn_arr.request();
   auto val_buf = val_arr.request();
 
-  size_t n_pts = pts_buf.shape[0];
+  // Get dimensions
+  auto dims_ptr = static_cast<int64_t*>(conn_buf.ptr);
+  viskores::Id nx = dims_ptr[0];
+  viskores::Id ny = dims_ptr[1];
+  viskores::Id nz = dims_ptr[2];
+
+  // Extract coordinate arrays for rectilinear grid
   auto pts_ptr = static_cast<float*>(pts_buf.ptr);
-  std::vector<viskores::Vec<float,3>> coords;
-  coords.reserve(n_pts);
-  for (size_t i = 0; i < n_pts; ++i) {
-    coords.emplace_back(
-      pts_ptr[3*i + 0],
-      pts_ptr[3*i + 1],
-      pts_ptr[3*i + 2]
-    );
+  
+  // Extract unique x coordinates (first nx points)
+  std::vector<float> xvals(nx);
+  for (viskores::Id i = 0; i < nx; ++i) {
+    xvals[i] = pts_ptr[3*i + 0];
   }
-  auto conn_ptr = static_cast<int64_t*>(conn_buf.ptr);
-  std::vector<viskores::Id> conn_vec(conn_ptr, conn_ptr + conn_buf.shape[0]);
+  
+  // Extract unique y coordinates (from points at x=0 plane)
+  std::vector<float> yvals(ny);
+  for (viskores::Id j = 0; j < ny; ++j) {
+    yvals[j] = pts_ptr[3*(j*nx) + 1];
+  }
+  
+  // Extract unique z coordinates (from points at x=0,y=0 line)
+  std::vector<float> zvals(nz);
+  for (viskores::Id k = 0; k < nz; ++k) {
+    zvals[k] = pts_ptr[3*(k*nx*ny) + 2];
+  }
+
+  // Convert values
   auto val_ptr = static_cast<double*>(val_buf.ptr);
   std::vector<viskores::Float64> val_vec(val_ptr, val_ptr + val_buf.shape[0]);
   viskores::cont::ArrayHandle<viskores::Float64> valHandle = viskores::cont::make_ArrayHandleMove(std::move(val_vec));
 
-  auto inData = viskores::cont::DataSetBuilderExplicit::Create(
-    coords, viskores::CellShapeTagTetra{}, static_cast<viskores::IdComponent>(4), conn_vec, "coords");
+  // Create rectilinear grid dataset
+  auto inData = viskores::cont::DataSetBuilderRectilinear::Create(
+    xvals,
+    yvals, 
+    zvals,
+    "coords"
+  );
+
+  // size_t n_pts = pts_buf.shape[0];
+  // auto pts_ptr = static_cast<float*>(pts_buf.ptr);
+  // std::vector<viskores::Vec<float,3>> coords;
+  // coords.reserve(n_pts);
+  // for (size_t i = 0; i < n_pts; ++i) {
+  //   coords.emplace_back(
+  //     pts_ptr[3*i + 0],
+  //     pts_ptr[3*i + 1],
+  //     pts_ptr[3*i + 2]
+  //   );
+  // }
+  // auto conn_ptr = static_cast<int64_t*>(conn_buf.ptr);
+  // std::vector<viskores::Id> conn_vec(conn_ptr, conn_ptr + conn_buf.shape[0]);
+  // auto val_ptr = static_cast<double*>(val_buf.ptr);
+  // std::vector<viskores::Float64> val_vec(val_ptr, val_ptr + val_buf.shape[0]);
+  // viskores::cont::ArrayHandle<viskores::Float64> valHandle = viskores::cont::make_ArrayHandleMove(std::move(val_vec));
+
+  // auto inData = viskores::cont::DataSetBuilderExplicit::Create(
+  //   coords, viskores::CellShapeTagTetra{}, static_cast<viskores::IdComponent>(4), conn_vec, "coords");
   
   inData.AddPointField(
     "value",
