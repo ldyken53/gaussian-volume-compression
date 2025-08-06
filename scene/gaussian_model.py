@@ -123,32 +123,35 @@ class GaussianModel:
         self,
         pcd: BasicPointCloud,
         mesh: pv.PolyData,
+        pts
     ):
+        self.pts = pts
         values = pcd.values
-        print(pcd.points.min())
-        print(pcd.points.max())
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
 
+        xmin, xmax, ymin, ymax, zmin, zmax = mesh.bounds
         # self.mins = [
-        #     pcd.points[:,0].min() - 0.01,
-        #     pcd.points[:,1].min() - 0.01,
-        #     pcd.points[:,2].min() - 0.01
+        #     xmin - 0.01,
+        #     ymin - 0.01,
+        #     zmin - 0.01
         # ]
         # self.maxes = [
-        #     pcd.points[:,0].max() + 0.01,
-        #     pcd.points[:,1].max() + 0.01,
-        #     pcd.points[:,2].max() + 0.01
+        #     xmax + 0.01,
+        #     ymax + 0.01,
+        #     zmax + 0.01
         # ]
         self.mins = [
-            pcd.points[:,0].min(),
-            pcd.points[:,1].min(),
-            pcd.points[:,2].min()
+            xmin,
+            ymin,
+            zmin
         ]
         self.maxes = [
-            pcd.points[:,0].max(),
-            pcd.points[:,1].max(),
-            pcd.points[:,2].max()
+            xmax,
+            ymax,
+            zmax
         ]
+        print(self.mins)
+        print(self.maxes)
 
         print(
             f"Number of points at initialisation : {fused_point_cloud.shape[0]}"
@@ -184,6 +187,7 @@ class GaussianModel:
         self.last_interpolated_xyz = self._xyz.clone()
         self.interpolation_mask = np.full(self._xyz.shape[0], True)
         self.should_interpolate = True
+        print("Done initializing")
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
@@ -272,7 +276,8 @@ class GaussianModel:
         optimizable_tensors = self.replace_tensor_to_optimizer(weights_new, "weight")
         self._weight = optimizable_tensors["weight"]
 
-    def load_ply(self, path, mesh, normalize=False, use_train_test_exp=False):
+    def load_ply(self, path, mesh, pts):
+        self.pts = pts
         plydata = PlyData.read(path)
         print(
             f"Number of points at initialisation : {plydata.elements[0]['x'].shape[0]}"
@@ -285,10 +290,10 @@ class GaussianModel:
             ),
             axis=1,
         )
-        if normalize:
-            xyz[:,0] = (xyz[:,0] + 1) / 2
-            xyz[:,1] = (xyz[:,1] + 1) / 2
-            xyz[:,2] = (xyz[:,2] - 2) / 2
+        # if normalize:
+        #     xyz[:,0] = (xyz[:,0] + 1) / 2
+        #     xyz[:,1] = (xyz[:,1] + 1) / 2
+        #     xyz[:,2] = (xyz[:,2] - 2) / 2
         xmin, xmax, ymin, ymax, zmin, zmax = mesh.bounds
         # self.mins = [
         #     xmin - 0.01,
@@ -623,13 +628,13 @@ class GaussianModel:
 
         # self.densify_and_clone(grads, max_grad, extent)
         # self.densify_and_split(grads, max_grad, extent)
-        self.densify_in_empty(empty_points, empty_values)
+        # self.densify_in_empty(empty_points, empty_values)
 
         prune_mask = (self.get_weight < min_weight).squeeze()
         print(f"Number of Gaussians pruned: {torch.count_nonzero(prune_mask)}")
-        self.prune_points(prune_mask)
+        # self.prune_points(prune_mask)
 
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(
