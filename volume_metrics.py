@@ -30,10 +30,11 @@ def training(
     dataset,
     opt,
     pipe,
+    is_scaled
 ):
     
     gaussians = GaussianModel()
-    scene = Scene(dataset, gaussians, load_iteration=-1)
+    scene = Scene(dataset, gaussians, load_iteration=-1, normalized=is_scaled, fraction=-1)
     # Make ground truth
     cell_count = 200
     spacing = [
@@ -53,14 +54,18 @@ def training(
     samples_tf_flat = samples_tf.reshape(-1, 3)
     jitter = np.random.uniform(-0.5, 0.5, samples_tf_flat.shape)
     jitter *= np.array(spacing)[None, :]
-    samples_tf_flat = np.clip(samples_tf_flat + jitter, 0.0, 1.0)
+    samples_tf_flat = np.clip(
+        samples_tf_flat + jitter,
+        np.array(gaussians.mins)[None, :], 
+        np.array(gaussians.maxes)[None, :]
+    )
     gt_cells = gpu_sample(
-        gaussians.mesh.points, 
+        gaussians.pts, 
         gaussians.mesh.dimensions,
         gaussians.mesh.point_data['value'],
         samples_tf_flat
     )
-    # gt_cells = gt_cells.reshape(cell_count, cell_count, cell_count)
+    # gt_cells = gaussians.mesh.point_data['value'][:1000000]
     gt_weights = gt_cells.copy()
     gt = torch.tensor(gt_cells).cuda()
     gt_weights[gt_weights != -1] = 1
@@ -106,6 +111,7 @@ if __name__ == "__main__":
     window = create_window()
     # Set up command line argument parser
     parser = ArgumentParser(description="Training script parameters")
+    parser.add_argument("--is_scaled", action="store_true")
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
@@ -116,4 +122,5 @@ if __name__ == "__main__":
         lp.extract(args),
         op.extract(args),
         pp.extract(args),
+        args.is_scaled
     )
