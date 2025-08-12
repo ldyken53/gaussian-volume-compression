@@ -95,7 +95,6 @@ def training(
     gt = torch.tensor(gt_cells).cuda()
     render_pkg = render(
         gaussians,
-        pipe,
     )
     cells, weights = (
         render_pkg["cells"],

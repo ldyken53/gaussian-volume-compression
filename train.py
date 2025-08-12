@@ -187,8 +187,6 @@ def training(
         # Render
         render_pkg = render(
             gaussians,
-            pipe,
-            cell_count
         )
         cells, weights= (
             render_pkg["cells"],
