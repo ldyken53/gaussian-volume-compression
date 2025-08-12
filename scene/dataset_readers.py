@@ -26,14 +26,29 @@ def readData(path, fraction, normalized=False):
         print("Mesh scaled")
 
     if fraction != -1:
-        num_points = mesh.n_points
-        pts = mesh.points
-        print("Points gathered")
-        mask = torch.rand(num_points) < fraction
+        nx, ny, nz = mesh.dimensions
+        ox, oy, oz = mesh.origin
+        sx, sy, sz = mesh.spacing
+        n_pts = mesh.n_points 
+
+        mask = (torch.rand(n_pts) < fraction)
+        idx = torch.nonzero(mask, as_tuple=False).squeeze(1)
         print("After rand")
-        pts_sampled = pts[mask]
-        vals = mesh.point_data["value"][mask].reshape(-1, 1)
+
+        nxny = nx * ny
+        k = idx // nxny
+        r = idx % nxny
+        j = r // nx
+        i = r % nx
+        pts_sampled = torch.stack([
+            i.float() * sx + ox,
+            j.float() * sy + oy,
+            k.float() * sz + oz,
+        ], dim=1)
+        print("Points gathered")
+
+        vals = mesh.point_data["value"][mask].reshape(-1, 1)  
         print("Mesh dropout")
-        return mesh, BasicPointCloud(points=pts_sampled, values=vals), pts
+        return mesh, BasicPointCloud(points=pts_sampled, values=vals)
     else:
-        return mesh, BasicPointCloud(points=None, values=None), mesh.points
+        return mesh, BasicPointCloud(points=None, values=None)

@@ -122,10 +122,8 @@ class GaussianModel:
     def create_from_pcd(
         self,
         pcd: BasicPointCloud,
-        mesh: pv.PolyData,
-        pts
+        mesh: pv.PolyData
     ):
-        self.pts = pts
         values = pcd.values
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
 
@@ -276,8 +274,7 @@ class GaussianModel:
         optimizable_tensors = self.replace_tensor_to_optimizer(weights_new, "weight")
         self._weight = optimizable_tensors["weight"]
 
-    def load_ply(self, path, mesh, pts):
-        self.pts = pts
+    def load_ply(self, path, mesh):
         plydata = PlyData.read(path)
         print(
             f"Number of points at initialisation : {plydata.elements[0]['x'].shape[0]}"
@@ -424,7 +421,6 @@ class GaussianModel:
             extension_tensor = tensors_dict[group["name"]]
             stored_state = self.optimizer.state.get(group["params"][0], None)
             if stored_state is not None:
-
                 stored_state["exp_avg"] = torch.cat(
                     (stored_state["exp_avg"], torch.zeros_like(extension_tensor)), dim=0
                 )
@@ -628,10 +624,10 @@ class GaussianModel:
 
         # self.densify_and_clone(grads, max_grad, extent)
         # self.densify_and_split(grads, max_grad, extent)
-        # self.densify_in_empty(empty_points, empty_values)
+        self.densify_in_empty(empty_points, empty_values)
 
         prune_mask = (self.get_weight < min_weight).squeeze()
-        print(f"Number of Gaussians pruned: {torch.count_nonzero(prune_mask)}")
+        # print(f"Number of Gaussians pruned: {torch.count_nonzero(prune_mask)}")
         # self.prune_points(prune_mask)
 
         # torch.cuda.empty_cache()

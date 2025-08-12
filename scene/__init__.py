@@ -32,7 +32,7 @@ class Scene:
             print("Loading trained model at iteration {}".format(self.loaded_iter))
 
         if os.path.exists(args.source_path) and args.source_path.lower().endswith(('.vtk', '.vtu')):
-            mesh, pcd, pts = readData(args.source_path, fraction, normalized=normalized)
+            mesh, pcd = readData(args.source_path, fraction, normalized=normalized)
         else:
             assert False, "Could not recognize scene type!"
 
@@ -44,14 +44,12 @@ class Scene:
                     "iteration_" + str(self.loaded_iter),
                     "point_cloud.ply",
                 ),
-                mesh,
-                pts
+                mesh
             )
         else:
             self.gaussians.create_from_pcd(
                 pcd,
-                mesh,
-                pts
+                mesh
             )
 
     def save(self, iteration):

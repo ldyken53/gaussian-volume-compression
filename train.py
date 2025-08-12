@@ -91,53 +91,60 @@ def training(
     samples_tf = np.flip(rot, axis=2)
     save_cell = samples_tf.reshape(-1, 3)
     print("Save cell made")
-    # save_gt = gpu_sample(
-    #     gaussians.mesh.points, 
-    #     gaussians.mesh.dimensions,
-    #     gaussians.mesh.point_data['value'],
-    #     save_cell
-    # )
+    save_gt = gpu_sample(
+        gaussians.mesh.dimensions,
+        gaussians.mesh.origin,
+        gaussians.mesh.spacing,
+        gaussians.mesh.point_data['value'],
+        save_cell
+    )
     # samples_tf_flat = gaussians.mesh.points
     # P, D = gaussians.mesh.points.shape
     size = 10000
     start = time.time()
-    num_jitters = 10000
-    idx = np.random.choice(gaussians.mesh.n_points, size=(num_jitters, size), replace=True)
-    mesh_samples = gaussians.pts[idx]
+    num_jitters = 100000
+    # idx = np.random.choice(gaussians.mesh.n_points, size=(num_jitters, size), replace=False)
+    idx = torch.randint(gaussians.mesh.n_points, (num_jitters, size))
+    nx, ny, nz = gaussians.mesh.dimensions
+    ox, oy, oz = gaussians.mesh.origin
+    sx, sy, sz = gaussians.mesh.spacing
+    nxny = nx * ny
+    k, r = np.divmod(idx, nxny)
+    j, i = np.divmod(r, nx)
+    x = ox + i * sx
+    y = oy + j * sy
+    z = oz + k * sz
+    mesh_samples = np.stack((x, y, z), axis=-1)
     mesh_vals = gaussians.mesh.point_data['value'][idx]
-    new_idx = np.random.choice(cell_count ** 3, size=(num_jitters, size), replace=True)
-    # cell_samples = np.broadcast_to(save_cell, (num_jitters, size, D))
-    cell_samples = save_cell[new_idx]
-    jitter = np.random.uniform(-0.5, 0.5, size=(num_jitters, size, 3))
-    jitter *= np.array(spacing)[None, None, :]    
-    uniform_samples = cell_samples + jitter
-    print(uniform_samples.shape)
-    # big_jitter = np.random.uniform(-0.0001, 0.0001, size=(num_jitters, size, D))
-    # mesh_samples = mesh_samples + big_jitter
-    # big_jitter[: size, :] = 0
-    # big_samples2 = big_samples2 + big_jitter
+    # new_idx = np.random.choice(cell_count ** 3, size=(num_jitters, size), replace=True)
+    # cell_samples = save_cell[new_idx]
+    # jitter = np.random.uniform(-0.5, 0.5, size=(num_jitters, size, 3))
+    # jitter *= np.array(spacing)[None, None, :]    
+    # uniform_samples = cell_samples + jitter
+    # print(uniform_samples.shape)
     # big_samples = np.concatenate([mesh_samples, uniform_samples], axis=1).reshape(-1, D)
-    big_samples = np.clip(
-        uniform_samples,
-        np.array(gaussians.mins)[None, :], 
-        np.array(gaussians.maxes)[None, :]
-    ).reshape(-1, 3)
-    all_gt = gpu_sample(
-        gaussians.pts, 
-        gaussians.mesh.dimensions,
-        gaussians.mesh.point_data['value'],
-        np.vstack([save_cell, big_samples])
-    )
-    save_gt = all_gt[:cell_count**3]
-    big_gt = all_gt[cell_count**3:].reshape(num_jitters, size)
-    big_samples = big_samples.reshape(num_jitters, size, 3)
-    # big_gt = mesh_vals.reshape(num_jitters, size)
-    # big_samples = mesh_samples.reshape(num_jitters, size, 3)
+    # big_samples = np.clip(
+    #     uniform_samples,
+    #     np.array(gaussians.mins)[None, :], 
+    #     np.array(gaussians.maxes)[None, :]
+    # ).reshape(-1, 3)
+    # all_gt = gpu_sample(
+    #     gaussians.mesh.dimensions,
+    #     gaussians.mesh.origin,
+    #     gaussians.mesh.spacing,
+    #     gaussians.mesh.point_data['value'],
+    #     np.vstack([save_cell, big_samples])
+    # )
+    # save_gt = all_gt[:cell_count**3]
+    # big_gt = all_gt[cell_count**3:].reshape(num_jitters, size)
+    # big_samples = big_samples.reshape(num_jitters, size, 3)
+    big_gt = mesh_vals.reshape(num_jitters, size)
+    big_samples = mesh_samples.reshape(num_jitters, size, 3)
     end = time.time()
     print(f"Time to sample gt: {end - start}")
     gt_cells = big_gt[0]
     print(f"Number of invalid samples: {np.count_nonzero(gt_cells == -1)}")
-    # tensor_to_vtk(gt_cells.reshape(cell_count, cell_count, cell_count), "test_gt.vtk", spacing)
+    tensor_to_vtk(save_gt.reshape(cell_count, cell_count, cell_count), "test_gt.vtk", spacing)
     gt = torch.tensor(gt_cells).cuda()
     if debug_from == 0:
         pipe.debug = True
@@ -204,27 +211,27 @@ def training(
         loss.backward()
         iter_end.record()
         recon_mask = torch.logical_and(cells != -1, gt != -1)
-        # if iteration not in saving_iterations and iteration not in testing_iterations:
-        #     med = torch.median(torch.abs(cells - gt))
-        #     stdn, meann = torch.std_mean(torch.abs(cells - gt))
-        #     mean = (mean * avg + meann) / (avg + 1)
-        #     avg += 1
-        #     loss_idx = torch.logical_and(
-        #     # torch.logical_or(
-        #         # torch.logical_or(
-        #         #     torch.logical_and(gt == -1, weights > 0.07),
-        #         #     torch.logical_and(gt != -1, torch.logical_and(
-        #         #         weights > 0,
-        #         #         weights < 0.07
-        #         #         )
-        #         # ),
-        #         # torch.logical_and(
-        #             torch.abs(cells - gt) > mean,
-        #             recon_mask
-        #         # )
-        #     ).cpu().numpy()
-        #     loss_samples = current_samples[loss_idx]
-        #     loss_gt = gt_cells[loss_idx]
+        if iteration not in saving_iterations and iteration not in testing_iterations:
+            med = torch.median(torch.abs(cells - gt))
+            stdn, meann = torch.std_mean(torch.abs(cells - gt))
+            mean = (mean * avg + meann) / (avg + 1)
+            avg += 1
+            loss_idx = torch.logical_and(
+            # torch.logical_or(
+                # torch.logical_or(
+                #     torch.logical_and(gt == -1, weights > 0.07),
+                #     torch.logical_and(gt != -1, torch.logical_and(
+                #         weights > 0,
+                #         weights < 0.07
+                #         )
+                # ),
+                # torch.logical_and(
+                    torch.abs(cells - gt) > 0.4,
+                    recon_mask
+                # )
+            ).cpu().numpy()
+            loss_samples = current_samples[loss_idx]
+            loss_gt = gt_cells[loss_idx]
 
         with torch.no_grad():
             # Logging
@@ -251,8 +258,8 @@ def training(
             psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
             if iteration in testing_iterations:
                 print(f"Testing PSNR at iteration {iteration}: {psnr}")
-                print(f"Fraction of samples that are lossy: {loss_samples.shape[0] / size}")
-                print(f"Num Gaussians prune: {(torch.count_nonzero(gaussians.get_weight < min_weight))}" )
+                print(f"Fraction of samples that are lossy: {np.count_nonzero(loss_idx) / size}")
+                print(f"Num Gaussians: {gaussians.get_values.shape[0]}")
             ema_lv_for_log = 0.1 * l1_lv + 0.9 * ema_lv_for_log
             ema_lfp_for_log = 0.1 * false_positive + 0.9 * ema_lfp_for_log
             ema_lfn_for_log = 0.1 * false_negative + 0.9 * ema_lfn_for_log
@@ -289,23 +296,26 @@ def training(
                 })
 
             # # Densification
-            # if (iteration <= opt.densify_until_iter and
-            #     iteration >= opt.densify_from_iter and
-            #     iteration % opt.densification_interval == 0
-            # ):
+            if (iteration <= opt.densify_until_iter and
+                iteration >= opt.densify_from_iter and
+                iteration % opt.densification_interval == 0 and
+                 iteration not in saving_iterations and
+                 iteration not in testing_iterations
+            ):
                 # cpu_cells = cells.cpu().numpy()
                 # print(f"False negative: {np.count_nonzero(np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1))}, false positive: {np.count_nonzero(np.logical_and(cpu_cells.ravel() != -1, gt_cells.ravel() == -1))}")
                 # mse = torch.mean((cells - gt) ** 2)
                 # psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
                 # mse2 = torch.mean((cells[torch.logical_and(cells != -1, gt != -1)] - gt[torch.logical_and(cells != -1, gt != -1)]) ** 2)
                 # psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
-                # print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr without empty: {psnr2}")
-                # gaussians.densify_and_prune(
-                #     opt.densify_grad_threshold,
-                #     min_weight,
-                #     current_samples[np.logical_and(current_samples == -1, gt != -1)],
-                #     gt_cells.ravel()[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)].reshape(-1, 1)
-                # )
+                gaussians.densify_and_prune(
+                    opt.densify_grad_threshold,
+                    min_weight,
+                    # current_samples[np.logical_and(current_samples == -1, gt != -1)],
+                    # gt_cells.ravel()[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)].reshape(-1, 1)
+                    current_samples[loss_idx],
+                    gt_cells[loss_idx].reshape(-1, 1)
+                )
 
                 # if iteration % opt.weight_reset_interval == 0 or (
                 #     dataset.white_background and iteration == opt.densify_from_iter
@@ -376,7 +386,7 @@ if __name__ == "__main__":
     #     "--save_iterations", nargs="+", type=int, default=[1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 48_000, 64_000]
     # )
     parser.add_argument(
-        "--save_iterations", nargs="+", type=int, default=[1, 8_000, 16_000, 32_000]
+        "--save_iterations", nargs="+", type=int, default=[16000, 32_000]
     )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--log_to_file", action="store_true")
