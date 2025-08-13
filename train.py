@@ -100,9 +100,9 @@ def training(
     )
     # samples_tf_flat = gaussians.mesh.points
     # P, D = gaussians.mesh.points.shape
-    size = 10000
+    size = 100000
     start = time.time()
-    num_jitters = 100000
+    num_jitters = 10000
     # idx = np.random.choice(gaussians.mesh.n_points, size=(num_jitters, size), replace=False)
     idx = torch.randint(gaussians.mesh.n_points, (num_jitters, size))
     nx, ny, nz = gaussians.mesh.dimensions
@@ -185,8 +185,12 @@ def training(
         gaussians.update_learning_rate(iteration)
 
         # Render
+        deb = False
+        # if iteration % 1001 == 0:
+        #     deb = True
         render_pkg = render(
             gaussians,
+            deb
         )
         cells, weights= (
             render_pkg["cells"],
@@ -224,7 +228,7 @@ def training(
                 #         )
                 # ),
                 # torch.logical_and(
-                    torch.abs(cells - gt) > 0.4,
+                    torch.abs(cells - gt) > 0.5,
                     recon_mask
                 # )
             ).cpu().numpy()
