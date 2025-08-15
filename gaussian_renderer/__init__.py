@@ -42,10 +42,7 @@ def build_bvh(samples):
 
 def render(
     pc: GaussianModel,
-    pipe,
-    cell_count=100,
-    bg=-1.0,
-    scaling_modifier=1.0
+    debug = False
 ):
     """
     Render the scene.
@@ -64,6 +61,7 @@ def render(
         rotations=rotations,
         values=values,
         weights=weights,
+        debug=debug
     )
 
     out = {
