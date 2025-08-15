@@ -46,6 +46,9 @@ void CudaRasterizer::Rasterizer::forward(
 		}
 	}
 
+	int* d_count_intersections = nullptr;
+	CHECK_CUDA(cudaMalloc(&d_count_intersections, sizeof(int) * P), debug);
+
 	// Preprocessing
 	if (debug) cudaEventRecord(events[0]);
 	CHECK_CUDA(FORWARD::preprocess(
@@ -60,9 +63,32 @@ void CudaRasterizer::Rasterizer::forward(
 		samples,
 		bvh,
 		out_test,
-		out_testw
+		out_testw,
+		d_count_intersections
 	), debug)
 	if (debug) cudaEventRecord(events[1]);
+
+	if (debug) {
+		std::vector<int> h_counts(P, 0);
+		CHECK_CUDA(cudaMemcpy(h_counts.data(), d_count_intersections, sizeof(int) * P, cudaMemcpyDeviceToHost), debug);
+
+		// Compute max and average
+		long long sum = 0;
+		int max_val = 0;
+		int max_idx = -1;
+		for (int i = 0; i < P; ++i) {
+			sum += h_counts[i];
+			if (h_counts[i] > max_val) {
+				max_val = h_counts[i];
+				max_idx = i;
+			}
+		}
+		const double avg = (P > 0) ? static_cast<double>(sum) / static_cast<double>(P) : 0.0;
+
+		std::printf("[FORWARD::preprocess] intersections: max=%d (gaussian %d), avg=%.3f over %d gaussians\n",
+					max_val, max_idx, avg, P);
+	}
+	CHECK_CUDA(cudaFree(d_count_intersections), debug);
 
 	// Calculate and print timing (only when debug is enabled)
 	if (debug) {

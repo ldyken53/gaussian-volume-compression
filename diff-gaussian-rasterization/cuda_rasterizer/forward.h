@@ -24,7 +24,8 @@ namespace FORWARD
 		const float* samples,
 		const cuBQL::bvh3f& bvh,
 		float* out_test,
-		float* out_testw);
+		float* out_testw,
+		int* count_intersections);
 }
 
 

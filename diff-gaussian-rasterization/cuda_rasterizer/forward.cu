@@ -20,7 +20,8 @@ __global__ void preprocessCUDA(const int P,
 	const float* samples,
 	const cuBQL::bvh3f bvh,
 	float* out_test,
-	float* out_testw)
+	float* out_testw,
+	int* count_intersections)
 {
 	auto idx = cg::this_grid().thread_rank();
 	if (idx >= P)
@@ -119,6 +120,7 @@ __global__ void preprocessCUDA(const int P,
         }
     }
 
+	int count = 0;
 	cuBQL::fixedBoxQuery::forEachPrim<float,3>(
 	[&](int primID) {
 		float3 d = make_float3(
@@ -136,11 +138,13 @@ __global__ void preprocessCUDA(const int P,
 		float weight = weights[idx] * exp(power);
 		atomicAdd(&out_testw[primID], weight);
 		atomicAdd(&out_test[primID], weight * values[idx]);
+		count++;
 		return 0;
     },
 		bvh,
 		cuBQL::box3f(cuBQL::vec3f(mins.x, mins.y, mins.z), cuBQL::vec3f(maxes.x, maxes.y, maxes.z))
 	);
+	count_intersections[idx] = count;
 }
 
 __global__ void normalizeCUDA(const int S,
@@ -170,27 +174,29 @@ void FORWARD::preprocess(const int P, const int S,
 	const float* samples,
 	const cuBQL::bvh3f& bvh,
 	float* out_test,
-	float* out_testw)
-{
-	preprocessCUDA<NUM_CHANNELS> <<<(P + 255) / 256, 256>>> (
-		P,
-		means3D,
-		scales,
-		scale_modifier,
-		rotations,
-		values,
-		weights,
-		volume_mins,
-		volume_maxes,
-		samples,
-		bvh,
-		out_test,
-		out_testw
-	);
+	float* out_testw,
+	int* count_intersections)
+	{
+		preprocessCUDA<NUM_CHANNELS> <<<(P + 255) / 256, 256>>> (
+			P,
+			means3D,
+			scales,
+			scale_modifier,
+			rotations,
+			values,
+			weights,
+			volume_mins,
+			volume_maxes,
+			samples,
+			bvh,
+			out_test,
+			out_testw,
+			count_intersections
+		);
 
-	normalizeCUDA <<<(S + 255) / 256, 256>>> (
-		S,
-		out_test,
-		out_testw
-	);
-}
+		normalizeCUDA <<<(S + 255) / 256, 256>>> (
+			S,
+			out_test,
+			out_testw
+		);
+	}
