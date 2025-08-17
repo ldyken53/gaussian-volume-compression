@@ -17,9 +17,11 @@ RasterizeGaussiansCUDA(
 	const float min_x, const float min_y, const float min_z, 
 	const float max_x, const float max_y, const float max_z,
 	const float background,
+	const bool use_gaussian_bvh,
 	const bool debug,
 	const torch::Tensor& samples,
-	const cuBQL::bvh3f& bvh
+	const cuBQL::bvh3f& bvh,
+	cuBQL::bvh3f& gaussian_bvh
 );
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
@@ -39,5 +41,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const torch::Tensor& dL_dout_cell_weights,
 	const bool debug,
 	const torch::Tensor& samples,
-	const cuBQL::bvh3f& bvh
+	const cuBQL::bvh3f& bvh,
+	const cuBQL::bvh3f& gaussian_bvh
 );

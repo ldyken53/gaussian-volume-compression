@@ -25,9 +25,12 @@ RasterizeGaussiansCUDA(
 	const float min_x, const float min_y, const float min_z, 
 	const float max_x, const float max_y, const float max_z,
 	const float background,
+	const bool use_gaussian_bvh,
 	const bool debug,
 	const torch::Tensor& samples,
-	const cuBQL::bvh3f& bvh
+	const cuBQL::bvh3f& bvh,
+	cuBQL::bvh3f& gaussian_bvh
+
 ) {
 	if (means3D.ndimension() != 2 || means3D.size(1) != 3) {
 		AT_ERROR("means3D must have dimensions (num_points, 3)");
@@ -58,6 +61,7 @@ RasterizeGaussiansCUDA(
 			volume_maxes,
 			samples.contiguous().data<float>(),
 			bvh,
+			gaussian_bvh,
 			out_test.contiguous().data<float>(),
 			out_testw.contiguous().data<float>(),
 			debug);
@@ -82,7 +86,8 @@ RasterizeGaussiansBackwardCUDA(
 	const torch::Tensor& dL_dout_cell_weights,
 	const bool debug,
 	const torch::Tensor& samples,
-	const cuBQL::bvh3f& bvh
+	const cuBQL::bvh3f& bvh,
+	const cuBQL::bvh3f& gaussian_bvh
 ) {
 	const int P = means3D.size(0);
 	const float3 volume_mins = make_float3(min_x, min_y, min_z);

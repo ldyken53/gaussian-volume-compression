@@ -13,7 +13,8 @@ def init_rasterizer(
     pipe,
     cell_count=100,
     bg=-1.0,
-    scaling_modifier=1.0
+    scaling_modifier=1.0,
+    use_gaussian_bvh=False
 ) -> None:
     """
     Initialize the GaussianRasterizer once with these settings.
@@ -27,6 +28,7 @@ def init_rasterizer(
         cell_count=cell_count,
         bg=bg,
         scale_modifier=scaling_modifier,
+        use_gaussian_bvh=use_gaussian_bvh,
         debug=pipe.debug,
     )
 
@@ -36,8 +38,8 @@ def init_rasterizer(
     )
 
 
-def build_bvh(samples):
-    _rasterizer.build_bvh(samples)
+def build_bvh(samples, debug=False):
+    _rasterizer.build_bvh(samples, debug)
 
 
 def render(

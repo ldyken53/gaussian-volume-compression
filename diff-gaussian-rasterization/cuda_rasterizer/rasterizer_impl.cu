@@ -10,7 +10,9 @@
 #include <cub/device/device_radix_sort.cuh>
 #define GLM_FORCE_CUDA
 #include <glm/glm.hpp>
+#define CUBQL_GPU_BUILDER_IMPLEMENTATION 1
 #include <cuBQL/bvh.h>
+#include "cuBQL/builder/cuda.h"
 
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
@@ -34,61 +36,131 @@ void CudaRasterizer::Rasterizer::forward(
 	const float3 volume_maxes,
 	const float* samples,
 	const cuBQL::bvh3f& bvh,
+	cuBQL::bvh3f& gaussian_bvh,
 	float* out_test,
 	float* out_testw,
+	const bool use_gaussian_bvh,
 	bool debug)
-{	
+{
 	// Create CUDA events for timing (only when debug is enabled)
-	cudaEvent_t events[2]; // 8 pairs of start/stop events
+	cudaEvent_t events[6]; // 8 pairs of start/stop events
 	if (debug) {
-		for (int i = 0; i < 2; i++) {
+		for (int i = 0; i < 6; i++) {
 			cudaEventCreate(&events[i]);
 		}
 	}
 
 	int* d_count_intersections = nullptr;
-	CHECK_CUDA(cudaMalloc(&d_count_intersections, sizeof(int) * P), debug);
+	if (use_gaussian_bvh) {
+		CHECK_CUDA(cudaMalloc(&d_count_intersections, sizeof(int) * S), debug);
+	} else {
+		CHECK_CUDA(cudaMalloc(&d_count_intersections, sizeof(int) * P), debug);
+	}
+	cuBQL::box3f* aabbs = nullptr;
+	CHECK_CUDA(cudaMalloc(&aabbs, sizeof(cuBQL::box3f) * P), debug);
+	float* conics = nullptr;
+	CHECK_CUDA(cudaMalloc(&conics, sizeof(float) * P * 6), debug);
 
 	// Preprocessing
 	if (debug) cudaEventRecord(events[0]);
 	CHECK_CUDA(FORWARD::preprocess(
-		P, S,
+		P,
 		means3D,
 		(glm::vec3*)scales,
 		scale_modifier,
 		(glm::vec4*)rotations,
-		values,
 		weights,
-		volume_mins, volume_maxes,
-		samples,
-		bvh,
-		out_test,
-		out_testw,
-		d_count_intersections
+		conics,
+		aabbs
 	), debug)
 	if (debug) cudaEventRecord(events[1]);
 
+	if (debug) cudaEventRecord(events[2]);
+	if (use_gaussian_bvh) {
+    	cuBQL::cuda::radixBuilder(gaussian_bvh, aabbs, P, cuBQL::BuildConfig());
+	}
+	if (debug) cudaEventRecord(events[3]);
+
+	// Rendering
+	if (debug) cudaEventRecord(events[4]);
+	if (use_gaussian_bvh) {
+		CHECK_CUDA(FORWARD::render(
+			P, S,
+			means3D,
+			values,
+			weights,
+			samples,
+			conics,
+			aabbs,
+			gaussian_bvh,
+			out_test,
+			out_testw,
+			d_count_intersections,
+			use_gaussian_bvh
+		), debug)
+	} else {
+		CHECK_CUDA(FORWARD::render(
+			P, S,
+			means3D,
+			values,
+			weights,
+			samples,
+			conics,
+			aabbs,
+			bvh,
+			out_test,
+			out_testw,
+			d_count_intersections,
+			use_gaussian_bvh
+		), debug)
+	}
+	if (debug) cudaEventRecord(events[5]);
+
 	if (debug) {
-		std::vector<int> h_counts(P, 0);
-		CHECK_CUDA(cudaMemcpy(h_counts.data(), d_count_intersections, sizeof(int) * P, cudaMemcpyDeviceToHost), debug);
+		if (use_gaussian_bvh) {
+			std::vector<int> h_counts(S, 0);
+			CHECK_CUDA(cudaMemcpy(h_counts.data(), d_count_intersections, sizeof(int) * S, cudaMemcpyDeviceToHost), debug);
 
-		// Compute max and average
-		long long sum = 0;
-		int max_val = 0;
-		int max_idx = -1;
-		for (int i = 0; i < P; ++i) {
-			sum += h_counts[i];
-			if (h_counts[i] > max_val) {
-				max_val = h_counts[i];
-				max_idx = i;
+			// Compute max and average
+			long long sum = 0;
+			int max_val = 0;
+			int max_idx = -1;
+			for (int i = 0; i < S; ++i) {
+				sum += h_counts[i];
+				if (h_counts[i] > max_val) {
+					max_val = h_counts[i];
+					max_idx = i;
+				}
 			}
-		}
-		const double avg = (P > 0) ? static_cast<double>(sum) / static_cast<double>(P) : 0.0;
+			const double avg = (S > 0) ? static_cast<double>(sum) / static_cast<double>(S) : 0.0;
+			std::printf("Intersections: max=%d (sample %d), avg=%.3f over %d samples\n",
+					max_val, max_idx, avg, S);
+		} else {
+			std::vector<int> h_counts(P, 0);
+			CHECK_CUDA(cudaMemcpy(h_counts.data(), d_count_intersections, sizeof(int) * P, cudaMemcpyDeviceToHost), debug);
 
-		std::printf("[FORWARD::preprocess] intersections: max=%d (gaussian %d), avg=%.3f over %d gaussians\n",
-					max_val, max_idx, avg, P);
+			// Compute max and average
+			long long sum = 0;
+			int max_val = 0;
+			int max_idx = -1;
+			for (int i = 0; i < P; ++i) {
+				sum += h_counts[i];
+				if (h_counts[i] > max_val) {
+					max_val = h_counts[i];
+					max_idx = i;
+				}
+			}
+			const double avg = (P > 0) ? static_cast<double>(sum) / static_cast<double>(P) : 0.0;
+
+			std::printf("Intersections: max=%d (gaussian %d), avg=%.3f over %d gaussians\n",
+						max_val, max_idx, avg, P);
+		} 
+
+
 	}
 	CHECK_CUDA(cudaFree(d_count_intersections), debug);
+	CHECK_CUDA(cudaFree(aabbs), debug);
+	CHECK_CUDA(cudaFree(conics), debug);
 
 	// Calculate and print timing (only when debug is enabled)
 	if (debug) {
@@ -96,16 +168,16 @@ void CudaRasterizer::Rasterizer::forward(
 		
 		float elapsed_time;
 		const char* operation_names[] = {
-			"Preprocessing"
+			"Preprocess", "BVH", "Render"
 		};
 		
-		for (int i = 0; i < 1; i++) {
+		for (int i = 0; i < 3; i++) {
 			cudaEventElapsedTime(&elapsed_time, events[i*2], events[i*2+1]);
 			std::cout << operation_names[i] << " time: " << elapsed_time << " ms" << std::endl;
 		}
 		
 		// Clean up events
-		for (int i = 0; i < 2; i++) {
+		for (int i = 0; i < 6; i++) {
 			cudaEventDestroy(events[i]);
 		}
 	}

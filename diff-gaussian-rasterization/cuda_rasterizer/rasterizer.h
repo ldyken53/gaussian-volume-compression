@@ -23,8 +23,10 @@ namespace CudaRasterizer
 			const float3 volume_maxes,
 			const float* samples,
 			const cuBQL::bvh3f& bvh,
+			cuBQL::bvh3f& gaussian_bvh,
 			float* out_test,
 			float* out_testw,
+			const bool use_gaussian_bvh,
 			bool debug = false
 		);
 

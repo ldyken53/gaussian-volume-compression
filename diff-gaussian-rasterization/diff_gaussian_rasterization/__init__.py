@@ -55,6 +55,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             volume_mins_x, volume_mins_y, volume_mins_z,
             volume_maxes_x, volume_maxes_y, volume_maxes_z,
             raster_settings.bg,
+            raster_settings.use_gaussian_bvh,
             raster_settings.debug,
         )
 
@@ -142,6 +143,7 @@ class GaussianRasterizationSettings(NamedTuple):
     cell_count: int
     bg: float
     scale_modifier: float
+    use_gaussian_bvh: bool
     debug: bool
 
 
@@ -150,8 +152,11 @@ class GaussianRasterizer(nn.Module):
         super().__init__()
         self.raster_settings = raster_settings
 
-    def build_bvh(self, samples):
-        _C.build_bvh(samples, self.raster_settings.debug)
+    def build_bvh(self, samples, force_debug=False):
+        if force_debug:
+            _C.build_bvh(samples, True)
+        else:
+            _C.build_bvh(samples, self.raster_settings.debug)
 
     def forward(
         self,
@@ -162,7 +167,10 @@ class GaussianRasterizer(nn.Module):
         weights=None,
         debug=False
     ):
-        raster_settings = self.raster_settings._replace(debug=debug)
+        if debug:
+            raster_settings = self.raster_settings._replace(debug=debug)
+        else:
+            raster_settings = self.raster_settings
 
         if (scales is None or rotations is None):
             raise Exception(

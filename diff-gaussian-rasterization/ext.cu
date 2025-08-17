@@ -5,7 +5,8 @@
 #include "cuBQL/builder/cuda.h"
 #include "rasterize_points.h"
 
-static cuBQL::bvh3f bvh;
+static cuBQL::bvh3f samples_bvh;
+static cuBQL::bvh3f gaussian_bvh;
 static torch::Tensor stored_samples;
 
 // buildBoxes: one thread per sample; packs (x,y,z) into a box3f at that point
@@ -33,19 +34,19 @@ void BuildBVH(const torch::Tensor& samples, const bool debug) {
     int  N = stored_samples.size(0);
     auto ptr = stored_samples.data_ptr<float>();
 
-    cuBQL::cuda::free(bvh);
-    bvh.nodes    = nullptr;
-    bvh.primIDs  = nullptr;
-    bvh.numNodes = 0;
-    bvh.numPrims = 0;
-    bvh = cuBQL::bvh3f();
+    cuBQL::cuda::free(samples_bvh);
+    samples_bvh.nodes    = nullptr;
+    samples_bvh.primIDs  = nullptr;
+    samples_bvh.numNodes = 0;
+    samples_bvh.numPrims = 0;
+    samples_bvh = cuBQL::bvh3f();
     cuBQL::box3f* d_boxes;
     cudaMalloc(&d_boxes, N * sizeof(cuBQL::box3f));
 
     const int threads = 256;
     const int blocks  = (N + threads - 1) / threads;
     buildBoxes<<<blocks, threads>>>(d_boxes, ptr, N);
-    cuBQL::cuda::radixBuilder(bvh, d_boxes, N, cuBQL::BuildConfig());
+    cuBQL::cuda::radixBuilder(samples_bvh, d_boxes, N, cuBQL::BuildConfig());
     cudaFree(d_boxes);
 
     cudaEventRecord(gpuStop, 0);
@@ -68,8 +69,16 @@ RasterizeGaussiansCUDAWrapper(
 	const float min_x, const float min_y, const float min_z, 
 	const float max_x, const float max_y, const float max_z,
 	const float background,
+    const bool use_gaussian_bvh,
 	const bool debug
 ) {
+    cuBQL::cuda::free(gaussian_bvh);
+    gaussian_bvh.nodes    = nullptr;
+    gaussian_bvh.primIDs  = nullptr;
+    gaussian_bvh.numNodes = 0;
+    gaussian_bvh.numPrims = 0;
+    gaussian_bvh = cuBQL::bvh3f();
+
     return RasterizeGaussiansCUDA(
         means3D,
         scales,
@@ -80,10 +89,13 @@ RasterizeGaussiansCUDAWrapper(
         min_x, min_y, min_z,
         max_x, max_y, max_z,
         background,
+        use_gaussian_bvh,
         debug,
         stored_samples,
-        bvh
+        samples_bvh,
+        gaussian_bvh
     );
+
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
@@ -119,7 +131,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
         dL_dout_cell_weights,
         debug,
         stored_samples,
-        bvh
+        samples_bvh,
+        gaussian_bvh
     );
 }
 
