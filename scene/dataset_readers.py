@@ -29,7 +29,7 @@ def readData(path, fraction, normalized=False):
         nx, ny, nz = mesh.dimensions
         ox, oy, oz = mesh.origin
         sx, sy, sz = mesh.spacing
-        n_pts = mesh.n_points 
+        n_pts = mesh.n_points
 
         mask = (torch.rand(n_pts) < fraction)
         idx = torch.nonzero(mask, as_tuple=False).squeeze(1)

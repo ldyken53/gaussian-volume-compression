@@ -15,10 +15,10 @@ import torch
 from plyfile import PlyData, PlyElement
 from simple_knn._C import distCUDA2
 from torch import nn
+import torch.nn.functional as F
 
 
 class GaussianModel:
-
     def setup_functions(self):
         def build_covariance_from_scaling_rotation(scaling, scaling_modifier, rotation):
             L = build_scaling_rotation(scaling_modifier * scaling, rotation)
@@ -57,7 +57,16 @@ class GaussianModel:
         self.last_interpolated_xyz = None
         self.should_interpolate = False
         self.mesh = None
+        self.max_scale = 0.03
         self.setup_functions()
+
+    def _apply_cap(self, s):
+        # r = torch.linalg.norm(s, dim=1, keepdim=True) + 1e-8
+        # factor = torch.clamp(self.max_scale / r, max=1.0)
+        # return s * factor
+        r = torch.linalg.norm(s, dim=1, keepdim=True) + 1e-8
+        r_soft = self.max_scale * torch.tanh(r / self.max_scale)
+        return s * (r_soft / r)
 
     def capture(self):
         return (
@@ -96,7 +105,7 @@ class GaussianModel:
 
     @property
     def get_scaling(self):
-        return self.scaling_activation(self._scaling)
+        return self._apply_cap(self.scaling_activation(self._scaling))
 
     @property
     def get_rotation(self):
