@@ -64,6 +64,7 @@ RasterizeGaussiansCUDA(
 			gaussian_bvh,
 			out_test.contiguous().data<float>(),
 			out_testw.contiguous().data<float>(),
+			use_gaussian_bvh,
 			debug);
 	}
 	return std::make_tuple(out_test, out_testw);
