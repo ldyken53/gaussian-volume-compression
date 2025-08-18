@@ -58,7 +58,7 @@ void BuildBVH(const torch::Tensor& samples, const bool debug) {
     }
 }
 
-std::tuple<torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansCUDAWrapper(
 	const torch::Tensor& means3D,
 	const torch::Tensor& scales,
@@ -102,7 +102,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
  RasterizeGaussiansBackwardCUDAWrapper(
 	const torch::Tensor& means3D,
 	const torch::Tensor& scales,
-	const torch::Tensor& rotations,
+    const torch::Tensor& rotations,
+	const torch::Tensor& conics,
 	const torch::Tensor& values,
 	const torch::Tensor& weights,
 	const torch::Tensor& out_cells,
@@ -113,12 +114,14 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const float background,
 	const torch::Tensor& dL_dout_cells,
 	const torch::Tensor& dL_dout_cell_weights,
+    const bool use_gaussian_bvh,
 	const bool debug
 ) {
     return RasterizeGaussiansBackwardCUDA(
         means3D,
         scales,
         rotations,
+        conics,
         values,
         weights,
         out_cells,
@@ -129,6 +132,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
         background,
         dL_dout_cells,
         dL_dout_cell_weights,
+        use_gaussian_bvh,
         debug,
         stored_samples,
         samples_bvh,

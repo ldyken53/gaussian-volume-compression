@@ -6,7 +6,7 @@
 #include <vector_types.h>
 #include <cuBQL/bvh.h>
 	
-std::tuple<torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansCUDA(
 	const torch::Tensor& means3D,
 	const torch::Tensor& scales,
@@ -29,6 +29,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const torch::Tensor& means3D,
 	const torch::Tensor& scales,
 	const torch::Tensor& rotations,
+	const torch::Tensor& conics,
 	const torch::Tensor& values,
 	const torch::Tensor& weights,
 	const torch::Tensor& out_cells,
@@ -39,6 +40,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const float background,
 	const torch::Tensor& dL_dout_cells,
 	const torch::Tensor& dL_dout_cell_weights,
+	const bool use_gaussian_bvh,
 	const bool debug,
 	const torch::Tensor& samples,
 	const cuBQL::bvh3f& bvh,

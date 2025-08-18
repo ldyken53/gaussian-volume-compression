@@ -24,6 +24,7 @@ namespace CudaRasterizer
 			const float* samples,
 			const cuBQL::bvh3f& bvh,
 			cuBQL::bvh3f& gaussian_bvh,
+			float* conics,
 			float* out_test,
 			float* out_testw,
 			const bool use_gaussian_bvh,
@@ -31,16 +32,18 @@ namespace CudaRasterizer
 		);
 
 		static void backward(
-			const int P,
+			const int P, const int S,
 			const float* means3D,
 			const float* scales,
 			const float scale_modifier,
 			const float3 volume_mins, const float3 volume_maxes,
 			const float* rotations,
+			const float* conics,
 			const float* values,
 			const float* weights,
 			const float* samples,
 			const cuBQL::bvh3f& bvh,
+			const cuBQL::bvh3f& gaussian_bvh,
 			const float* out_cells,
 			const float* out_weights,
 			const float* dL_dsamples,
@@ -50,6 +53,7 @@ namespace CudaRasterizer
 			float* dL_drot,
 			float* dL_dvalue,
 			float* dL_dweights,
+			const bool use_gaussian_bvh,
 			bool debug
 		);
 	};

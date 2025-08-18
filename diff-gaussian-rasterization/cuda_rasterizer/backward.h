@@ -10,12 +10,13 @@
 
 namespace BACKWARD
 {
-	void preprocess(
-		int P,
+	void render(
+		const int P, const int S,
 		const float* means3D,
 		const glm::vec3* scales,
 		const float scale_modifier,
 		const glm::vec4* rotations,
+		const float* conics,
 		const float* values,
 		const float* weights,
 		const float3 volume_mins,
@@ -30,7 +31,8 @@ namespace BACKWARD
 		float* dL_dvalue,
 		float* dL_dweights,
 		glm::vec3* dL_dscale,
-		glm::vec4* dL_drot
+		glm::vec4* dL_drot,
+		const bool use_gaussian_bvh
 	);
 
 }

@@ -37,6 +37,7 @@ void CudaRasterizer::Rasterizer::forward(
 	const float* samples,
 	const cuBQL::bvh3f& bvh,
 	cuBQL::bvh3f& gaussian_bvh,
+	float* conics,
 	float* out_test,
 	float* out_testw,
 	const bool use_gaussian_bvh,
@@ -58,8 +59,6 @@ void CudaRasterizer::Rasterizer::forward(
 	}
 	cuBQL::box3f* aabbs = nullptr;
 	CHECK_CUDA(cudaMalloc(&aabbs, sizeof(cuBQL::box3f) * P), debug);
-	float* conics = nullptr;
-	CHECK_CUDA(cudaMalloc(&conics, sizeof(float) * P * 6), debug);
 
 	// Preprocessing
 	if (debug) cudaEventRecord(events[0]);
@@ -160,7 +159,6 @@ void CudaRasterizer::Rasterizer::forward(
 	}
 	CHECK_CUDA(cudaFree(d_count_intersections), debug);
 	CHECK_CUDA(cudaFree(aabbs), debug);
-	CHECK_CUDA(cudaFree(conics), debug);
 
 	// Calculate and print timing (only when debug is enabled)
 	if (debug) {
@@ -186,16 +184,18 @@ void CudaRasterizer::Rasterizer::forward(
 // Produce necessary gradients for optimization, corresponding
 // to forward render pass
 void CudaRasterizer::Rasterizer::backward(
-	const int P,
+	const int P, const int S,
 	const float* means3D,
 	const float* scales,
 	const float scale_modifier,
 	const float3 volume_mins, const float3 volume_maxes,
 	const float* rotations,
+	const float* conics,
 	const float* values,
 	const float* weights,
 	const float* samples,
 	const cuBQL::bvh3f& bvh,
+	const cuBQL::bvh3f& gaussian_bvh,
 	const float* out_cells,
 	const float* out_weights,
 	const float* dL_dsamples,
@@ -205,6 +205,7 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_drot,
 	float* dL_dvalue,
 	float* dL_dweights,
+	const bool use_gaussian_bvh,
 	bool debug)
 {
 
@@ -217,33 +218,58 @@ void CudaRasterizer::Rasterizer::backward(
 	}
 
 	if (debug) cudaEventRecord(events[0]);
-	// Take care of the rest of preprocessing, compute loss w.r.t
-	// scales and rotation from conic gradients.
-	CHECK_CUDA(BACKWARD::preprocess(P,
-		means3D,
-		(glm::vec3*)scales,
-		scale_modifier,
-		(glm::vec4*)rotations,
-		values,
-		weights,
-		volume_mins, volume_maxes,
-		samples,
-		bvh,
-		out_cells,
-		out_weights,
-		dL_dsamples,
-		dL_dsample_weights,
-		dL_dmean3D,
-		dL_dvalue,
-		dL_dweights,
-		(glm::vec3*)dL_dscale,
-		(glm::vec4*)dL_drot), debug);
+	// compute loss w.r.t gradients.
+	if (use_gaussian_bvh) {
+		CHECK_CUDA(BACKWARD::render(P, S,
+			means3D,
+			(glm::vec3*)scales,
+			scale_modifier,
+			(glm::vec4*)rotations,
+			conics,
+			values,
+			weights,
+			volume_mins, volume_maxes,
+			samples,
+			gaussian_bvh,
+			out_cells,
+			out_weights,
+			dL_dsamples,
+			dL_dsample_weights,
+			dL_dmean3D,
+			dL_dvalue,
+			dL_dweights,
+			(glm::vec3*)dL_dscale,
+			(glm::vec4*)dL_drot,
+			use_gaussian_bvh), debug);
+	} else {
+		CHECK_CUDA(BACKWARD::render(P, S,
+			means3D,
+			(glm::vec3*)scales,
+			scale_modifier,
+			(glm::vec4*)rotations,
+			conics,
+			values,
+			weights,
+			volume_mins, volume_maxes,
+			samples,
+			bvh,
+			out_cells,
+			out_weights,
+			dL_dsamples,
+			dL_dsample_weights,
+			dL_dmean3D,
+			dL_dvalue,
+			dL_dweights,
+			(glm::vec3*)dL_dscale,
+			(glm::vec4*)dL_drot,
+			use_gaussian_bvh), debug);
+	}
 	if (debug) cudaEventRecord(events[1]);
 
 	if (debug) {
 		cudaDeviceSynchronize(); // ensure all events are completed
 		float elapsed_time;
-		const char* operation_names[] = { "Backward Preprocess" };
+		const char* operation_names[] = { "Backward Render" };
 
 		for (int i = 0; i < 1; ++i) {
 			cudaEventElapsedTime(&elapsed_time, events[i * 2], events[i * 2 + 1]);

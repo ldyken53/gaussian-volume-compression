@@ -60,7 +60,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         )
 
         # Invoke C++/CUDA rasterizer
-        cells, cell_weights = (
+        cells, cell_weights, conics = (
             _C.rasterize_gaussians(*args)
         )
 
@@ -73,7 +73,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             values,
             weights,
             cells,
-            cell_weights
+            cell_weights,
+            conics
         )
         return cells, cell_weights
 
@@ -89,7 +90,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             values,
             weights,
             cells,
-            cell_weights
+            cell_weights,
+            conics
         ) = ctx.saved_tensors
 
         volume_mins_x, volume_mins_y, volume_mins_z = raster_settings.volume_mins
@@ -100,6 +102,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             means3D,
             scales,
             rotations,
+            conics,
             values,
             weights,
             cells,
@@ -110,6 +113,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.bg,
             grad_out_cells,
             grad_out_cell_weights,
+            raster_settings.use_gaussian_bvh,
             raster_settings.debug,
         )
 

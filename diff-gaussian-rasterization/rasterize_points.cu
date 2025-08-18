@@ -14,7 +14,7 @@
 #include <functional>
 #include <cuBQL/bvh.h>
 
-std::tuple<torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansCUDA(
 	const torch::Tensor& means3D,
 	const torch::Tensor& scales,
@@ -44,6 +44,7 @@ RasterizeGaussiansCUDA(
 	auto float_opts = means3D.options().dtype(torch::kFloat32);
 	torch::Tensor out_test = torch::zeros({S}, float_opts);
 	torch::Tensor out_testw = torch::zeros({S}, float_opts);
+	torch::Tensor conics = torch::zeros({P * 6}, float_opts);
 	torch::Device device(torch::kCUDA);
 	torch::TensorOptions options(torch::kByte);
 	
@@ -62,12 +63,13 @@ RasterizeGaussiansCUDA(
 			samples.contiguous().data<float>(),
 			bvh,
 			gaussian_bvh,
+			conics.contiguous().data<float>(),
 			out_test.contiguous().data<float>(),
 			out_testw.contiguous().data<float>(),
 			use_gaussian_bvh,
 			debug);
 	}
-	return std::make_tuple(out_test, out_testw);
+	return std::make_tuple(out_test, out_testw, conics);
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
@@ -75,6 +77,7 @@ RasterizeGaussiansBackwardCUDA(
 	const torch::Tensor& means3D,
 	const torch::Tensor& scales,
 	const torch::Tensor& rotations,
+	const torch::Tensor& conics,
 	const torch::Tensor& values,
 	const torch::Tensor& weights,
 	const torch::Tensor& out_cells,
@@ -85,12 +88,14 @@ RasterizeGaussiansBackwardCUDA(
 	const float background,
 	const torch::Tensor& dL_dout_cells,
 	const torch::Tensor& dL_dout_cell_weights,
+	const bool use_gaussian_bvh,
 	const bool debug,
 	const torch::Tensor& samples,
 	const cuBQL::bvh3f& bvh,
 	const cuBQL::bvh3f& gaussian_bvh
 ) {
 	const int P = means3D.size(0);
+	const int S = samples.size(0);
 	const float3 volume_mins = make_float3(min_x, min_y, min_z);
 	const float3 volume_maxes = make_float3(max_x, max_y, max_z);
 
@@ -102,17 +107,19 @@ RasterizeGaussiansBackwardCUDA(
 
 	if(P != 0)
 	{  
-		CudaRasterizer::Rasterizer::backward(P,
+		CudaRasterizer::Rasterizer::backward(P, S,
 			means3D.contiguous().data<float>(),
 			scales.data_ptr<float>(),
 			scale_modifier,
 			volume_mins,
 			volume_maxes,
 			rotations.data_ptr<float>(),
+			conics.contiguous().data<float>(),
 			values.contiguous().data<float>(),
 			weights.contiguous().data<float>(),
 			samples.contiguous().data<float>(),
 			bvh,
+			gaussian_bvh,
 			out_cells.contiguous().data<float>(),
 			out_weights.contiguous().data<float>(),
 			dL_dout_cells.contiguous().data<float>(),
@@ -122,6 +129,7 @@ RasterizeGaussiansBackwardCUDA(
 			dL_drotations.contiguous().data<float>(),
 			dL_dvalues.contiguous().data<float>(),
 			dL_dweights.contiguous().data<float>(),
+			use_gaussian_bvh,
 			debug);
 	}
 
