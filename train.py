@@ -70,8 +70,8 @@ def training(
     std = 0
     mean = 0
     avg = 0
-
-    #TODO Use points and values, then jittered points just as augmentation
+    error_thresh = 0.1
+    lossy_frac = 0.0
 
     # Make ground truth
     print("Before cell")
@@ -152,6 +152,7 @@ def training(
         gaussians,
         pipe,
         cell_count,
+        use_gaussian_bvh=False
     )
     build_bvh(torch.tensor(big_samples[0], dtype=torch.float, device="cuda"))
 
@@ -163,6 +164,9 @@ def training(
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
         iter_start.record()
+        deb = False
+        if iteration in testing_iterations:
+            deb = True
 
         if iteration in saving_iterations or iteration in testing_iterations:
             gt_cells = save_gt
@@ -180,14 +184,11 @@ def training(
                 loss_samples,
                 big_samples[jit_idx][:(size - num_loss)]
             ])
-        build_bvh(torch.tensor(current_samples, dtype=torch.float, device="cuda"))
+        build_bvh(torch.tensor(current_samples, dtype=torch.float, device="cuda"), deb)
 
         gaussians.update_learning_rate(iteration)
 
         # Render
-        deb = False
-        # if iteration % 1001 == 0:
-        #     deb = True
         render_pkg = render(
             gaussians,
             deb
@@ -228,12 +229,13 @@ def training(
                 #         )
                 # ),
                 # torch.logical_and(
-                    torch.abs(cells - gt) > 0.5,
+                    torch.abs(cells - gt) > error_thresh,
                     recon_mask
                 # )
             ).cpu().numpy()
-            loss_samples = current_samples[loss_idx]
-            loss_gt = gt_cells[loss_idx]
+            lossy_frac = 0.9 * lossy_frac + 0.1 * np.count_nonzero(loss_idx) / size
+            # loss_samples = current_samples[loss_idx]
+            # loss_gt = gt_cells[loss_idx]
 
         with torch.no_grad():
             # Logging
@@ -260,13 +262,17 @@ def training(
             psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
             if iteration in testing_iterations:
                 print(f"Testing PSNR at iteration {iteration}: {psnr}")
-                print(f"Fraction of samples that are lossy: {np.count_nonzero(loss_idx) / size}")
+                print(f"Testing fraction of samples that are lossy: {np.count_nonzero(loss_idx) / size}, avg: {lossy_frac}")
                 print(f"Num Gaussians: {gaussians.get_values.shape[0]}")
+                # if np.count_nonzero(loss_idx) / size < 0.01 and iteration > 1:
+                #     error_thresh -= 0.1
+                #     lossy_frac = 0
+                #     print(f"Error thresh changed to {error_thresh}")
             ema_lv_for_log = 0.1 * l1_lv + 0.9 * ema_lv_for_log
             ema_lfp_for_log = 0.1 * false_positive + 0.9 * ema_lfp_for_log
             ema_lfn_for_log = 0.1 * false_negative + 0.9 * ema_lfn_for_log
             ema_lpsnr_for_log = 0.1 * psnr + 0.9 * ema_lpsnr_for_log
-            if iteration % 500 == 0:
+            if iteration % 1000 == 0:
                 progress_bar.set_postfix(
                     {
                         "Loss": f"{ema_loss_for_log:.{5}f}",
@@ -276,7 +282,7 @@ def training(
                         "PSNR": f"{ema_lpsnr_for_log:.{5}f}"
                     }
                 )
-                progress_bar.update(500)
+                progress_bar.update(1000)
                 print("")
             if iteration == opt.iterations:
                 progress_bar.close()
@@ -318,6 +324,7 @@ def training(
                     current_samples[loss_idx],
                     gt_cells[loss_idx].reshape(-1, 1)
                 )
+                # error_thresh -= 0.002
 
                 # if iteration % opt.weight_reset_interval == 0 or (
                 #     dataset.white_background and iteration == opt.densify_from_iter
