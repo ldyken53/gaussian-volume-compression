@@ -83,7 +83,7 @@ def training(
     samples_tf = np.flip(rot, axis=2)
     samples_tf_flat = samples_tf.reshape(-1, 3)
     start = time.time()
-    num_jitters = 100
+    num_jitters = 1000
     big_samples = np.tile(samples_tf_flat, (num_jitters, 1))
     big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
     big_jitter *= np.array(spacing)[None, :]
@@ -160,10 +160,17 @@ def training(
         else:
             false_positive = torch.tensor(0., device="cuda")
         # false_positive = l1_loss(weights[gt == -1 ], gt_weights[gt == -1])
-        loss = l1_lv
+        loss = l1_lv + false_negative
         loss.backward()
 
         iter_end.record()
+
+        recon_mask = torch.logical_and(cells.ravel() != -1, gt.ravel() != -1)
+        if iteration not in saving_iterations and iteration not in testing_iterations:
+            loss_idx = torch.logical_and(
+                torch.abs(cells.ravel() - gt.ravel()) > 0.05,
+                recon_mask
+            ).cpu().numpy()
 
         with torch.no_grad():
             # Logging
@@ -203,7 +210,7 @@ def training(
                     }
                 )
                 progress_bar.update(500)
-                print("")
+                print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}")
             if iteration == opt.iterations:
                 progress_bar.close()
 
@@ -229,17 +236,18 @@ def training(
                 iteration % opt.densification_interval == 0
             ):
                 cpu_cells = cells.cpu().numpy()
-                print(f"False negative: {np.count_nonzero(np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1))}, false positive: {np.count_nonzero(np.logical_and(cpu_cells.ravel() != -1, gt_cells.ravel() == -1))}")
+                # print(f"False negative: {np.count_nonzero(np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1))}, false positive: {np.count_nonzero(np.logical_and(cpu_cells.ravel() != -1, gt_cells.ravel() == -1))}")
                 mse = torch.mean((cells - gt) ** 2)
                 psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
                 mse2 = torch.mean((cells[torch.logical_and(cells != -1, gt != -1)] - gt[torch.logical_and(cells != -1, gt != -1)]) ** 2)
                 psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
-                print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr without empty: {psnr2}")
                 gaussians.densify_and_prune(
                     opt.densify_grad_threshold,
                     min_weight,
-                    samples_tf_flat[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)],
-                    gt_cells.ravel()[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)].reshape(-1, 1)
+                    # samples_tf_flat[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)],
+                    # gt_cells.ravel()[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)].reshape(-1, 1)
+                    samples_tf_flat[loss_idx],
+                    gt_cells.ravel()[loss_idx].reshape(-1, 1)
                 )
 
                 # if iteration % opt.weight_reset_interval == 0 or (
@@ -311,7 +319,7 @@ if __name__ == "__main__":
     #     "--save_iterations", nargs="+", type=int, default=[1, 16, 32, 64, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
     # )
     parser.add_argument(
-        "--save_iterations", nargs="+", type=int, default=[]
+        "--save_iterations", nargs="+", type=int, default=[8000, 14000]
     )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--log_to_file", action="store_true")
