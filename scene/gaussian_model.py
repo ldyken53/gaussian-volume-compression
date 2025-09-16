@@ -57,7 +57,16 @@ class GaussianModel:
         self.last_interpolated_xyz = None
         self.should_interpolate = False
         self.mesh = None
+        self.max_scale = 0.03
         self.setup_functions()
+
+    def _apply_cap(self, s):
+        # r = torch.linalg.norm(s, dim=1, keepdim=True) + 1e-8
+        # factor = torch.clamp(self.max_scale / r, max=1.0)
+        # return s * factor
+        r = torch.linalg.norm(s, dim=1, keepdim=True) + 1e-8
+        r_soft = self.max_scale * torch.tanh(r / self.max_scale)
+        return s * (r_soft / r)
 
     def capture(self):
         return (
@@ -155,7 +164,7 @@ class GaussianModel:
         )
 
         dist2 = torch.clamp_min(
-            distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()),
+            10 * distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()),
             0.0000001,
         )
         scales = self.inverse_scaling_activation(torch.sqrt(dist2))[..., None].repeat(1, 3)
@@ -626,7 +635,7 @@ class GaussianModel:
         self.densify_in_empty(empty_points, empty_values)
 
         prune_mask = (self.get_weight < min_weight).squeeze()
-        print(f"Number of Gaussians pruned: {torch.count_nonzero(prune_mask)}")
+        # print(f"Number of Gaussians pruned: {torch.count_nonzero(prune_mask)}")
         self.prune_points(prune_mask)
 
         torch.cuda.empty_cache()
