@@ -165,7 +165,7 @@ renderCUDA(
 	// Check if this thread is associated with a valid cell or outside.
 	bool inside = cell.x < num_cells.x && cell.y < num_cells.y && cell.z < num_cells.z;
 	// Done threads can help with fetching, but don't rasterize
-	bool done = !inside || accumulated_weights[cell_id] <= WEIGHT_CUTOFF;
+	bool done = !inside;
 
 	// Load start/end range of IDs to process in bit sorted list.
 	uint2 range = ranges[block.group_index().z * grid.y * grid.x + block.group_index().y * grid.x + block.group_index().x];
@@ -181,9 +181,14 @@ renderCUDA(
 	__shared__ float collected_clamped[BLOCK_SIZE];
 	__shared__ float collected_conic[BLOCK_SIZE * 6];
 
-	float acc_weight = accumulated_weights[cell_id];
-	float dL_doutv = dL_dcells[cell_id];
-	float dL_doutw = dL_dcell_weights[cell_id];
+	float acc_weight = 0.0;
+	float dL_doutv = 0.0;
+	float dL_doutw = 0.0;
+	if (inside) {
+		acc_weight = accumulated_weights[cell_id];
+		dL_doutv = dL_dcells[cell_id];
+		dL_doutw = dL_dcell_weights[cell_id];
+	} 
 	
 	// Iterate over batches
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
@@ -219,7 +224,7 @@ renderCUDA(
 			float dL_dyz = 0.0;
 			float dL_dzz = 0.0;
 			int point_idx = collected_id[j];
-			if (!done) {
+			if (!done && acc_weight > WEIGHT_CUTOFF) {
 				float3 d = make_float3(cell_pos.x - collected_means[j].x, cell_pos.y - collected_means[j].y, cell_pos.z - collected_means[j].z);
 				
 				// Compute quadratic form and weight as in forward pass
