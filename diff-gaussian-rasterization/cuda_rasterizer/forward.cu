@@ -162,9 +162,12 @@ __global__ void preprocessCUDA(int P,
     aabbs[idx * 6 + 4] = end_block.y;
 	aabbs[idx * 6 + 5] = end_block.z;
 	// Clamping may not be necessary since these are stored with sigmoid activation?
-	clamped[idx] = (values[idx] < 0.0f) || (values[idx] > 1.0f);
-    values_out[idx] = glm::clamp(values[idx], 0.0f, 1.0f); 
-	weights_out[idx] = glm::clamp(weights[idx], 0.0f, 1.0f); 
+	// clamped[idx] = (values[idx] < 0.0f) || (values[idx] > 1.0f);
+    // values_out[idx] = glm::clamp(values[idx], 0.0f, 1.0f); 
+	// weights_out[idx] = glm::clamp(weights[idx], 0.0f, 1.0f); 
+	clamped[idx] = false;
+    values_out[idx] = values[idx]; 
+	weights_out[idx] = weights[idx]; 
     volumes[idx] = static_cast<float>(block_dims.x * block_dims.y * block_dims.z);
 }
 
