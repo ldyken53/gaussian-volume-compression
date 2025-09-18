@@ -67,7 +67,7 @@ def training(
     ema_lpsnr_for_log = 0.0
 
     # Make ground truth
-    cell_count = 50
+    cell_count = 64
     spacing = [
         (gaussians.maxes[0] - gaussians.mins[0]) / (cell_count - 1),
         (gaussians.maxes[1] - gaussians.mins[1]) / (cell_count - 1),
@@ -171,6 +171,9 @@ def training(
                 torch.abs(cells.ravel() - gt.ravel()) > 0.05,
                 recon_mask
             ).cpu().numpy()
+            x = cells * weights
+            new_vals = ((weights + 0.01) * gt - x) * 100
+
 
         with torch.no_grad():
             # Logging
@@ -210,7 +213,16 @@ def training(
                     }
                 )
                 progress_bar.update(500)
-                print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}")
+                print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, mean weight: {torch.mean(weights)}")
+                x = cells * weights
+                low = (x) / (weights + 1)
+                high = (x + 1) / (weights + 1)
+                mm = torch.logical_and(
+                    gt >= low,
+                    gt <= high
+                )
+                # print(f"Num between range1: {torch.count_nonzero(gt < low)}, range2: {torch.count_nonzero(gt > high)}")
+                # print(f"Num between range1: {torch.count_nonzero(mm)}")
             if iteration == opt.iterations:
                 progress_bar.close()
 
@@ -247,7 +259,9 @@ def training(
                     # samples_tf_flat[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)],
                     # gt_cells.ravel()[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)].reshape(-1, 1)
                     samples_tf_flat[loss_idx],
-                    gt_cells.ravel()[loss_idx].reshape(-1, 1)
+                    # gt_cells.ravel()[loss_idx].reshape(-1, 1)
+                    np.clip(new_vals.cpu().ravel()[loss_idx].reshape(-1, 1), -0.99, 0.99)
+                    # new_vals.cpu().ravel()[loss_idx].reshape(-1, 1)
                 )
 
                 # if iteration % opt.weight_reset_interval == 0 or (
@@ -310,7 +324,7 @@ if __name__ == "__main__":
     pp = PipelineParams(parser)
     parser.add_argument("--debug_from", type=int, default=-1)
     parser.add_argument("--fraction", type=float, default=0.01)
-    parser.add_argument("--min_weight", type=float, default=0.0001)
+    parser.add_argument("--min_weight", type=float, default=0.005)
     parser.add_argument("--detect_anomaly", action="store_true", default=False)
     parser.add_argument(
         "--test_iterations", nargs="+", type=int, default=[7_000, 30_000]
@@ -319,7 +333,7 @@ if __name__ == "__main__":
     #     "--save_iterations", nargs="+", type=int, default=[1, 16, 32, 64, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
     # )
     parser.add_argument(
-        "--save_iterations", nargs="+", type=int, default=[8000, 14000]
+        "--save_iterations", nargs="+", type=int, default=[8000, 16000]
     )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--log_to_file", action="store_true")
