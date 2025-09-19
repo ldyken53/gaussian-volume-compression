@@ -37,11 +37,11 @@ class GaussianModel:
         # self.weight_activation = lambda x: x
         # self.inverse_weight_activation = lambda x: x
 
-        # self.values_activation = torch.sigmoid
-        # self.inverse_value_activation = inverse_sigmoid
+        self.values_activation = torch.sigmoid
+        self.inverse_value_activation = inverse_sigmoid
 
-        self.values_activation = torch.tanh
-        self.inverse_value_activation = torch.atanh
+        # self.values_activation = torch.tanh
+        # self.inverse_value_activation = torch.atanh
 
         # self.values_activation = lambda x: x
         # self.inverse_value_activation = lambda x: x
@@ -603,12 +603,12 @@ class GaussianModel:
             new_values,
         )
 
-    def densify_in_empty(self, empty_points, empty_values):
+    def densify_in_empty(self, empty_points, empty_values, new_scale):
         # Extract points that satisfy the gradient condition
         new_points = torch.tensor(empty_points).float().cuda()
 
         new_scaling = self.inverse_scaling_activation(
-            (0.00167) # Slightly bigger than 1 cell in 100^3 grid
+            (new_scale) # Slightly bigger than 1 cell in 100^3 grid
             * torch.ones(
                 (empty_points.shape[0], 3), dtype=torch.float, device="cuda"
             )
@@ -617,8 +617,8 @@ class GaussianModel:
         new_rotation[:, 0] = 1
 
         new_weights = self.inverse_weight_activation(
-            (0.01)
-            * torch.ones(
+            (0.01) *
+            torch.ones(
                 (empty_points.shape[0], 1), dtype=torch.float, device="cuda"
             )
         )
@@ -635,13 +635,13 @@ class GaussianModel:
             new_values,
         )
 
-    def densify_and_prune(self, max_grad, min_weight, empty_points, empty_values):
+    def densify_and_prune(self, max_grad, min_weight, new_scale, empty_points, empty_values):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
         # self.densify_and_clone(grads, max_grad, extent)
         # self.densify_and_split(grads, max_grad, extent)
-        self.densify_in_empty(empty_points, empty_values)
+        self.densify_in_empty(empty_points, empty_values, new_scale)
 
         prune_mask = (self.get_weight < min_weight).squeeze()
         # print(f"Number of Gaussians pruned: {torch.count_nonzero(prune_mask)}")

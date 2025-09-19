@@ -65,6 +65,9 @@ def training(
     ema_lfp_for_log = 0.0
     ema_lfn_for_log = 0.0
     ema_lpsnr_for_log = 0.0
+    error_thresh = 0.1
+    new_scale = 0.006 # 4 * 100^3 cell?
+    densifies = 0
 
     # Make ground truth
     cell_count = 64
@@ -168,7 +171,7 @@ def training(
         recon_mask = torch.logical_and(cells.ravel() != -1, gt.ravel() != -1)
         if iteration not in saving_iterations and iteration not in testing_iterations:
             loss_idx = torch.logical_and(
-                torch.abs(cells.ravel() - gt.ravel()) > 0.05,
+                torch.abs(cells.ravel() - gt.ravel()) > error_thresh,
                 recon_mask
             ).cpu().numpy()
             x = cells * weights
@@ -222,7 +225,7 @@ def training(
                     gt <= high
                 )
                 # print(f"Num between range1: {torch.count_nonzero(gt < low)}, range2: {torch.count_nonzero(gt > high)}")
-                # print(f"Num between range1: {torch.count_nonzero(mm)}")
+                print(f"Num between range1: {torch.count_nonzero(mm)}")
             if iteration == opt.iterations:
                 progress_bar.close()
 
@@ -247,6 +250,10 @@ def training(
                 iteration >= opt.densify_from_iter and
                 iteration % opt.densification_interval == 0
             ):
+                if densifies > 0 and densifies % 40 == 0:
+                    error_thresh *= 0.5
+                    new_scale *= 0.5
+                    print(f"New thresh {error_thresh}, new scale {new_scale}")
                 cpu_cells = cells.cpu().numpy()
                 # print(f"False negative: {np.count_nonzero(np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1))}, false positive: {np.count_nonzero(np.logical_and(cpu_cells.ravel() != -1, gt_cells.ravel() == -1))}")
                 mse = torch.mean((cells - gt) ** 2)
@@ -256,13 +263,15 @@ def training(
                 gaussians.densify_and_prune(
                     opt.densify_grad_threshold,
                     min_weight,
+                    new_scale,
                     # samples_tf_flat[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)],
                     # gt_cells.ravel()[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)].reshape(-1, 1)
                     samples_tf_flat[loss_idx],
                     # gt_cells.ravel()[loss_idx].reshape(-1, 1)
-                    np.clip(new_vals.cpu().ravel()[loss_idx].reshape(-1, 1), -0.99, 0.99)
-                    # new_vals.cpu().ravel()[loss_idx].reshape(-1, 1)
+                    np.clip(new_vals.cpu().ravel()[loss_idx].reshape(-1, 1), 0.01, 0.99),
+                    # new_vals.cpu().ravel()[loss_idx].reshape(-1, 1),
                 )
+                densifies += 1
 
                 # if iteration % opt.weight_reset_interval == 0 or (
                 #     dataset.white_background and iteration == opt.densify_from_iter
