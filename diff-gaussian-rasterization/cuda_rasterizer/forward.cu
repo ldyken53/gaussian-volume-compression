@@ -137,15 +137,15 @@ __global__ void preprocessCUDA(int P,
 
 	// Find which blocks the Gaussian intersects
 	uint3 start_block = make_uint3(
-		max(0u, static_cast<unsigned int>(floor((mins.x - volume_mins.x) / block_size_x))),
-		max(0u, static_cast<unsigned int>(floor((mins.y - volume_mins.y) / block_size_y))),
-		max(0u, static_cast<unsigned int>(floor((mins.z - volume_mins.z) / block_size_z)))
-    );    
+		max(0, min(static_cast<int>(grid.x), static_cast<int>(floor((mins.x - volume_mins.x) / block_size_x)))),
+		max(0, min(static_cast<int>(grid.y), static_cast<int>(floor((mins.y - volume_mins.y) / block_size_y)))),
+		max(0, min(static_cast<int>(grid.z), static_cast<int>(floor((mins.z - volume_mins.z) / block_size_z))))
+	);    
 	uint3 end_block = make_uint3(
-		min(grid.x, static_cast<unsigned int>(ceil((maxes.x - volume_mins.x) / block_size_x))),
-		min(grid.y, static_cast<unsigned int>(ceil((maxes.y - volume_mins.y) / block_size_y))),
-		min(grid.z, static_cast<unsigned int>(ceil((maxes.z - volume_mins.z) / block_size_z)))
-    );
+		max(0, min(static_cast<int>(grid.x), static_cast<int>(ceil((maxes.x - volume_mins.x) / block_size_x)))),
+		max(0, min(static_cast<int>(grid.y), static_cast<int>(ceil((maxes.y - volume_mins.y) / block_size_y)))),
+		max(0, min(static_cast<int>(grid.z), static_cast<int>(ceil((maxes.z - volume_mins.z) / block_size_z))))
+	);
     uint3 block_dims = make_uint3(
 		end_block.x - start_block.x,
 		end_block.y - start_block.y,
