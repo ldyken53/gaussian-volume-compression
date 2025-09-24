@@ -105,7 +105,7 @@ class GaussianModel:
 
     @property
     def get_scaling(self):
-        return self._apply_cap(self.scaling_activation(self._scaling))
+        return self.scaling_activation(self._scaling)
 
     @property
     def get_rotation(self):
@@ -165,7 +165,7 @@ class GaussianModel:
         )
 
         dist2 = torch.clamp_min(
-            distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()),
+            10 * distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()),
             0.0000001,
         )
         scales = self.inverse_scaling_activation(torch.sqrt(dist2))[..., None].repeat(1, 3)
@@ -595,12 +595,12 @@ class GaussianModel:
             new_values,
         )
 
-    def densify_in_empty(self, empty_points, empty_values):
+    def densify_in_empty(self, empty_points, empty_values, new_scale):
         # Extract points that satisfy the gradient condition
         new_points = torch.tensor(empty_points).float().cuda()
 
         new_scaling = self.inverse_scaling_activation(
-            (0.00167) # Slightly bigger than 1 cell in 100^3 grid
+            (new_scale) # Slightly bigger than 1 cell in 100^3 grid
             * torch.ones(
                 (empty_points.shape[0], 3), dtype=torch.float, device="cuda"
             )
@@ -627,19 +627,19 @@ class GaussianModel:
             new_values,
         )
 
-    def densify_and_prune(self, max_grad, min_weight, empty_points, empty_values):
+    def densify_and_prune(self, max_grad, min_weight, new_scale, empty_points, empty_values):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
         # self.densify_and_clone(grads, max_grad, extent)
         # self.densify_and_split(grads, max_grad, extent)
-        self.densify_in_empty(empty_points, empty_values)
+        self.densify_in_empty(empty_points, empty_values, new_scale)
 
         prune_mask = (self.get_weight < min_weight).squeeze()
         # print(f"Number of Gaussians pruned: {torch.count_nonzero(prune_mask)}")
-        # self.prune_points(prune_mask)
+        self.prune_points(prune_mask)
 
-        # torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(

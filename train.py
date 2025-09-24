@@ -71,11 +71,13 @@ def training(
     mean = 0
     avg = 0
     error_thresh = 0.1
+    new_scale = 0.006
+    densifies = 0
     lossy_frac = 0.0
 
     # Make ground truth
     print("Before cell")
-    cell_count = 100
+    cell_count = 64
     spacing = [
         (gaussians.maxes[0] - gaussians.mins[0]) / (cell_count - 1),
         (gaussians.maxes[1] - gaussians.mins[1]) / (cell_count - 1),
@@ -90,61 +92,93 @@ def training(
     rot = np.rot90(samples_3d, k=1, axes=(2,0))
     samples_tf = np.flip(rot, axis=2)
     save_cell = samples_tf.reshape(-1, 3)
-    print("Save cell made")
-    save_gt = gpu_sample(
-        gaussians.mesh.dimensions,
-        gaussians.mesh.origin,
-        gaussians.mesh.spacing,
-        gaussians.mesh.point_data['value'],
-        save_cell
-    )
-    # samples_tf_flat = gaussians.mesh.points
-    # P, D = gaussians.mesh.points.shape
-    size = 100000
-    start = time.time()
-    num_jitters = 10000
-    # idx = np.random.choice(gaussians.mesh.n_points, size=(num_jitters, size), replace=False)
-    idx = torch.randint(gaussians.mesh.n_points, (num_jitters, size))
-    nx, ny, nz = gaussians.mesh.dimensions
-    ox, oy, oz = gaussians.mesh.origin
-    sx, sy, sz = gaussians.mesh.spacing
-    nxny = nx * ny
-    k, r = np.divmod(idx, nxny)
-    j, i = np.divmod(r, nx)
-    x = ox + i * sx
-    y = oy + j * sy
-    z = oz + k * sz
-    mesh_samples = np.stack((x, y, z), axis=-1)
-    mesh_vals = gaussians.mesh.point_data['value'][idx]
-    # new_idx = np.random.choice(cell_count ** 3, size=(num_jitters, size), replace=True)
-    # cell_samples = save_cell[new_idx]
-    # jitter = np.random.uniform(-0.5, 0.5, size=(num_jitters, size, 3))
-    # jitter *= np.array(spacing)[None, None, :]    
-    # uniform_samples = cell_samples + jitter
-    # print(uniform_samples.shape)
-    # big_samples = np.concatenate([mesh_samples, uniform_samples], axis=1).reshape(-1, D)
-    # big_samples = np.clip(
-    #     uniform_samples,
-    #     np.array(gaussians.mins)[None, :], 
-    #     np.array(gaussians.maxes)[None, :]
-    # ).reshape(-1, 3)
-    # all_gt = gpu_sample(
+    # print("Save cell made")
+    # save_gt = gpu_sample(
     #     gaussians.mesh.dimensions,
     #     gaussians.mesh.origin,
     #     gaussians.mesh.spacing,
     #     gaussians.mesh.point_data['value'],
-    #     np.vstack([save_cell, big_samples])
+    #     save_cell
     # )
-    # save_gt = all_gt[:cell_count**3]
-    # big_gt = all_gt[cell_count**3:].reshape(num_jitters, size)
-    # big_samples = big_samples.reshape(num_jitters, size, 3)
-    big_gt = mesh_vals.reshape(num_jitters, size)
-    big_samples = mesh_samples.reshape(num_jitters, size, 3)
+    num_batches = 1000
+    size = cell_count ** 3
+    big_samples = np.tile(save_cell, (num_batches, 1))
+    big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
+    big_jitter *= np.array(spacing)[None, :]
+    big_jitter[: cell_count**3, :] = 0
+    big_samples = np.clip(big_samples + big_jitter, 0.0, 1.0)
+    big_gt = gpu_sample(
+        gaussians.mesh.dimensions,
+        gaussians.mesh.origin,
+        gaussians.mesh.spacing,
+        gaussians.mesh.point_data['value'],
+        big_samples
+    )
+    big_gt = big_gt.reshape(num_batches, cell_count**3)
+    save_gt = big_gt[0]
+    big_samples = big_samples.reshape(num_batches, cell_count**3, 3)
     end = time.time()
-    print(f"Time to sample gt: {end - start}")
+
+    # samples_tf_flat = gaussians.mesh.points
+    # P, D = gaussians.mesh.points.shape
+    # size = 262144
+    # start = time.time()
+    # num_batches = 64
+    # idx = torch.randint(gaussians.mesh.n_points, (num_batches, size))
+    # nx, ny, nz = gaussians.mesh.dimensions
+    # ox, oy, oz = gaussians.mesh.origin
+    # sx, sy, sz = gaussians.mesh.spacing
+    # nxny = nx * ny
+    # k, r = np.divmod(idx, nxny)
+    # j, i = np.divmod(r, nx)
+    # x = ox + i * sx
+    # y = oy + j * sy
+    # z = oz + k * sz
+    # mesh_samples = np.stack((x, y, z), axis=-1)
+    # mesh_vals = gaussians.mesh.point_data['value'][idx]
+    # big_gt = mesh_vals.reshape(num_batches, size)
+    # big_samples = mesh_samples.reshape(num_batches, size, 3)
+    # end = time.time()
+    # print(f"Time to sample gt: {end - start}")
+
+    # start = time.time()
+    # sub = 64                       # edge length of the cubic patch
+    # size = sub ** 3                # = 262 144 points per batch
+    # num_batches = 100
+    # nx, ny, nz = gaussians.mesh.dimensions
+    # ox, oy, oz = gaussians.mesh.origin
+    # sx, sy, sz = gaussians.mesh.spacing
+    # nxny = nx * ny
+    # # 1. random cube origins (x0, y0, z0) for every batch
+    # x0 = torch.randint(0, nx - sub + 1, (num_batches,))
+    # y0 = torch.randint(0, ny - sub + 1, (num_batches,))
+    # z0 = torch.randint(0, nz - sub + 1, (num_batches,))
+    # # 2. 64³ offsets inside one cube, in (k, j, i) order
+    # i = torch.arange(sub)
+    # j = torch.arange(sub)
+    # k = torch.arange(sub)
+    # k, j, i = torch.meshgrid(k, j, i, indexing='ij')        # shape (64,64,64)
+    # cube_offsets = (k * nxny + j * nx + i).reshape(-1)      # (262144,)
+    # # 3. linear indices for every batch
+    # base_idx = z0 * nxny + y0 * nx + x0                     # (num_batches,)
+    # idx = base_idx[:, None] + cube_offsets[None, :]         # (num_batches, size)
+    # # Look-ups exactly as before
+    # mesh_vals = gaussians.mesh.point_data['value'][idx]
+    # big_gt = mesh_vals                                     # already (num_batches, size)
+
+    # # convert back to (x, y, z)
+    # k, r = np.divmod(idx.numpy(), nxny)
+    # j, i = np.divmod(r, nx)
+    # x = ox + i * sx
+    # y = oy + j * sy
+    # z = oz + k * sz
+    # big_samples = np.stack((x, y, z), axis=-1)              # (num_batches, size, 3)
+    # end = time.time()
+    # print(f"Time to sample gt: {end - start:.2f} s")
+    
     gt_cells = big_gt[0]
     print(f"Number of invalid samples: {np.count_nonzero(gt_cells == -1)}")
-    tensor_to_vtk(save_gt.reshape(cell_count, cell_count, cell_count), "test_gt.vtk", spacing)
+    # tensor_to_vtk(save_gt.reshape(cell_count, cell_count, cell_count), "test_gt.vtk", spacing)
     gt = torch.tensor(gt_cells).cuda()
     if debug_from == 0:
         pipe.debug = True
@@ -174,7 +208,7 @@ def training(
             current_samples = save_cell
         else:
             num_loss = loss_samples.shape[0]
-            jit_idx = np.random.randint(0, num_jitters)
+            jit_idx = np.random.randint(0, num_batches)
             gt_cells = np.concatenate([
                 loss_gt,
                 big_gt[jit_idx][:(size - num_loss)]
@@ -210,7 +244,7 @@ def training(
             false_positive = (1 * (1 - torch.exp(-k * weights[mask]))).mean()
         else:
             false_positive = torch.tensor(0., device="cuda")
-        loss = l1_lv + false_positive + false_negative
+        loss = l1_lv + false_negative
         loss.backward()
         iter_end.record()
         recon_mask = torch.logical_and(cells != -1, gt != -1)
@@ -272,7 +306,7 @@ def training(
             ema_lfp_for_log = 0.1 * false_positive + 0.9 * ema_lfp_for_log
             ema_lfn_for_log = 0.1 * false_negative + 0.9 * ema_lfn_for_log
             ema_lpsnr_for_log = 0.1 * psnr + 0.9 * ema_lpsnr_for_log
-            if iteration % 1000 == 0:
+            if iteration % 500 == 0:
                 progress_bar.set_postfix(
                     {
                         "Loss": f"{ema_loss_for_log:.{5}f}",
@@ -282,8 +316,8 @@ def training(
                         "PSNR": f"{ema_lpsnr_for_log:.{5}f}"
                     }
                 )
-                progress_bar.update(1000)
-                print("")
+                progress_bar.update(500)
+                print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, mean weight: {torch.mean(weights)}")
             if iteration == opt.iterations:
                 progress_bar.close()
 
@@ -310,6 +344,11 @@ def training(
                  iteration not in saving_iterations and
                  iteration not in testing_iterations
             ):
+                if densifies > 0 and densifies % 40 == 0:
+                    error_thresh *= 0.5
+                    new_scale *= 0.5
+                    print(f"New thresh {error_thresh}, new scale {new_scale}")
+
                 # cpu_cells = cells.cpu().numpy()
                 # print(f"False negative: {np.count_nonzero(np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1))}, false positive: {np.count_nonzero(np.logical_and(cpu_cells.ravel() != -1, gt_cells.ravel() == -1))}")
                 # mse = torch.mean((cells - gt) ** 2)
@@ -319,11 +358,13 @@ def training(
                 gaussians.densify_and_prune(
                     opt.densify_grad_threshold,
                     min_weight,
+                    new_scale,
                     # current_samples[np.logical_and(current_samples == -1, gt != -1)],
                     # gt_cells.ravel()[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)].reshape(-1, 1)
                     current_samples[loss_idx],
                     gt_cells[loss_idx].reshape(-1, 1)
                 )
+                densifies += 1
                 # error_thresh -= 0.002
 
                 # if iteration % opt.weight_reset_interval == 0 or (
@@ -386,11 +427,14 @@ if __name__ == "__main__":
     pp = PipelineParams(parser)
     parser.add_argument("--debug_from", type=int, default=-1)
     parser.add_argument("--fraction", type=float, default=0.01)
-    parser.add_argument("--min_weight", type=float, default=0.0001)
+    parser.add_argument("--min_weight", type=float, default=0.005)
     parser.add_argument("--detect_anomaly", action="store_true", default=False)
     parser.add_argument(
-        "--test_iterations", nargs="+", type=int, default=[1] + [i * 1000 for i in range(32)]
+        "--test_iterations", nargs="+", type=int, default=[1]
     )
+    # parser.add_argument(
+    #     "--test_iterations", nargs="+", type=int, default=[1] + [i * 1000 for i in range(32)]
+    # )
     # parser.add_argument(
     #     "--save_iterations", nargs="+", type=int, default=[1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 48_000, 64_000]
     # )
