@@ -76,7 +76,10 @@ void CudaRasterizer::Rasterizer::forward(
 
 	if (debug) cudaEventRecord(events[2]);
 	if (use_gaussian_bvh) {
-    	cuBQL::cuda::radixBuilder(gaussian_bvh, aabbs, P, cuBQL::BuildConfig());
+		cuBQL::BuildConfig cfg;
+    	cfg.makeLeafThreshold = 33;
+		cfg.maxAllowedLeafSize = 32;
+    	cuBQL::cuda::radixBuilder(gaussian_bvh, aabbs, P, cfg);
 	}
 	if (debug) cudaEventRecord(events[3]);
 
@@ -219,7 +222,7 @@ void CudaRasterizer::Rasterizer::backward(
 
 	if (debug) cudaEventRecord(events[0]);
 	// compute loss w.r.t gradients.
-	if (use_gaussian_bvh) {
+	if (!use_gaussian_bvh) {
 		CHECK_CUDA(BACKWARD::render(P, S,
 			means3D,
 			(glm::vec3*)scales,
@@ -240,7 +243,7 @@ void CudaRasterizer::Rasterizer::backward(
 			dL_dweights,
 			(glm::vec3*)dL_dscale,
 			(glm::vec4*)dL_drot,
-			use_gaussian_bvh), debug);
+			true), debug);
 	} else {
 		CHECK_CUDA(BACKWARD::render(P, S,
 			means3D,
@@ -262,7 +265,7 @@ void CudaRasterizer::Rasterizer::backward(
 			dL_dweights,
 			(glm::vec3*)dL_dscale,
 			(glm::vec4*)dL_drot,
-			use_gaussian_bvh), debug);
+			false), debug);
 	}
 	if (debug) cudaEventRecord(events[1]);
 

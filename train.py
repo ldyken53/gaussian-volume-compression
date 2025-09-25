@@ -182,11 +182,12 @@ def training(
     gt = torch.tensor(gt_cells).cuda()
     if debug_from == 0:
         pipe.debug = True
+    use_gaussian_bvh = True
     init_rasterizer(
         gaussians,
         pipe,
         cell_count,
-        use_gaussian_bvh=False
+        use_gaussian_bvh=use_gaussian_bvh
     )
     build_bvh(torch.tensor(big_samples[0], dtype=torch.float, device="cuda"))
 
