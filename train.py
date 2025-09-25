@@ -248,31 +248,33 @@ def training(
         loss = l1_lv + false_negative
         loss.backward()
         iter_end.record()
-        recon_mask = torch.logical_and(cells != -1, gt != -1)
-        if iteration not in saving_iterations and iteration not in testing_iterations:
-            med = torch.median(torch.abs(cells - gt))
-            stdn, meann = torch.std_mean(torch.abs(cells - gt))
-            mean = (mean * avg + meann) / (avg + 1)
-            avg += 1
-            loss_idx = torch.logical_and(
-            # torch.logical_or(
-                # torch.logical_or(
-                #     torch.logical_and(gt == -1, weights > 0.07),
-                #     torch.logical_and(gt != -1, torch.logical_and(
-                #         weights > 0,
-                #         weights < 0.07
-                #         )
-                # ),
-                # torch.logical_and(
-                    torch.abs(cells - gt) > error_thresh,
-                    recon_mask
-                # )
-            ).cpu().numpy()
-            lossy_frac = 0.9 * lossy_frac + 0.1 * np.count_nonzero(loss_idx) / size
-            # loss_samples = current_samples[loss_idx]
-            # loss_gt = gt_cells[loss_idx]
 
         with torch.no_grad():
+            # Compute the lossy samples where new Gaussians are needed
+            recon_mask = torch.logical_and(cells != -1, gt != -1)
+            if iteration not in saving_iterations and iteration not in testing_iterations:
+                med = torch.median(torch.abs(cells - gt))
+                stdn, meann = torch.std_mean(torch.abs(cells - gt))
+                mean = (mean * avg + meann) / (avg + 1)
+                avg += 1
+                loss_idx = torch.logical_and(
+                # torch.logical_or(
+                    # torch.logical_or(
+                    #     torch.logical_and(gt == -1, weights > 0.07),
+                    #     torch.logical_and(gt != -1, torch.logical_and(
+                    #         weights > 0,
+                    #         weights < 0.07
+                    #         )
+                    # ),
+                    # torch.logical_and(
+                        torch.abs(cells - gt) > error_thresh,
+                        recon_mask
+                    # )
+                ).cpu().numpy()
+                lossy_frac = 0.9 * lossy_frac + 0.1 * np.count_nonzero(loss_idx) / size
+                # loss_samples = current_samples[loss_idx]
+                # loss_gt = gt_cells[loss_idx]
+
             # Logging
             if log_to_file and iteration % 20 == 0:
                 cpu_cells = cells.cpu().numpy()
