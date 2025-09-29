@@ -1,7 +1,7 @@
 import os
 
 from arguments import ModelParams
-from scene.dataset_readers import readData
+from scene.dataset_readers import readData, readDatau
 from scene.gaussian_model import GaussianModel
 from utils.system_utils import searchForMaxIteration
 
@@ -32,7 +32,8 @@ class Scene:
             print("Loading trained model at iteration {}".format(self.loaded_iter))
 
         if os.path.exists(args.source_path) and args.source_path.lower().endswith(('.vtk', '.vtu')):
-            mesh, pcd = readData(args.source_path, fraction, normalized=normalized)
+            # mesh, pcd = readData(args.source_path, fraction, normalized=normalized)
+            mesh, pcd = readDatau(args.source_path, fraction)
         else:
             assert False, "Could not recognize scene type!"
 
