@@ -220,7 +220,7 @@ void CudaRasterizer::Rasterizer::backward(
 	}
 
 	int* d_count_intersections = nullptr;
-	if (!use_gaussian_bvh) {
+	if (use_gaussian_bvh) {
 		CHECK_CUDA(cudaMalloc(&d_count_intersections, sizeof(int) * S), debug);
 	} else {
 		CHECK_CUDA(cudaMalloc(&d_count_intersections, sizeof(int) * P), debug);
@@ -228,7 +228,7 @@ void CudaRasterizer::Rasterizer::backward(
 
 	if (debug) cudaEventRecord(events[0]);
 	// compute loss w.r.t gradients.
-	if (!use_gaussian_bvh) {
+	if (use_gaussian_bvh) {
 		CHECK_CUDA(BACKWARD::render(P, S,
 			means3D,
 			(glm::vec3*)scales,
@@ -278,7 +278,7 @@ void CudaRasterizer::Rasterizer::backward(
 	if (debug) cudaEventRecord(events[1]);
 
 	if (debug) {
-		if (!use_gaussian_bvh) {
+		if (use_gaussian_bvh) {
 			std::vector<int> h_counts(S, 0);
 			CHECK_CUDA(cudaMemcpy(h_counts.data(), d_count_intersections, sizeof(int) * S, cudaMemcpyDeviceToHost), debug);
 

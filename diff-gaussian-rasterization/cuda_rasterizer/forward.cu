@@ -212,7 +212,7 @@ __global__ void sampleRenderCUDA(const int S,
 	float* out_testw,
 	int* count_intersections)
 {
-	const int THREADS_PER_SAMPLE = 1; // One warp per sample
+	const int THREADS_PER_SAMPLE = 32; // One warp per sample
 	auto block = cg::this_thread_block();
 	auto warp = cg::tiled_partition<THREADS_PER_SAMPLE>(block);
 	int idx = blockIdx.x * (blockDim.x / THREADS_PER_SAMPLE) + (threadIdx.x / THREADS_PER_SAMPLE);
@@ -325,7 +325,7 @@ void FORWARD::render(const int P, const int S,
 	{
 		if (use_gaussian_bvh) {
 			dim3 block(256);
-			dim3 grid((S * 1 + block.x - 1) / block.x); // 1 threads per sample
+			dim3 grid((S * 32 + block.x - 1) / block.x); // 1 threads per sample
 			sampleRenderCUDA<<<grid, block>>> (
 				S,
 				means3D,
