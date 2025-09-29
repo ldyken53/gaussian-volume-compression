@@ -27,7 +27,8 @@ __global__ void renderCUDA(int P,
 	float* dL_dvalues,
 	float* dL_dweights,
 	glm::vec3* dL_dscales,
-	glm::vec4* dL_drots)
+	glm::vec4* dL_drots,
+	int* count_intersections)
 {
 	const int THREADS_PER_GAUSSIAN = 32; // One warp per Gaussian
 	auto block = cg::this_thread_block();
@@ -121,6 +122,8 @@ __global__ void renderCUDA(int P,
 	float dL_dyy = 0.0;
 	float dL_dyz = 0.0;
 	float dL_dzz = 0.0;
+	int count = 0;
+	int numLeaves = 0;
 	cuBQL::fixedBoxQuery::forEachLeaf<float,3>(
 	[&](uint32_t* primIDs, int count2) {
 		for (int i = thread_in_warp; i < count2; i += THREADS_PER_GAUSSIAN) {
@@ -175,7 +178,9 @@ __global__ void renderCUDA(int P,
 			dL_dyy += dL_dquad * d.y * d.y;
 			dL_dyz += dL_dquad * d.y * d.z;
 			dL_dzz += dL_dquad * d.z * d.z;
+			count++;
 		}
+		numLeaves++;
 		return 0;
     },
 		bvh,
@@ -193,6 +198,9 @@ __global__ void renderCUDA(int P,
 	dL_dyy = cg::reduce(warp, dL_dyy, cg::plus<float>());
 	dL_dyz = cg::reduce(warp, dL_dyz, cg::plus<float>());
 	dL_dzz = cg::reduce(warp, dL_dzz, cg::plus<float>());
+	if (thread_in_warp == 31) {
+		count_intersections[idx] = count;
+	}
 
 	if (thread_in_warp == 0) { 
 		dL_dvalues[idx] = dL_dvalue;
@@ -282,7 +290,8 @@ __global__ void sampleRenderCUDA(const int S,
 	float* dL_dvalues,
 	float* dL_dweights,
 	glm::vec3* dL_dscales,
-	glm::vec4* dL_drots)
+	glm::vec4* dL_drots,
+	int* count_intersections)
 {
 	const int THREADS_PER_SAMPLE = 32; // One warp per sample
 	auto block = cg::this_thread_block();
@@ -501,6 +510,7 @@ void BACKWARD::render(
 	float* dL_dweights,
 	glm::vec3* dL_dscale,
 	glm::vec4* dL_drot,
+	int* count_intersections,
 	const bool use_gaussian_bvh)
 {
 	if (use_gaussian_bvh) {
@@ -526,7 +536,8 @@ void BACKWARD::render(
 			dL_dvalue,
 			dL_dweights,
 			dL_dscale,
-			dL_drot);
+			dL_drot,
+			count_intersections);
 	} else {
 		dim3 block(256);
 		dim3 grid((P * 32 + block.x - 1) / block.x); // 32 threads per Gaussian
@@ -550,6 +561,7 @@ void BACKWARD::render(
 			dL_dvalue,
 			dL_dweights,
 			dL_dscale,
-			dL_drot);
+			dL_drot,
+			count_intersections);
 	}
 }

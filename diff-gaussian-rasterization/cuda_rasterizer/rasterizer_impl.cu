@@ -211,13 +211,19 @@ void CudaRasterizer::Rasterizer::backward(
 	const bool use_gaussian_bvh,
 	bool debug)
 {
-
 	// Create CUDA events for timing (only when debug is enabled)
 	cudaEvent_t events[2]; // 2 pairs of start/stop events
 	if (debug) {
 		for (int i = 0; i < 2; i++) {
 			cudaEventCreate(&events[i]);
 		}
+	}
+
+	int* d_count_intersections = nullptr;
+	if (!use_gaussian_bvh) {
+		CHECK_CUDA(cudaMalloc(&d_count_intersections, sizeof(int) * S), debug);
+	} else {
+		CHECK_CUDA(cudaMalloc(&d_count_intersections, sizeof(int) * P), debug);
 	}
 
 	if (debug) cudaEventRecord(events[0]);
@@ -243,6 +249,7 @@ void CudaRasterizer::Rasterizer::backward(
 			dL_dweights,
 			(glm::vec3*)dL_dscale,
 			(glm::vec4*)dL_drot,
+			d_count_intersections,
 			true), debug);
 	} else {
 		CHECK_CUDA(BACKWARD::render(P, S,
@@ -265,9 +272,53 @@ void CudaRasterizer::Rasterizer::backward(
 			dL_dweights,
 			(glm::vec3*)dL_dscale,
 			(glm::vec4*)dL_drot,
+			d_count_intersections,
 			false), debug);
 	}
 	if (debug) cudaEventRecord(events[1]);
+
+	if (debug) {
+		if (!use_gaussian_bvh) {
+			std::vector<int> h_counts(S, 0);
+			CHECK_CUDA(cudaMemcpy(h_counts.data(), d_count_intersections, sizeof(int) * S, cudaMemcpyDeviceToHost), debug);
+
+			// Compute max and average
+			long long sum = 0;
+			int max_val = 0;
+			int max_idx = -1;
+			for (int i = 0; i < S; ++i) {
+				sum += h_counts[i];
+				if (h_counts[i] > max_val) {
+					max_val = h_counts[i];
+					max_idx = i;
+				}
+			}
+			const double avg = (S > 0) ? static_cast<double>(sum) / static_cast<double>(S) : 0.0;
+			std::printf("Backward intersections: max=%d (sample %d), avg=%.3f over %d samples\n",
+					max_val, max_idx, avg, S);
+		} else {
+			std::vector<int> h_counts(P, 0);
+			CHECK_CUDA(cudaMemcpy(h_counts.data(), d_count_intersections, sizeof(int) * P, cudaMemcpyDeviceToHost), debug);
+
+			// Compute max and average
+			long long sum = 0;
+			int max_val = 0;
+			int max_idx = -1;
+			for (int i = 0; i < P; ++i) {
+				sum += h_counts[i];
+				if (h_counts[i] > max_val) {
+					max_val = h_counts[i];
+					max_idx = i;
+				}
+			}
+			const double avg = (P > 0) ? static_cast<double>(sum) / static_cast<double>(P) : 0.0;
+
+			std::printf("Backward intersections: max=%d (gaussian %d), avg=%.3f over %d gaussians\n",
+						max_val, max_idx, avg, P);
+		} 
+
+
+	}
 
 	if (debug) {
 		cudaDeviceSynchronize(); // ensure all events are completed
