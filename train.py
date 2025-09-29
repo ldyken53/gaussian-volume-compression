@@ -14,7 +14,7 @@ import pyvista as pv
 
 from arguments import ModelParams, OptimizationParams, PipelineParams
 from gaussian_renderer import init_rasterizer, render, build_bvh
-from gpu_mesh_sampling import gpu_sample
+from gpu_mesh_sampling import gpu_sample, gpu_sampleu
 from scene import GaussianModel, Scene
 from utils.debug_utils import tensor_to_vtk, analyze_array
 from utils.general_utils import get_expon_lr_func, safe_state
@@ -100,6 +100,12 @@ def training(
     #     gaussians.mesh.point_data['value'],
     #     save_cell
     # )
+    save_gt = gpu_sampleu(
+        gaussians.mesh.points, 
+        gaussians.mesh.cell_connectivity.astype(np.int64),
+        gaussians.mesh.point_data['value'],
+        save_cell
+    )
     num_batches = 1000
     size = cell_count ** 3
     big_samples = np.tile(save_cell, (num_batches, 1))
@@ -107,20 +113,23 @@ def training(
     big_jitter *= np.array(spacing)[None, :]
     big_jitter[: cell_count**3, :] = 0
     big_samples = np.clip(big_samples + big_jitter, 0.0, 1.0)
-    big_gt = gpu_sample(
-        gaussians.mesh.dimensions,
-        gaussians.mesh.origin,
-        gaussians.mesh.spacing,
+    # big_gt = gpu_sample(
+    #     gaussians.mesh.dimensions,
+    #     gaussians.mesh.origin,
+    #     gaussians.mesh.spacing,
+    #     gaussians.mesh.point_data['value'],
+    #     big_samples
+    # )
+    big_gt = gpu_sampleu(
+        gaussians.mesh.points, 
+        gaussians.mesh.cell_connectivity.astype(np.int64),
         gaussians.mesh.point_data['value'],
         big_samples
     )
     big_gt = big_gt.reshape(num_batches, cell_count**3)
-    save_gt = big_gt[0]
     big_samples = big_samples.reshape(num_batches, cell_count**3, 3)
     end = time.time()
 
-    # samples_tf_flat = gaussians.mesh.points
-    # P, D = gaussians.mesh.points.shape
     # size = 262144
     # start = time.time()
     # num_batches = 64
@@ -135,6 +144,7 @@ def training(
     # y = oy + j * sy
     # z = oz + k * sz
     # mesh_samples = np.stack((x, y, z), axis=-1)
+    # mesh_samples = gaussians.mesh.points[idx]
     # mesh_vals = gaussians.mesh.point_data['value'][idx]
     # big_gt = mesh_vals.reshape(num_batches, size)
     # big_samples = mesh_samples.reshape(num_batches, size, 3)
@@ -182,7 +192,7 @@ def training(
     gt = torch.tensor(gt_cells).cuda()
     if debug_from == 0:
         pipe.debug = True
-    use_gaussian_bvh = True
+    use_gaussian_bvh = False
     init_rasterizer(
         gaussians,
         pipe,
@@ -251,7 +261,8 @@ def training(
 
         with torch.no_grad():
             # Compute the lossy samples where new Gaussians are needed
-            recon_mask = torch.logical_and(cells != -1, gt != -1)
+            # recon_mask = torch.logical_and(cells != -1, gt != -1)
+            recon_mask = (gt != -100)
             if iteration not in saving_iterations and iteration not in testing_iterations:
                 med = torch.median(torch.abs(cells - gt))
                 stdn, meann = torch.std_mean(torch.abs(cells - gt))
@@ -297,6 +308,8 @@ def training(
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             mse = torch.mean((cells - gt) ** 2)
             psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
+            mse2 = torch.mean((cells[torch.logical_and(cells != -1, gt != -1)] - gt[torch.logical_and(cells != -1, gt != -1)]) ** 2)
+            psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
             if iteration in testing_iterations:
                 print(f"Testing PSNR at iteration {iteration}: {psnr}")
                 print(f"Testing fraction of samples that are lossy: {np.count_nonzero(loss_idx) / size}, avg: {lossy_frac}")
@@ -320,7 +333,7 @@ def training(
                     }
                 )
                 progress_bar.update(500)
-                print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, mean weight: {torch.mean(weights)}")
+                print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr2: {psnr2}, mean weight: {torch.mean(weights)}")
             if iteration == opt.iterations:
                 progress_bar.close()
 
