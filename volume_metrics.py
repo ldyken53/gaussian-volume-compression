@@ -55,11 +55,18 @@ def training(
     for i in range(3):
         jitter[...,i] *= spacing[i]
     gt_cells = gpu_sample(
-        gaussians.mesh.points, 
         gaussians.mesh.dimensions,
+        gaussians.mesh.origin,
+        gaussians.mesh.spacing,
         gaussians.mesh.point_data['value'],
         samples_tf_flat
     )
+    # gt_cells = gpu_sample(
+    #     gaussians.mesh.points, 
+    #     gaussians.mesh.dimensions,
+    #     gaussians.mesh.point_data['value'],
+    #     samples_tf_flat
+    # )
     gt_cells = gt_cells.reshape(cell_count, cell_count, cell_count)
     gt_weights = gt_cells.copy()
     gt = torch.tensor(gt_cells).cuda()
