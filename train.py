@@ -65,8 +65,8 @@ def training(
     ema_lfp_for_log = 0.0
     ema_lfn_for_log = 0.0
     ema_lpsnr_for_log = 0.0
-    error_thresh = 0.2
-    new_scale = 0.012 # 4 * 100^3 cell?
+    error_thresh = 0.1
+    new_scale = 0.003 # 4 * 100^3 cell?
     densifies = 0
 
     # Make ground truth
@@ -90,8 +90,13 @@ def training(
     big_samples = np.tile(samples_tf_flat, (num_jitters, 1))
     big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
     big_jitter *= np.array(spacing)[None, :]
-    # big_jitter[: cell_count**3, :] = 0
-    big_samples = np.clip(big_samples + big_jitter, 0.0, 1.0)
+    print(spacing)
+    big_jitter[: cell_count**3, :] = 0
+    big_samples = np.clip(
+        big_samples + big_jitter,
+        np.array(gaussians.mins),
+        np.array(gaussians.maxes)
+    )
     big_gt = gpu_sample(
         gaussians.mesh.dimensions,
         gaussians.mesh.origin,
@@ -121,6 +126,8 @@ def training(
     tensor_to_vtk(gt_weights, "test_gt_weight.vtk", spacing)
     gt_weights = torch.tensor(gt_weights).cuda()
     jitter_cuda = torch.tensor(big_jitter[0].ravel(), dtype=torch.float, device="cuda")
+    loss_samples = np.empty((0, 3))
+    loss_vals = np.empty((0, 1))
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
@@ -128,7 +135,7 @@ def training(
         iter_start.record()
 
         jit_idx = 0
-        if iteration not in saving_iterations:
+        if iteration not in saving_iterations and iteration not in testing_iterations:
             jit_idx = np.random.randint(0, num_jitters)
         jitter = big_jitter[jit_idx]
         jitter_cuda = torch.tensor(jitter.ravel(), dtype=torch.float, device="cuda")
@@ -169,8 +176,15 @@ def training(
             false_positive = (2 * (1 - torch.exp(-k * weights[mask]))).mean()
         else:
             false_positive = torch.tensor(0., device="cuda")
-        # false_positive = l1_loss(weights[gt == -1 ], gt_weights[gt == -1])
+        # min_allowed_scale = min(spacing) / 6.0  # One cell worth of extent
+        # mask = gaussians.get_scaling < min_allowed_scale
+        # if mask.any():
+        #     false_positive = torch.relu(min_allowed_scale - gaussians.get_scaling[mask]).mean()
+        # else:
+        #     false_positive = torch.tensor(0., device="cuda")
         loss = l1_lv + false_negative
+        # false_positive = l1_loss(weights[gt == -1 ], gt_weights[gt == -1])
+        # loss = l1_lv + false_negative
         loss.backward()
 
         iter_end.record()
@@ -178,13 +192,21 @@ def training(
         with torch.no_grad():
             # recon_mask = torch.logical_and(cells.ravel() != -1, gt.ravel() != -1)
             recon_mask = gt.ravel() != -2
-            if iteration not in saving_iterations and iteration not in testing_iterations:
+            if iteration not in saving_iterations and iteration not in testing_iterations and iteration >= opt.densify_from_iter:
                 loss_idx = torch.logical_and(
                     torch.abs(cells.ravel() - gt.ravel()) > error_thresh,
                     recon_mask
                 ).cpu().numpy()
                 x = cells * weights
-                new_vals = ((weights + 0.01) * gt - x) * 100
+                # new_vals = ((weights + 0.01) * gt - x) * 100
+                # loss_samples = np.concatenate([
+                #     loss_samples,
+                #     samples_tf_flat[loss_idx]
+                # ])
+                # loss_vals = np.concatenate([
+                #     loss_vals,
+                #     gt_cells.ravel()[loss_idx].reshape(-1, 1)
+                # ])
 
             # Logging
             if log_to_file and iteration % 20 == 0:
@@ -208,7 +230,7 @@ def training(
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             mse = torch.mean((cells - gt) ** 2)
             psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
-            mse2 = torch.mean((cells[torch.logical_and(cells >= 0, gt >= 0)] - gt[torch.logical_and(cells >= 0, gt >= 0)]) ** 2)
+            mse2 = torch.mean((cells[torch.logical_and(cells >= -1, gt >= -1)] - gt[torch.logical_and(cells >= -1, gt >= -1)]) ** 2)
             psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
             ema_lv_for_log = 0.4 * l1_lv + 0.6 * ema_lv_for_log
             ema_lfp_for_log = 0.4 * false_positive + 0.6 * ema_lfp_for_log
@@ -226,6 +248,7 @@ def training(
                 )
                 progress_bar.update(500)
                 print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr2: {psnr2}, mean weight: {torch.mean(weights)}")
+                # print(f"Loss samples: {loss_samples.shape}")
                 x = cells * weights
                 low = (x) / (weights + 1)
                 high = (x + 1) / (weights + 1)
@@ -234,7 +257,7 @@ def training(
                     gt <= high
                 )
                 # print(f"Num between range1: {torch.count_nonzero(gt < low)}, range2: {torch.count_nonzero(gt > high)}")
-                print(f"Num between range1: {torch.count_nonzero(mm)}")
+                # print(f"Num between range1: {torch.count_nonzero(mm)}")
             if iteration == opt.iterations:
                 progress_bar.close()
 
@@ -255,12 +278,14 @@ def training(
                 })
 
             # Densification
-            if (iteration <= opt.densify_until_iter and
+            if (iteration <= opt.prune_until_iter and
                 iteration >= opt.densify_from_iter and
-                iteration % opt.densification_interval == 0
+                iteration % opt.densification_interval == 0 and
+                iteration not in testing_iterations
             ):
-                if densifies > 0 and densifies % 50 == 0 and error_thresh > 0.05:
-                    error_thresh *= 0.5
+                if densifies > 0 and densifies % 20 == 0 and error_thresh > 0.05:
+                    if error_thresh > 0.05:  
+                        error_thresh *= 0.5
                     new_scale *= 0.5
                     print(f"New thresh {error_thresh}, new scale {new_scale}")
                 cpu_cells = cells.cpu().numpy()
@@ -275,11 +300,16 @@ def training(
                     new_scale,
                     # samples_tf_flat[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)],
                     # gt_cells.ravel()[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)].reshape(-1, 1)
+                    # loss_samples,
+                    # loss_vals
                     samples_tf_flat[loss_idx],
-                    gt_cells.ravel()[loss_idx].reshape(-1, 1)
+                    gt_cells.ravel()[loss_idx].reshape(-1, 1),
+                    iteration > opt.densify_until_iter
                     # np.clip(new_vals.cpu().ravel()[loss_idx].reshape(-1, 1), 0.01, 0.99),
                     # new_vals.cpu().ravel()[loss_idx].reshape(-1, 1),
                 )
+                loss_samples = np.empty((0, 3))
+                loss_vals = np.empty((0, 1))
                 densifies += 1
 
                 # if iteration % opt.weight_reset_interval == 0 or (
@@ -345,7 +375,7 @@ if __name__ == "__main__":
     parser.add_argument("--min_weight", type=float, default=0.005)
     parser.add_argument("--detect_anomaly", action="store_true", default=False)
     parser.add_argument(
-        "--test_iterations", nargs="+", type=int, default=[7_000, 30_000]
+        "--test_iterations", nargs="+", type=int, default=[i * 1000 for i in range(20)]
     )
     # parser.add_argument(
     #     "--save_iterations", nargs="+", type=int, default=[1, 16, 32, 64, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
