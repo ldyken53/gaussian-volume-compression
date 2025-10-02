@@ -37,11 +37,11 @@ class GaussianModel:
         # self.weight_activation = lambda x: x
         # self.inverse_weight_activation = lambda x: x
 
-        # self.values_activation = torch.sigmoid
-        # self.inverse_value_activation = inverse_sigmoid
+        self.values_activation = torch.sigmoid
+        self.inverse_value_activation = inverse_sigmoid
 
-        self.values_activation = torch.tanh
-        self.inverse_value_activation = torch.atanh
+        # self.values_activation = torch.tanh
+        # self.inverse_value_activation = torch.atanh
 
         # self.values_activation = lambda x: x
         # self.inverse_value_activation = lambda x: x
@@ -143,37 +143,39 @@ class GaussianModel:
         mesh: pv.PolyData,
     ):
         values = pcd.values
-        print(pcd.points.min())
-        print(pcd.points.max())
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
 
+        xmin, xmax, ymin, ymax, zmin, zmax = mesh.bounds
         # self.mins = [
-        #     pcd.points[:,0].min() - 0.01,
-        #     pcd.points[:,1].min() - 0.01,
-        #     pcd.points[:,2].min() - 0.01
+        #     pcd.points[:,0].min(),
+        #     pcd.points[:,1].min(),
+        #     pcd.points[:,2].min()
         # ]
         # self.maxes = [
-        #     pcd.points[:,0].max() + 0.01,
-        #     pcd.points[:,1].max() + 0.01,
-        #     pcd.points[:,2].max() + 0.01
+        #     pcd.points[:,0].max(),
+        #     pcd.points[:,1].max(),
+        #     pcd.points[:,2].max()
         # ]
         self.mins = [
-            pcd.points[:,0].min(),
-            pcd.points[:,1].min(),
-            pcd.points[:,2].min()
+            xmin,
+            ymin,
+            zmin
         ]
         self.maxes = [
-            pcd.points[:,0].max(),
-            pcd.points[:,1].max(),
-            pcd.points[:,2].max()
+            xmax,
+            ymax,
+            zmax
         ]
+        print(self.mins)
+        print(self.maxes)
+
 
         print(
             f"Number of points at initialisation : {fused_point_cloud.shape[0]}"
         )
 
         dist2 = torch.clamp_min(
-            10 * distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()),
+            distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()),
             0.0000001,
         )
         scales = self.inverse_scaling_activation(torch.sqrt(dist2))[..., None].repeat(1, 3)
@@ -635,13 +637,14 @@ class GaussianModel:
             new_values,
         )
 
-    def densify_and_prune(self, max_grad, min_weight, new_scale, empty_points, empty_values):
+    def densify_and_prune(self, max_grad, min_weight, new_scale, empty_points, empty_values, prune_only=False):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
         # self.densify_and_clone(grads, max_grad, extent)
         # self.densify_and_split(grads, max_grad, extent)
-        self.densify_in_empty(empty_points, empty_values, new_scale)
+        if not prune_only:
+            self.densify_in_empty(empty_points, empty_values, new_scale)
 
         prune_mask = (self.get_weight < min_weight).squeeze()
         # print(f"Number of Gaussians pruned: {torch.count_nonzero(prune_mask)}")
