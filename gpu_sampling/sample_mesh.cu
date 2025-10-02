@@ -1,6 +1,6 @@
 #include <viskores/cont/Initialize.h>
 #include <viskores/cont/DataSetBuilderExplicit.h>
-#include <viskores/cont/DataSetBuilderRectilinear.h>
+#include <viskores/cont/DataSetBuilderUniform.h>
 #include <viskores/io/VTKDataSetReader.h>
 #include <viskores/filter/resampling/Probe.h>
 #include <viskores/filter/mesh_info/MeshQuality.h>
