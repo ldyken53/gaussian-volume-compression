@@ -33,7 +33,7 @@ class Scene:
 
         if os.path.exists(args.source_path) and args.source_path.lower().endswith(('.vtk', '.vtu')):
             # mesh, pcd = readData(args.source_path, fraction, normalized=normalized)
-            mesh, pcd = readDatau(args.source_path, fraction)
+            mesh, pcd = readData(args.source_path, fraction)
         else:
             assert False, "Could not recognize scene type!"
 
