@@ -175,7 +175,7 @@ class GaussianModel:
         )
 
         dist2 = torch.clamp_min(
-            distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()),
+            10 * distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()),
             0.0000001,
         )
         scales = self.inverse_scaling_activation(torch.sqrt(dist2))[..., None].repeat(1, 3)
@@ -292,7 +292,7 @@ class GaussianModel:
         optimizable_tensors = self.replace_tensor_to_optimizer(weights_new, "weight")
         self._weight = optimizable_tensors["weight"]
 
-    def load_ply(self, path, mesh, normalize=False, use_train_test_exp=False):
+    def load_ply(self, path, mesh, use_train_test_exp=False):
         plydata = PlyData.read(path)
         print(
             f"Number of points at initialisation : {plydata.elements[0]['x'].shape[0]}"
@@ -305,10 +305,6 @@ class GaussianModel:
             ),
             axis=1,
         )
-        if normalize:
-            xyz[:,0] = (xyz[:,0] + 1) / 2
-            xyz[:,1] = (xyz[:,1] + 1) / 2
-            xyz[:,2] = (xyz[:,2] - 2) / 2
         xmin, xmax, ymin, ymax, zmin, zmax = mesh.bounds
         # self.mins = [
         #     xmin - 0.01,
@@ -605,7 +601,7 @@ class GaussianModel:
             new_values,
         )
 
-    def densify_in_empty(self, empty_points, empty_values, new_scale):
+    def densify_in_empty(self, empty_points, empty_values, new_scale, new_weight):
         # Extract points that satisfy the gradient condition
         new_points = torch.tensor(empty_points).float().cuda()
 
@@ -619,7 +615,7 @@ class GaussianModel:
         new_rotation[:, 0] = 1
 
         new_weights = self.inverse_weight_activation(
-            (0.01) *
+            (new_weight) *
             torch.ones(
                 (empty_points.shape[0], 1), dtype=torch.float, device="cuda"
             )
@@ -637,14 +633,14 @@ class GaussianModel:
             new_values,
         )
 
-    def densify_and_prune(self, max_grad, min_weight, new_scale, empty_points, empty_values, prune_only=False):
+    def densify_and_prune(self, max_grad, min_weight, new_scale, new_weight, empty_points, empty_values, prune_only=False):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
         # self.densify_and_clone(grads, max_grad, extent)
         # self.densify_and_split(grads, max_grad, extent)
         if not prune_only:
-            self.densify_in_empty(empty_points, empty_values, new_scale)
+            self.densify_in_empty(empty_points, empty_values, new_scale, new_weight)
 
         prune_mask = (self.get_weight < min_weight).squeeze()
         # print(f"Number of Gaussians pruned: {torch.count_nonzero(prune_mask)}")

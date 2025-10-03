@@ -51,9 +51,13 @@ def training(
 
     samples_tf = np.flip(rot, axis=2)
     samples_tf_flat = samples_tf.reshape(-1, 3)
-    jitter = np.random.uniform(-0.5, 0.5, samples_tf.shape)
-    for i in range(3):
-        jitter[...,i] *= spacing[i]
+    jitter = np.random.uniform(-0.5, 0.5, samples_tf_flat.shape)
+    jitter *= np.array(spacing)[None, :]
+    samples_tf_flat = np.clip(
+        samples_tf_flat + jitter,
+        np.array(gaussians.mins),
+        np.array(gaussians.maxes)
+    )
     gt_cells = gpu_sample(
         gaussians.mesh.dimensions,
         gaussians.mesh.origin,
@@ -73,14 +77,15 @@ def training(
     gt_weights[gt_weights != -1] = 1
     gt_weights[gt_weights == -1] = 0
     gt_weights = torch.tensor(gt_weights).cuda()
-    # tensor_to_vtk(gt_cells, "test_gt.vtk", spacing)
+    tensor_to_vtk(gt_cells, "test_gt.vtk", spacing)
     # tensor_to_vtk(gt_weights, "test_gt_weight.vtk", spacing)
 
     pipe.debug = True
     render_pkg = render(
         gaussians,
         pipe,
-        torch.tensor(np.zeros_like(jitter).ravel(), dtype=torch.float, device="cuda"),
+        # torch.tensor(np.zeros_like(jitter).ravel(), dtype=torch.float, device="cuda"),
+        torch.tensor(jitter.ravel(), dtype=torch.float, device="cuda"),
         cell_count,
     )
     cells, weights, visibility_filter, radii = (

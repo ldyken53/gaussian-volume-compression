@@ -15,7 +15,7 @@ class Scene:
         args: ModelParams,
         gaussians: GaussianModel,
         load_iteration=None,
-        normalize=False,
+        normalized=False,
         fraction=0.01
     ):
         self.model_path = args.model_path
@@ -32,7 +32,7 @@ class Scene:
             print("Loading trained model at iteration {}".format(self.loaded_iter))
 
         if os.path.exists(args.source_path) and args.source_path.lower().endswith(('.vtk', '.vtu')):
-            mesh, pcd = readData(args.source_path, fraction)
+            mesh, pcd = readData(args.source_path, fraction, normalized)
         else:
             assert False, "Could not recognize scene type!"
 
@@ -45,7 +45,6 @@ class Scene:
                     "point_cloud.ply",
                 ),
                 mesh,
-                normalize,
                 args.train_test_exp,
             )
         else:

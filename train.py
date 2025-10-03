@@ -42,7 +42,8 @@ def training(
     debug_from,
     log_to_file,
     fraction,
-    min_weight
+    min_weight,
+    is_scaled
 ):
     vtk_files = []
     vtk_files_loss = []
@@ -50,7 +51,7 @@ def training(
     first_iter = 0
     prepare_output(dataset)
     gaussians = GaussianModel()
-    scene = Scene(dataset, gaussians, fraction=fraction)
+    scene = Scene(dataset, gaussians, normalized=is_scaled, fraction=fraction)
     gaussians.training_setup(opt)
     scene.save(0)
     if checkpoint:
@@ -66,7 +67,7 @@ def training(
     ema_lfn_for_log = 0.0
     ema_lpsnr_for_log = 0.0
     error_thresh = 0.1
-    new_scale = 0.003 # 4 * 100^3 cell?
+    new_scale = 0.006 # 4 * 100^3 cell?
     densifies = 0
 
     # Make ground truth
@@ -198,7 +199,8 @@ def training(
                     recon_mask
                 ).cpu().numpy()
                 x = cells * weights
-                # new_vals = ((weights + 0.01) * gt - x) * 100
+                mean_weight = torch.mean(gaussians.get_weight)
+                new_vals = ((weights + mean_weight) * gt - x) * (1 / mean_weight)
                 # loss_samples = np.concatenate([
                 #     loss_samples,
                 #     samples_tf_flat[loss_idx]
@@ -247,11 +249,13 @@ def training(
                     }
                 )
                 progress_bar.update(500)
+                mean_weight = torch.mean(gaussians.get_weight)
                 print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr2: {psnr2}, mean weight: {torch.mean(weights)}")
+                print(f"Gaussian weight: {mean_weight}, gaussian scale: {torch.mean(gaussians.get_scaling)}, scale var: {torch.std(gaussians.get_scaling)}")
                 # print(f"Loss samples: {loss_samples.shape}")
                 x = cells * weights
-                low = (x) / (weights + 1)
-                high = (x + 1) / (weights + 1)
+                low = (x) / (weights + mean_weight)
+                high = (x + mean_weight) / (weights + mean_weight)
                 mm = torch.logical_and(
                     gt >= low,
                     gt <= high
@@ -283,9 +287,8 @@ def training(
                 iteration % opt.densification_interval == 0 and
                 iteration not in testing_iterations
             ):
-                if densifies > 0 and densifies % 20 == 0 and error_thresh > 0.05:
-                    if error_thresh > 0.05:  
-                        error_thresh *= 0.5
+                if densifies > 0 and densifies % 40 == 0 and error_thresh > 0.05:
+                    error_thresh *= 0.5
                     new_scale *= 0.5
                     print(f"New thresh {error_thresh}, new scale {new_scale}")
                 cpu_cells = cells.cpu().numpy()
@@ -297,16 +300,18 @@ def training(
                 gaussians.densify_and_prune(
                     opt.densify_grad_threshold,
                     min_weight,
-                    new_scale,
+                    # new_scale,
+                    torch.mean(gaussians.get_scaling) / 6.0,
+                    0.01,
                     # samples_tf_flat[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)],
                     # gt_cells.ravel()[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)].reshape(-1, 1)
                     # loss_samples,
                     # loss_vals
                     samples_tf_flat[loss_idx],
+                    # np.clip(new_vals.cpu().ravel()[loss_idx].reshape(-1, 1), 0.01, 0.99),
                     gt_cells.ravel()[loss_idx].reshape(-1, 1),
                     iteration > opt.densify_until_iter
                     # np.clip(new_vals.cpu().ravel()[loss_idx].reshape(-1, 1), 0.01, 0.99),
-                    # new_vals.cpu().ravel()[loss_idx].reshape(-1, 1),
                 )
                 loss_samples = np.empty((0, 3))
                 loss_vals = np.empty((0, 1))
@@ -374,6 +379,7 @@ if __name__ == "__main__":
     parser.add_argument("--fraction", type=float, default=0.01)
     parser.add_argument("--min_weight", type=float, default=0.005)
     parser.add_argument("--detect_anomaly", action="store_true", default=False)
+    parser.add_argument("--is_scaled", action="store_true")
     parser.add_argument(
         "--test_iterations", nargs="+", type=int, default=[i * 1000 for i in range(20)]
     )
@@ -381,7 +387,7 @@ if __name__ == "__main__":
     #     "--save_iterations", nargs="+", type=int, default=[1, 16, 32, 64, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
     # )
     parser.add_argument(
-        "--save_iterations", nargs="+", type=int, default=[8000, 16000]
+        "--save_iterations", nargs="+", type=int, default=[16000]
     )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--log_to_file", action="store_true")
@@ -407,7 +413,8 @@ if __name__ == "__main__":
         args.debug_from,
         args.log_to_file,
         args.fraction,
-        args.min_weight
+        args.min_weight,
+        args.is_scaled
     )
 
     # All done
