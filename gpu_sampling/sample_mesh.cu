@@ -237,7 +237,7 @@ py::array_t<double> sample_meshu(
   timer.Start();
   viskores::filter::resampling::Probe probe;
   probe.SetGeometry(explicitGrid);
-  probe.SetInvalidValue(-1.0);
+  probe.SetInvalidValue(-0.1);
   timer.Stop();
   std::cout << "Probe setup: " 
             << timer.GetElapsedTime() << " s\n";
