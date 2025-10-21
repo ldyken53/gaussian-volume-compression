@@ -66,7 +66,7 @@ def training(
     ema_lfp_for_log = 0.0
     ema_lfn_for_log = 0.0
     ema_lpsnr_for_log = 0.0
-    error_thresh = 0.1
+    error_thresh = 0.05
     new_scale = 0.006 # 4 * 100^3 cell?
     densifies = 0
 
@@ -91,7 +91,6 @@ def training(
     big_samples = np.tile(samples_tf_flat, (num_jitters, 1))
     big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
     big_jitter *= np.array(spacing)[None, :]
-    print(spacing)
     big_jitter[: cell_count**3, :] = 0
     big_samples = np.clip(
         big_samples + big_jitter,
@@ -120,7 +119,7 @@ def training(
     end = time.time()
     print(f"Time to sample gt: {end - start}")
     gt_cells = big_gt[0].reshape(cell_count, cell_count, cell_count)
-    print(f"Number of invalid samples: {np.count_nonzero(gt_cells < 0)}")
+    print(f"Number of invalid samples: {np.count_nonzero(gt_cells == -1)}")
     tensor_to_vtk(gt_cells, "test_gt.vtk", spacing)
     gt = torch.tensor(gt_cells).cuda()
     gt_weights = big_gt_weights[0].reshape(cell_count, cell_count, cell_count)
@@ -132,11 +131,13 @@ def training(
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
+    done = 0
     for iteration in range(first_iter, opt.iterations + 1):
+
         iter_start.record()
 
         jit_idx = 0
-        if iteration not in saving_iterations and iteration not in testing_iterations:
+        if iteration not in saving_iterations and iteration not in testing_iterations and done != 1:
             jit_idx = np.random.randint(0, num_jitters)
         jitter = big_jitter[jit_idx]
         jitter_cuda = torch.tensor(jitter.ravel(), dtype=torch.float, device="cuda")
@@ -191,8 +192,8 @@ def training(
         iter_end.record()
 
         with torch.no_grad():
-            # recon_mask = torch.logical_and(cells.ravel() != -1, gt.ravel() != -1)
-            recon_mask = gt.ravel() != -2
+            recon_mask = torch.logical_and(weights.ravel() > 0, gt.ravel() != -1)
+            # recon_mask = gt.ravel() != -2
             if iteration not in saving_iterations and iteration not in testing_iterations and iteration >= opt.densify_from_iter:
                 loss_idx = torch.logical_and(
                     torch.abs(cells.ravel() - gt.ravel()) > error_thresh,
@@ -215,7 +216,7 @@ def training(
                 cpu_cells = cells.cpu().numpy()
                 mse = torch.mean((cells - gt) ** 2)
                 psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
-                mse2 = torch.mean((cells[torch.logical_and(cells >= 0, gt >= 0)] - gt[torch.logical_and(cells >= 0, gt >= 0)]) ** 2)
+                mse2 = torch.mean((cells[torch.logical_and(weights > 0, gt != -1)] - gt[torch.logical_and(weights > 0, gt != -1)]) ** 2)
                 psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
                 num_gaussians = gaussians.get_values.shape[0]
                 log_data.append({
@@ -232,7 +233,7 @@ def training(
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             mse = torch.mean((cells - gt) ** 2)
             psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
-            mse2 = torch.mean((cells[torch.logical_and(cells >= -1, gt >= -1)] - gt[torch.logical_and(cells >= -1, gt >= -1)]) ** 2)
+            mse2 = torch.mean((cells[torch.logical_and(weights > 0, gt != -1)] - gt[torch.logical_and(weights > 0, gt != -1)]) ** 2)
             psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
             ema_lv_for_log = 0.4 * l1_lv + 0.6 * ema_lv_for_log
             ema_lfp_for_log = 0.4 * false_positive + 0.6 * ema_lfp_for_log
@@ -266,7 +267,7 @@ def training(
                 progress_bar.close()
 
             # Save
-            if iteration in saving_iterations:
+            if iteration in saving_iterations or done == 1:
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
                 cpu_cells = cells.cpu().numpy()
@@ -274,11 +275,11 @@ def training(
                 tensor_to_vtk(torch.abs((cells - gt)).cpu().numpy(), f"out_vtk/test_{iteration}_loss.vtk", spacing)
                 vtk_files.append({
                     "name": f"test_{iteration}.vtk",
-                    "time": float(saving_iterations.index(iteration))
+                    "time": float(iteration)
                 })                
                 vtk_files_loss.append({
                     "name": f"test_{iteration}_loss.vtk",
-                    "time": float(saving_iterations.index(iteration))
+                    "time": float(iteration)
                 })
 
             # Densification
@@ -286,17 +287,14 @@ def training(
                 iteration >= opt.densify_from_iter and
                 iteration % opt.densification_interval == 0 and
                 iteration not in testing_iterations
+                # and gaussians.get_values.shape[0] < (1/(4096 * 48)) * 246415360
             ):
-                if densifies > 0 and densifies % 40 == 0 and error_thresh > 0.05:
+                if densifies > 0 and densifies % 30 == 0 and error_thresh > 0.00625:
                     error_thresh *= 0.5
                     new_scale *= 0.5
                     print(f"New thresh {error_thresh}, new scale {new_scale}")
                 cpu_cells = cells.cpu().numpy()
                 # print(f"False negative: {np.count_nonzero(np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1))}, false positive: {np.count_nonzero(np.logical_and(cpu_cells.ravel() != -1, gt_cells.ravel() == -1))}")
-                mse = torch.mean((cells - gt) ** 2)
-                psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
-                mse2 = torch.mean((cells[torch.logical_and(cells >= 0, gt >= 0)] - gt[torch.logical_and(cells >= 0, gt >= 0)]) ** 2)
-                psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
                 gaussians.densify_and_prune(
                     opt.densify_grad_threshold,
                     min_weight,
@@ -333,6 +331,14 @@ def training(
                     (gaussians.capture(), iteration),
                     os.path.join(scene.model_path, "/chkpnt{iteration}.pth"),
                 )
+
+            # if gaussians.get_values.shape[0] > (1/(4096 * 48)) * 246415360:
+            #     if not check_done:
+            #         done = 1000
+            #         check_done = True
+            #     done -= 1
+            #     if done == 0:
+            #         break
     series = {
         "file-series-version": "1.0",
         "files": vtk_files
