@@ -92,5 +92,5 @@ def readData(path, fraction, normalized):
     #     save_cell
     # )
 
-    return mesh, BasicPointCloud(points=points_sampled, values=values_sampled)
+    # return mesh, BasicPointCloud(points=points_sampled, values=values_sampled)
 

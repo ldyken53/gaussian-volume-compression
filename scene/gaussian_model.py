@@ -37,14 +37,14 @@ class GaussianModel:
         # self.weight_activation = lambda x: x
         # self.inverse_weight_activation = lambda x: x
 
-        self.values_activation = torch.sigmoid
-        self.inverse_value_activation = inverse_sigmoid
+        # self.values_activation = torch.sigmoid
+        # self.inverse_value_activation = inverse_sigmoid
 
         # self.values_activation = torch.tanh
         # self.inverse_value_activation = torch.atanh
 
-        # self.values_activation = lambda x: x
-        # self.inverse_value_activation = lambda x: x
+        self.values_activation = lambda x: x
+        self.inverse_value_activation = lambda x: x
 
         self.rotation_activation = torch.nn.functional.normalize
 
@@ -175,7 +175,7 @@ class GaussianModel:
         )
 
         dist2 = torch.clamp_min(
-            10 * distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()),
+            distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()),
             0.0000001,
         )
         scales = self.inverse_scaling_activation(torch.sqrt(dist2))[..., None].repeat(1, 3)
@@ -605,12 +605,20 @@ class GaussianModel:
         # Extract points that satisfy the gradient condition
         new_points = torch.tensor(empty_points).float().cuda()
 
-        new_scaling = self.inverse_scaling_activation(
-            (new_scale) # Slightly bigger than 1 cell in 100^3 grid
-            * torch.ones(
-                (empty_points.shape[0], 3), dtype=torch.float, device="cuda"
-            )
+        # Concatenate existing and new points for distance computation
+        all_points = torch.cat([self.get_xyz, new_points], dim=0)
+        all_dist2 = torch.clamp_min(
+            distCUDA2(all_points) * 0.1,
+            0.0000001,
         )
+        dist2 = all_dist2[len(self.get_xyz):]
+        new_scaling = self.inverse_scaling_activation(torch.sqrt(dist2))[..., None].repeat(1, 3)
+        # new_scaling = self.inverse_scaling_activation(
+        #     (new_scale) # Slightly bigger than 1 cell in 100^3 grid
+        #     * torch.ones(
+        #         (empty_points.shape[0], 3), dtype=torch.float, device="cuda"
+        #     )
+        # )
         new_rotation = torch.zeros((empty_points.shape[0], 4), device="cuda")
         new_rotation[:, 0] = 1
 
