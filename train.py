@@ -70,7 +70,7 @@ def training(
     std = 0
     mean = 0
     avg = 0
-    error_thresh = 0.1
+    error_thresh = 0.0125
     new_scale = 0.006
     densifies = 0
     lossy_frac = 0.0
@@ -93,46 +93,84 @@ def training(
     samples_tf = np.flip(rot, axis=2)
     save_cell = samples_tf.reshape(-1, 3)
     # print("Save cell made")
-    # save_gt = gpu_sample(
-    #     gaussians.mesh.dimensions,
-    #     gaussians.mesh.origin,
-    #     gaussians.mesh.spacing,
-    #     gaussians.mesh.point_data['value'],
-    #     save_cell
-    # )
-    save_gt = gpu_sampleu(
-        gaussians.mesh.points, 
-        gaussians.mesh.cell_connectivity.astype(np.int64),
+    save_gt = gpu_sample(
+        gaussians.mesh.dimensions,
+        gaussians.mesh.origin,
+        gaussians.mesh.spacing,
         gaussians.mesh.point_data['value'],
         save_cell
     )
+    # save_gt = gpu_sampleu(
+    #     gaussians.mesh.points, 
+    #     gaussians.mesh.cell_connectivity.astype(np.int64),
+    #     gaussians.mesh.point_data['value'],
+    #     save_cell
+    # )
     num_batches = 1000
     size = cell_count ** 3
     big_samples = np.tile(save_cell, (num_batches, 1))
     big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
     big_jitter *= np.array(spacing)[None, :]
     big_jitter[: cell_count**3, :] = 0
-    big_samples = np.clip(big_samples + big_jitter, 0.0, 1.0)
-    # big_gt = gpu_sample(
-    #     gaussians.mesh.dimensions,
-    #     gaussians.mesh.origin,
-    #     gaussians.mesh.spacing,
-    #     gaussians.mesh.point_data['value'],
-    #     big_samples
-    # )
-    big_gt = gpu_sampleu(
-        gaussians.mesh.points, 
-        gaussians.mesh.cell_connectivity.astype(np.int64),
+    big_samples = np.clip(
+        big_samples + big_jitter, 
+        np.array(gaussians.mins), 
+        np.array(gaussians.maxes)
+    )
+    big_gt = gpu_sample(
+        gaussians.mesh.dimensions,
+        gaussians.mesh.origin,
+        gaussians.mesh.spacing,
         gaussians.mesh.point_data['value'],
         big_samples
     )
+    # big_gt = gpu_sampleu(
+    #     gaussians.mesh.points, 
+    #     gaussians.mesh.cell_connectivity.astype(np.int64),
+    #     gaussians.mesh.point_data['value'],
+    #     big_samples
+    # )
     big_gt = big_gt.reshape(num_batches, cell_count**3)
     big_samples = big_samples.reshape(num_batches, cell_count**3, 3)
     end = time.time()
 
     # size = 262144
     # start = time.time()
-    # num_batches = 64
+    # num_batches = 3000
+    # n_voxels_per_dim = int(round(size ** (1/3)))
+    # assert n_voxels_per_dim ** 3 == size, f"size must be a perfect cube, got {size}"
+    # nx, ny, nz = gaussians.mesh.dimensions
+    # ox, oy, oz = gaussians.mesh.origin
+    # sx, sy, sz = gaussians.mesh.spacing
+    # x_max = ox + (nx - 1) * sx
+    # y_max = oy + (ny - 1) * sy
+    # z_max = oz + (nz - 1) * sz
+    # points = gaussians.mesh.points
+    # voxel_i = np.clip(((points[:, 0] - ox) / (x_max - ox) * n_voxels_per_dim).astype(np.int64), 0, n_voxels_per_dim - 1)
+    # voxel_j = np.clip(((points[:, 1] - oy) / (y_max - oy) * n_voxels_per_dim).astype(np.int64), 0, n_voxels_per_dim - 1)
+    # voxel_k = np.clip(((points[:, 2] - oz) / (z_max - oz) * n_voxels_per_dim).astype(np.int64), 0, n_voxels_per_dim - 1)
+    # voxel_id = voxel_i + voxel_j * n_voxels_per_dim + voxel_k * (n_voxels_per_dim ** 2)
+    # sort_indices = np.argsort(voxel_id)
+    # sorted_voxel_ids = voxel_id[sort_indices]
+    # voxel_range = np.arange(size)
+    # voxel_starts = np.searchsorted(sorted_voxel_ids, voxel_range, side='left')
+    # voxel_ends = np.searchsorted(sorted_voxel_ids, voxel_range, side='right')
+    # voxel_counts = voxel_ends - voxel_starts
+    # random_offsets = (np.random.rand(num_batches, size) * voxel_counts[np.newaxis, :]).astype(np.int64)
+    # random_offsets = np.clip(random_offsets, 0, np.maximum(voxel_counts[np.newaxis, :] - 1, 0))
+    # idx = sort_indices[np.clip(voxel_starts[np.newaxis, :] + random_offsets, 0, len(sort_indices) - 1)]
+    # empty_voxels = (voxel_counts == 0)[np.newaxis, :].repeat(num_batches, axis=0)
+    # idx[empty_voxels] = np.random.randint(0, len(points), size=empty_voxels.sum())
+    # mesh_samples = gaussians.mesh.points[idx]
+    # mesh_vals = gaussians.mesh.point_data['value'][idx]
+    # big_gt = mesh_vals.reshape(num_batches, size)
+    # big_samples = mesh_samples.reshape(num_batches, size, 3)
+    # end = time.time()
+    # print(f"Time to sample gt: {end - start}")
+
+    # size = 262144
+    # start = time.time()
+    # num_batches = 1000
     # idx = torch.randint(gaussians.mesh.n_points, (num_batches, size))
     # nx, ny, nz = gaussians.mesh.dimensions
     # ox, oy, oz = gaussians.mesh.origin
@@ -360,7 +398,7 @@ def training(
                  iteration not in saving_iterations and
                  iteration not in testing_iterations
             ):
-                if densifies > 0 and densifies % 40 == 0:
+                if densifies > 0 and densifies % 30 == 0 and error_thresh > 0.00625:
                     error_thresh *= 0.5
                     new_scale *= 0.5
                     print(f"New thresh {error_thresh}, new scale {new_scale}")
