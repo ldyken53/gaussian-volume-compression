@@ -198,7 +198,8 @@ __global__ void renderCUDA(int P,
 	dL_dyy = cg::reduce(warp, dL_dyy, cg::plus<float>());
 	dL_dyz = cg::reduce(warp, dL_dyz, cg::plus<float>());
 	dL_dzz = cg::reduce(warp, dL_dzz, cg::plus<float>());
-	if (thread_in_warp == 31) {
+	count = cg::reduce(warp, count, cg::plus<int>());
+	if (thread_in_warp == 0) {
 		count_intersections[idx] = count;
 	}
 

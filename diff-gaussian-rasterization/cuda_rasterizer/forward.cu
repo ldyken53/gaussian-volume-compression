@@ -187,14 +187,15 @@ __global__ void renderCUDA(const int P,
 			float weight = weights[idx] * exp(power);
 			atomicAdd(&out_testw[primID], weight);
 			atomicAdd(&out_test[primID], weight * values[idx]);
+			count++;
 		}
-		count++;
 		return 0;
     },
 		bvh,
 		aabbs[idx]
 	);
 	// Only one thread per warp writes the final count
+	count = cg::reduce(warp, count, cg::plus<int>());
 	if (thread_in_warp == 0) {
 		count_intersections[idx] = count;
 	}
