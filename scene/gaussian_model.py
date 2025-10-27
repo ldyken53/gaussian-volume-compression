@@ -171,7 +171,7 @@ class GaussianModel:
         )
 
         dist2 = torch.clamp_min(
-            10 * distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()),
+            distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()),
             0.0000001,
         )
         scales = self.inverse_scaling_activation(torch.sqrt(dist2))[..., None].repeat(1, 3)
@@ -623,7 +623,8 @@ class GaussianModel:
         new_rotation[:, 0] = 1
 
         new_weights = self.inverse_weight_activation(
-            (0.01)
+            # torch.mean(self.get_weight)
+            0.01
             * torch.ones(
                 (empty_points.shape[0], 1), dtype=torch.float, device="cuda"
             )

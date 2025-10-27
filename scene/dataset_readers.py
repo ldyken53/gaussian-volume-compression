@@ -51,6 +51,54 @@ def readData(path, fraction, normalized=False):
         vals = mesh.point_data["value"][mask].reshape(-1, 1)  
         print("Mesh dropout")
         return mesh, BasicPointCloud(points=pts_sampled, values=vals)
+        # nx, ny, nz = mesh.dimensions
+        # ox, oy, oz = mesh.origin
+        # sx, sy, sz = mesh.spacing
+        # n_pts = mesh.n_points
+
+        # # Values & eligibility (> 0.001)
+        # vals_full = torch.as_tensor(mesh.point_data["value"]).float()
+        # eligible_idx = torch.nonzero(vals_full > 1e-3, as_tuple=False).squeeze(1)
+
+        # # Desired number of samples = same fraction of total points
+        # desired = int(round(float(fraction) * n_pts))
+        # desired = max(0, min(desired, n_pts))  # clamp
+
+        # if desired == 0 or eligible_idx.numel() == 0:
+        #     # Nothing to sample (either fraction==0 or no eligible points)
+        #     idx = eligible_idx.new_empty((0,), dtype=torch.long)
+        # else:
+        #     if eligible_idx.numel() >= desired:
+        #         # Enough eligible points: sample without replacement
+        #         perm = torch.randperm(eligible_idx.numel())
+        #         idx = eligible_idx[perm[:desired]]
+        #     else:
+        #         # Not enough eligible: take all eligible, then sample extras WITH replacement
+        #         extra = desired - eligible_idx.numel()
+        #         fill = eligible_idx[torch.randint(high=eligible_idx.numel(), size=(extra,))]
+        #         idx = torch.cat([eligible_idx, fill], dim=0)
+
+        # print("After eligibility + exact-count sampling")
+
+        # # Convert flat indices -> (i, j, k)
+        # nxny = nx * ny
+        # k = idx // nxny
+        # r = idx % nxny
+        # j = r // nx
+        # i = r % nx
+
+        # pts_sampled = torch.stack([
+        #     i.float() * sx + ox,
+        #     j.float() * sy + oy,
+        #     k.float() * sz + oz,
+        # ], dim=1)
+        # print("Points gathered")
+
+        # # Values for the chosen points
+        # vals = vals_full[idx].unsqueeze(1)
+        # print("Mesh dropout")
+
+        # return mesh, BasicPointCloud(points=pts_sampled, values=vals)
     else:
         return mesh, BasicPointCloud(points=None, values=None)
 
