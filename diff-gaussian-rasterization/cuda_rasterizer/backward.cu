@@ -6,7 +6,7 @@ namespace cg = cooperative_groups;
 #include <cuBQL/bvh.h>
 #include <cuBQL/traversal/fixedBoxQuery.h>
 
-// Perform initial steps for each Gaussian prior to rasterization.
+// Backwards render pass
 __global__ void renderCUDA(int P,
 	const float* means3D,
 	const glm::vec3* scales,
@@ -76,7 +76,8 @@ __global__ void renderCUDA(int P,
 	};
 
 	// Scale S by 3 to include up to where the weight is a tenth the cutoff
-	float m = sqrtf(-2 * logf((0.1 * WEIGHT_CUTOFF) / weights[idx]));
+	// float m = sqrtf(-2 * logf((0.1 * WEIGHT_CUTOFF) / weights[idx]));
+	float m = 3.0;
 	const float3 scaled_S = { S[0][0] * m, S[1][1] * m, S[2][2] * m };
 
  	// Create array for corner computations
@@ -148,6 +149,7 @@ __global__ void renderCUDA(int P,
 
 			float e = exp(power);
 			float weight = weights[idx] * e;
+			if (weight <= WEIGHT_CUTOFF) continue;
 
 			dL_dvalue += dL_doutv * weight / acc_weight;
 

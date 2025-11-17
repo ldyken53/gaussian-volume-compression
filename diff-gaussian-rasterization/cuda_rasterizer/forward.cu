@@ -76,7 +76,8 @@ __global__ void preprocessCUDA(const int P,
 	conics[idx * 6 + 5] = (a * d - b * b) * det_inv;
 
 	// Scale S by 3 to include up to where the weight is a tenth the cutoff
-	float m = sqrtf(-2 * logf((0.1 * WEIGHT_CUTOFF) / weights[idx]));
+	// float m = sqrtf(-2 * logf((0.1 * WEIGHT_CUTOFF) / weights[idx]));
+	float m = 3.0;
 	const float3 scaled_S = { S[0][0] * m, S[1][1] * m, S[2][2] * m };
 
  	// Create array for corner computations
@@ -185,6 +186,7 @@ __global__ void renderCUDA(const int P,
 			float power = -0.5 * quad_form;
 			if (power < -14.0 || power > 0.0) continue;
 			float weight = weights[idx] * exp(power);
+			if (weight <= WEIGHT_CUTOFF) continue;
 			atomicAdd(&out_testw[primID], weight);
 			atomicAdd(&out_test[primID], weight * values[idx]);
 			count++;

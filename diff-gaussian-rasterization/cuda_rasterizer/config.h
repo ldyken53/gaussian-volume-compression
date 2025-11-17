@@ -6,6 +6,6 @@
 #define BLOCK_Y 4
 #define BLOCK_Z 2
 #define OPACITY 0.01
-#define WEIGHT_CUTOFF 1e-2
+#define WEIGHT_CUTOFF 1e-3
 
 #endif

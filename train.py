@@ -6,6 +6,7 @@ import time
 from argparse import ArgumentParser, Namespace
 from random import randint
 import numpy as np
+import ipdb
 
 import torch
 import torch.nn.functional as F
@@ -20,13 +21,6 @@ from utils.debug_utils import tensor_to_vtk, analyze_array
 from utils.general_utils import get_expon_lr_func, safe_state
 from utils.image_utils import psnr
 from utils.loss_utils import bounding_box_regularization, create_window, l1_loss, l2_loss
-
-try:
-    from torch.utils.tensorboard import SummaryWriter
-
-    TENSORBOARD_FOUND = True
-except ImportError:
-    TENSORBOARD_FOUND = False
 
 DEBUG = True
 
@@ -106,33 +100,33 @@ def training(
     #     gaussians.mesh.point_data['value'],
     #     save_cell
     # )
-    num_batches = 1000
-    size = cell_count ** 3
-    big_samples = np.tile(save_cell, (num_batches, 1))
-    big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
-    big_jitter *= np.array(spacing)[None, :]
-    big_jitter[: cell_count**3, :] = 0
-    big_samples = np.clip(
-        big_samples + big_jitter, 
-        np.array(gaussians.mins), 
-        np.array(gaussians.maxes)
-    )
-    big_gt = gpu_sample(
-        gaussians.mesh.dimensions,
-        gaussians.mesh.origin,
-        gaussians.mesh.spacing,
-        gaussians.mesh.point_data['value'],
-        big_samples
-    )
-    # big_gt = gpu_sampleu(
-    #     gaussians.mesh.points, 
-    #     gaussians.mesh.cell_connectivity.astype(np.int64),
+    # num_batches = 1000
+    # size = cell_count ** 3
+    # big_samples = np.tile(save_cell, (num_batches, 1))
+    # big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
+    # big_jitter *= np.array(spacing)[None, :]
+    # big_jitter[: cell_count**3, :] = 0
+    # big_samples = np.clip(
+    #     big_samples + big_jitter, 
+    #     np.array(gaussians.mins), 
+    #     np.array(gaussians.maxes)
+    # )
+    # big_gt = gpu_sample(
+    #     gaussians.mesh.dimensions,
+    #     gaussians.mesh.origin,
+    #     gaussians.mesh.spacing,
     #     gaussians.mesh.point_data['value'],
     #     big_samples
     # )
-    big_gt = big_gt.reshape(num_batches, cell_count**3)
-    big_samples = big_samples.reshape(num_batches, cell_count**3, 3)
-    end = time.time()
+    # # big_gt = gpu_sampleu(
+    # #     gaussians.mesh.points, 
+    # #     gaussians.mesh.cell_connectivity.astype(np.int64),
+    # #     gaussians.mesh.point_data['value'],
+    # #     big_samples
+    # # )
+    # big_gt = big_gt.reshape(num_batches, cell_count**3)
+    # big_samples = big_samples.reshape(num_batches, cell_count**3, 3)
+    # end = time.time()
 
     # size = 262144
     # start = time.time()
@@ -168,26 +162,26 @@ def training(
     # end = time.time()
     # print(f"Time to sample gt: {end - start}")
 
-    # size = 262144
-    # start = time.time()
-    # num_batches = 1000
-    # idx = torch.randint(gaussians.mesh.n_points, (num_batches, size))
-    # nx, ny, nz = gaussians.mesh.dimensions
-    # ox, oy, oz = gaussians.mesh.origin
-    # sx, sy, sz = gaussians.mesh.spacing
-    # nxny = nx * ny
-    # k, r = np.divmod(idx, nxny)
-    # j, i = np.divmod(r, nx)
-    # x = ox + i * sx
-    # y = oy + j * sy
-    # z = oz + k * sz
-    # mesh_samples = np.stack((x, y, z), axis=-1)
-    # mesh_samples = gaussians.mesh.points[idx]
-    # mesh_vals = gaussians.mesh.point_data['value'][idx]
-    # big_gt = mesh_vals.reshape(num_batches, size)
-    # big_samples = mesh_samples.reshape(num_batches, size, 3)
-    # end = time.time()
-    # print(f"Time to sample gt: {end - start}")
+    size = 262144
+    start = time.time()
+    num_batches = 1000
+    idx = torch.randint(gaussians.mesh.n_points, (num_batches, size))
+    nx, ny, nz = gaussians.mesh.dimensions
+    ox, oy, oz = gaussians.mesh.origin
+    sx, sy, sz = gaussians.mesh.spacing
+    nxny = nx * ny
+    k, r = np.divmod(idx, nxny)
+    j, i = np.divmod(r, nx)
+    x = ox + i * sx
+    y = oy + j * sy
+    z = oz + k * sz
+    mesh_samples = np.stack((x, y, z), axis=-1)
+    # mesh_samples = gaussians.mesh.points
+    mesh_vals = gaussians.mesh.point_data['value']
+    big_gt = mesh_vals.reshape(num_batches, size)
+    big_samples = mesh_samples.reshape(num_batches, size, 3)
+    end = time.time()
+    print(f"Time to sample gt: {end - start}")
 
     # start = time.time()
     # sub = 64                       # edge length of the cubic patch
@@ -248,7 +242,7 @@ def training(
     for iteration in range(first_iter, opt.iterations + 1):
         iter_start.record()
         deb = False
-        if iteration in testing_iterations:
+        if iteration % 1000 == 0 or iteration == 1:
             deb = True
 
         if iteration in saving_iterations or iteration in testing_iterations:
@@ -283,7 +277,7 @@ def training(
         l1_lv = l1_loss(cells, gt)
         # TODO: FIX FP AND FN FOR CHANGING CELL COUNTS
         k = 10  # Adjust this to control decay rate
-        fn_mask = torch.logical_and(gt != -1, weights < 10)
+        fn_mask = torch.logical_and(gt != -1, weights < 1)
         if fn_mask.any():
             false_negative = 10 * torch.exp(-k * weights[fn_mask]).mean()
         else:
@@ -293,7 +287,7 @@ def training(
             false_positive = (1 * (1 - torch.exp(-k * weights[mask]))).mean()
         else:
             false_positive = torch.tensor(0., device="cuda")
-        loss = l1_lv + false_negative
+        loss = l1_lv + false_positive + false_negative
         loss.backward()
         iter_end.record()
 
@@ -348,6 +342,7 @@ def training(
             psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
             mse2 = torch.mean((cells[torch.logical_and(cells != -1, gt != -1)] - gt[torch.logical_and(cells != -1, gt != -1)]) ** 2)
             psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
+            # print(psnr)
             if iteration in testing_iterations:
                 print(f"Testing PSNR at iteration {iteration}: {psnr}")
                 print(f"Testing fraction of samples that are lossy: {np.count_nonzero(loss_idx) / size}, avg: {lossy_frac}")
@@ -363,15 +358,18 @@ def training(
             if iteration % 500 == 0:
                 progress_bar.set_postfix(
                     {
-                        "Loss": f"{ema_loss_for_log:.{5}f}",
-                        "L_v": f"{ema_lv_for_log:.{5}f}",
-                        "L_fp": f"{ema_lfp_for_log:.{5}f}",
-                        "L_fn": f"{ema_lfn_for_log:.{5}f}",
-                        "PSNR": f"{ema_lpsnr_for_log:.{5}f}"
+                        "Loss": f"{ema_loss_for_log:.{10}f}",
+                        "L_v": f"{ema_lv_for_log:.{2}f}",
+                        "L_fp": f"{ema_lfp_for_log:.{2}f}",
+                        "L_fn": f"{ema_lfn_for_log:.{2}f}",
+                        "PSNR": f"{ema_lpsnr_for_log:.{2}f}"
                     }
                 )
                 progress_bar.update(500)
-                print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr2: {psnr2}, mean weight: {torch.mean(weights)}")
+                print(f"0 cells: {torch.count_nonzero(cells == 0).cpu().numpy()}, -1: {torch.count_nonzero(cells == -1).cpu().numpy()}")
+                print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr2: {psnr2}, weight: {torch.mean(weights)}")
+                print(f"scale: {torch.mean(gaussians.get_scaling)}, median: {torch.median(gaussians.get_scaling)}, std: {torch.std(gaussians.get_scaling)}")
+                print(f"{torch.mean(gaussians.get_scaling[gaussians.get_values.squeeze(-1) != 0])}")
             if iteration == opt.iterations:
                 progress_bar.close()
 
@@ -484,7 +482,7 @@ if __name__ == "__main__":
     parser.add_argument("--min_weight", type=float, default=0.005)
     parser.add_argument("--detect_anomaly", action="store_true", default=False)
     parser.add_argument(
-        "--test_iterations", nargs="+", type=int, default=[1]
+        "--test_iterations", nargs="+", type=int, default=[]
     )
     # parser.add_argument(
     #     "--test_iterations", nargs="+", type=int, default=[1] + [i * 1000 for i in range(32)]
