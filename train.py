@@ -64,7 +64,7 @@ def training(
     std = 0
     mean = 0
     avg = 0
-    error_thresh = 0.0125
+    error_thresh = 0.05
     new_scale = 0.006
     densifies = 0
     lossy_frac = 0.0
@@ -87,30 +87,32 @@ def training(
     samples_tf = np.flip(rot, axis=2)
     save_cell = samples_tf.reshape(-1, 3)
     # print("Save cell made")
-    save_gt = gpu_sample(
-        gaussians.mesh.dimensions,
-        gaussians.mesh.origin,
-        gaussians.mesh.spacing,
-        gaussians.mesh.point_data['value'],
-        save_cell
-    )
-    # save_gt = gpu_sampleu(
-    #     gaussians.mesh.points, 
-    #     gaussians.mesh.cell_connectivity.astype(np.int64),
+    # save_gt = gpu_sample(
+    #     gaussians.mesh.dimensions,
+    #     gaussians.mesh.origin,
+    #     gaussians.mesh.spacing,
     #     gaussians.mesh.point_data['value'],
     #     save_cell
     # )
-    # num_batches = 1000
-    # size = cell_count ** 3
-    # big_samples = np.tile(save_cell, (num_batches, 1))
-    # big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
-    # big_jitter *= np.array(spacing)[None, :]
-    # big_jitter[: cell_count**3, :] = 0
-    # big_samples = np.clip(
-    #     big_samples + big_jitter, 
-    #     np.array(gaussians.mins), 
-    #     np.array(gaussians.maxes)
-    # )
+    save_gt = gpu_sampleu(
+        gaussians.mesh.points, 
+        gaussians.mesh.cell_connectivity.astype(np.int64),
+        gaussians.mesh.celltypes.astype(np.int64),
+        gaussians.mesh.offset.astype(np.int64),
+        gaussians.mesh.point_data[gaussians.mesh.array_names[0]],
+        save_cell
+    )
+    num_batches = 1000
+    size = cell_count ** 3
+    big_samples = np.tile(save_cell, (num_batches, 1))
+    big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
+    big_jitter *= np.array(spacing)[None, :]
+    big_jitter[: cell_count**3, :] = 0
+    big_samples = np.clip(
+        big_samples + big_jitter, 
+        np.array(gaussians.mins), 
+        np.array(gaussians.maxes)
+    )
     # big_gt = gpu_sample(
     #     gaussians.mesh.dimensions,
     #     gaussians.mesh.origin,
@@ -118,15 +120,17 @@ def training(
     #     gaussians.mesh.point_data['value'],
     #     big_samples
     # )
-    # # big_gt = gpu_sampleu(
-    # #     gaussians.mesh.points, 
-    # #     gaussians.mesh.cell_connectivity.astype(np.int64),
-    # #     gaussians.mesh.point_data['value'],
-    # #     big_samples
-    # # )
-    # big_gt = big_gt.reshape(num_batches, cell_count**3)
-    # big_samples = big_samples.reshape(num_batches, cell_count**3, 3)
-    # end = time.time()
+    big_gt = gpu_sampleu(
+        gaussians.mesh.points, 
+        gaussians.mesh.cell_connectivity.astype(np.int64),
+        gaussians.mesh.celltypes.astype(np.int64),
+        gaussians.mesh.offset.astype(np.int64),
+        gaussians.mesh.point_data[gaussians.mesh.array_names[0]],
+        big_samples
+    )
+    big_gt = big_gt.reshape(num_batches, cell_count**3)
+    big_samples = big_samples.reshape(num_batches, cell_count**3, 3)
+    end = time.time()
 
     # size = 262144
     # start = time.time()
@@ -162,26 +166,26 @@ def training(
     # end = time.time()
     # print(f"Time to sample gt: {end - start}")
 
-    size = 262144
-    start = time.time()
-    num_batches = 1000
-    idx = torch.randint(gaussians.mesh.n_points, (num_batches, size))
-    nx, ny, nz = gaussians.mesh.dimensions
-    ox, oy, oz = gaussians.mesh.origin
-    sx, sy, sz = gaussians.mesh.spacing
-    nxny = nx * ny
-    k, r = np.divmod(idx, nxny)
-    j, i = np.divmod(r, nx)
-    x = ox + i * sx
-    y = oy + j * sy
-    z = oz + k * sz
-    mesh_samples = np.stack((x, y, z), axis=-1)
-    # mesh_samples = gaussians.mesh.points
-    mesh_vals = gaussians.mesh.point_data['value']
-    big_gt = mesh_vals.reshape(num_batches, size)
-    big_samples = mesh_samples.reshape(num_batches, size, 3)
-    end = time.time()
-    print(f"Time to sample gt: {end - start}")
+    # size = 262144
+    # start = time.time()
+    # num_batches = 1000
+    # idx = torch.randint(gaussians.mesh.n_points, (num_batches, size))
+    # nx, ny, nz = gaussians.mesh.dimensions
+    # ox, oy, oz = gaussians.mesh.origin
+    # sx, sy, sz = gaussians.mesh.spacing
+    # nxny = nx * ny
+    # k, r = np.divmod(idx, nxny)
+    # j, i = np.divmod(r, nx)
+    # x = ox + i * sx
+    # y = oy + j * sy
+    # z = oz + k * sz
+    # mesh_samples = np.stack((x, y, z), axis=-1)
+    # # mesh_samples = gaussians.mesh.points
+    # mesh_vals = gaussians.mesh.point_data['value']
+    # big_gt = mesh_vals.reshape(num_batches, size)
+    # big_samples = mesh_samples.reshape(num_batches, size, 3)
+    # end = time.time()
+    # print(f"Time to sample gt: {end - start}")
 
     # start = time.time()
     # sub = 64                       # edge length of the cubic patch
@@ -242,7 +246,7 @@ def training(
     for iteration in range(first_iter, opt.iterations + 1):
         iter_start.record()
         deb = False
-        if iteration % 1000 == 0 or iteration == 1:
+        if iteration > 500:
             deb = True
 
         if iteration in saving_iterations or iteration in testing_iterations:
@@ -287,7 +291,7 @@ def training(
             false_positive = (1 * (1 - torch.exp(-k * weights[mask]))).mean()
         else:
             false_positive = torch.tensor(0., device="cuda")
-        loss = l1_lv + false_positive + false_negative
+        loss = l1_lv
         loss.backward()
         iter_end.record()
 
@@ -366,10 +370,11 @@ def training(
                     }
                 )
                 progress_bar.update(500)
+                print(f"0 cells: {torch.count_nonzero(gt == 0).cpu().numpy()}, -1: {torch.count_nonzero(gt == -1).cpu().numpy()}")
                 print(f"0 cells: {torch.count_nonzero(cells == 0).cpu().numpy()}, -1: {torch.count_nonzero(cells == -1).cpu().numpy()}")
                 print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr2: {psnr2}, weight: {torch.mean(weights)}")
-                print(f"scale: {torch.mean(gaussians.get_scaling)}, median: {torch.median(gaussians.get_scaling)}, std: {torch.std(gaussians.get_scaling)}")
-                print(f"{torch.mean(gaussians.get_scaling[gaussians.get_values.squeeze(-1) != 0])}")
+                # print(f"scale: {torch.mean(gaussians.get_scaling)}, median: {torch.median(gaussians.get_scaling)}, std: {torch.std(gaussians.get_scaling)}")
+                # print(f"{torch.mean(gaussians.get_scaling[gaussians.get_values.squeeze(-1) != 0])}")
             if iteration == opt.iterations:
                 progress_bar.close()
 
@@ -411,12 +416,14 @@ def training(
                     opt.densify_grad_threshold,
                     min_weight,
                     new_scale,
+                    # torch.mean(gaussians.get_scaling) / 6.0,
                     # current_samples[np.logical_and(current_samples == -1, gt != -1)],
                     # gt_cells.ravel()[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)].reshape(-1, 1)
                     current_samples[loss_idx],
                     gt_cells[loss_idx].reshape(-1, 1)
                 )
                 densifies += 1
+                print(f"Num Gaussians: {gaussians.get_values.shape[0]}")
                 # error_thresh -= 0.002
 
                 # if iteration % opt.weight_reset_interval == 0 or (
