@@ -17,6 +17,8 @@ py::array_t<double> sample_mesh(
 py::array_t<double> sample_meshu(
     py::array_t<float> pts_arr,
     py::array_t<int64_t> conn_arr,
+    py::array_t<int64_t> cell_types_arr,
+    py::array_t<int64_t> cell_offsets_arr,
     py::array_t<double> val_arr,
     py::array_t<float> samp_arr
 );

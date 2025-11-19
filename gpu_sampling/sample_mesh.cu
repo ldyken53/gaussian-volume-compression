@@ -160,6 +160,8 @@ py::array_t<double> sample_mesh(
 py::array_t<double> sample_meshu(
   py::array_t<float> pts_arr,
   py::array_t<int64_t> conn_arr,
+  py::array_t<int64_t> cell_types_arr, 
+  py::array_t<int64_t> cell_offsets_arr,
   py::array_t<double> val_arr,
   py::array_t<float> samp_arr
 )
@@ -168,22 +170,25 @@ py::array_t<double> sample_meshu(
   auto &tracker = viskores::cont::GetRuntimeDeviceTracker();
   tracker.ForceDevice(viskores::cont::DeviceAdapterTagCuda{});
   auto cudaTag = viskores::cont::DeviceAdapterTagCuda();
-  viskores::cont::Timer timer(cudaTag); // GPU timer :contentReference[oaicite:2]{index=2}
+  viskores::cont::Timer timer(cudaTag);
 
   // 1) Initialization
-  timer.Start();                      // begin timing :contentReference[oaicite:3]{index=3}
+  timer.Start();
   viskores::cont::Initialize();
-  timer.Stop();                       // end timing :contentReference[oaicite:4]{index=4}
+  timer.Stop();
   std::cout << "Initialize: " 
-            << timer.GetElapsedTime() << " s\n"; // elapsed :contentReference[oaicite:5]{index=5}
+            << timer.GetElapsedTime() << " s\n";
 
   // 2) Read the VTK dataset
-  timer.Reset();                      // clear previous time :contentReference[oaicite:6]{index=6}
+  timer.Reset();
   timer.Start();
-  auto pts_buf   = pts_arr.request();   // get ptr, shape, strides
-  auto conn_buf  = conn_arr.request();
+  auto pts_buf = pts_arr.request();
+  auto conn_buf = conn_arr.request();
+  auto cell_types_buf = cell_types_arr.request();
+  auto cell_offsets_buf = cell_offsets_arr.request();
   auto val_buf = val_arr.request();
 
+  // Build coordinates
   size_t n_pts = pts_buf.shape[0];
   auto pts_ptr = static_cast<float*>(pts_buf.ptr);
   std::vector<viskores::Vec<float,3>> coords;
@@ -195,24 +200,74 @@ py::array_t<double> sample_meshu(
       pts_ptr[3*i + 2]
     );
   }
+
+  // Build connectivity
   auto conn_ptr = static_cast<int64_t*>(conn_buf.ptr);
   std::vector<viskores::Id> conn_vec(conn_ptr, conn_ptr + conn_buf.shape[0]);
+
+  // Build cell shapes and offsets
+  auto cell_types_ptr = static_cast<int64_t*>(cell_types_buf.ptr);
+  auto cell_offsets_ptr = static_cast<int64_t*>(cell_offsets_buf.ptr);
+  size_t n_cells = cell_types_buf.shape[0];
+  
+  std::vector<viskores::UInt8> cell_shapes;
+  std::vector<viskores::IdComponent> num_indices;
+  cell_shapes.reserve(n_cells);
+  num_indices.reserve(n_cells);
+
+  // Map VTK cell types to VTK-m cell shapes
+  for (size_t i = 0; i < n_cells; ++i) {
+    int64_t vtk_cell_type = cell_types_ptr[i];
+    int64_t start_offset = cell_offsets_ptr[i];
+    int64_t end_offset = (i + 1 < n_cells) ? cell_offsets_ptr[i + 1] : conn_buf.shape[0];
+    int64_t num_pts_in_cell = end_offset - start_offset;
+
+    switch (vtk_cell_type) {
+      case 1: // VTK_VERTEX
+        cell_shapes.push_back(static_cast<viskores::UInt8>(viskores::CellShapeTagVertex::Id));
+        break;
+      case 3: // VTK_LINE
+        cell_shapes.push_back(static_cast<viskores::UInt8>(viskores::CellShapeTagLine::Id));
+        break;
+      case 5: // VTK_TRIANGLE
+        cell_shapes.push_back(static_cast<viskores::UInt8>(viskores::CellShapeTagTriangle::Id));
+        break;
+      case 9: // VTK_QUAD
+        cell_shapes.push_back(static_cast<viskores::UInt8>(viskores::CellShapeTagQuad::Id));
+        break;
+      case 10: // VTK_TETRA
+        cell_shapes.push_back(static_cast<viskores::UInt8>(viskores::CellShapeTagTetra::Id));
+        break;
+      case 12: // VTK_HEXAHEDRON
+        cell_shapes.push_back(static_cast<viskores::UInt8>(viskores::CellShapeTagHexahedron::Id));
+        break;
+      case 13: // VTK_WEDGE
+        cell_shapes.push_back(static_cast<viskores::UInt8>(viskores::CellShapeTagWedge::Id));
+        break;
+      case 14: // VTK_PYRAMID
+        cell_shapes.push_back(static_cast<viskores::UInt8>(viskores::CellShapeTagPyramid::Id));
+        break;
+      default:
+        throw std::runtime_error("Unsupported VTK cell type: " + std::to_string(vtk_cell_type));
+    }
+    num_indices.push_back(static_cast<viskores::IdComponent>(num_pts_in_cell));
+  }
+
+  // Build field data
   auto val_ptr = static_cast<double*>(val_buf.ptr);
   std::vector<viskores::Float64> val_vec(val_ptr, val_ptr + val_buf.shape[0]);
   viskores::cont::ArrayHandle<viskores::Float64> valHandle = viskores::cont::make_ArrayHandleMove(std::move(val_vec));
 
+  // Create dataset with mixed cell types
   auto inData = viskores::cont::DataSetBuilderExplicit::Create(
-    coords, viskores::CellShapeTagTetra{}, static_cast<viskores::IdComponent>(4), conn_vec, "coords");
+    coords, cell_shapes, num_indices, conn_vec, "coords");
   
-  inData.AddPointField(
-    "value",
-    valHandle
-  );
+  inData.AddPointField("value", valHandle);
   timer.Stop();
   std::cout << "ReadDataSet: " 
             << timer.GetElapsedTime() << " s\n";
 
-  // 3) Build an explicit point‐vertex grid
+  // 3) Build an explicit point-vertex grid
   timer.Reset();
   timer.Start();
   auto samp_buf = samp_arr.request();
@@ -228,10 +283,10 @@ py::array_t<double> sample_meshu(
   std::iota(sample_conn.begin(), sample_conn.end(), 0);
   auto explicitGrid = viskores::cont::DataSetBuilderExplicit::Create(
     sample_coords,
-    viskores::CellShapeTagVertex{},                // each cell is a single vertex
-    static_cast<viskores::IdComponent>(1),          // 1 point per cell
-    sample_conn,                                    // connectivity [0,1,2,…]
-    "sample_coords"                                 // name for the coordinate field
+    viskores::CellShapeTagVertex{},
+    static_cast<viskores::IdComponent>(1),
+    sample_conn,
+    "sample_coords"
   );
   timer.Stop();
   std::cout << "Build explicit grid: " 
@@ -260,7 +315,7 @@ py::array_t<double> sample_meshu(
   timer.Start();
   const auto array = sampled.GetPointField("value").GetData();
   auto concrete = array.AsArrayHandle<viskores::cont::ArrayHandle<viskores::Float64>>();
-  concrete.SyncControlArray();       // pull data back to host
+  concrete.SyncControlArray();
   auto readPortal = concrete.ReadPortal();
   std::size_t n = readPortal.GetNumberOfValues();
   py::array_t<double> result(n);
