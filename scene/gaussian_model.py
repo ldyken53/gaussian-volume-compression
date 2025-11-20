@@ -34,14 +34,14 @@ class GaussianModel:
         self.weight_activation = torch.sigmoid
         self.inverse_weight_activation = inverse_sigmoid
 
-        self.values_activation = torch.sigmoid
-        self.inverse_value_activation = inverse_sigmoid
+        # self.values_activation = torch.sigmoid
+        # self.inverse_value_activation = inverse_sigmoid
 
         # self.values_activation = torch.tanh
         # self.inverse_value_activation = torch.atanh
 
-        # self.values_activation = lambda x: x
-        # self.inverse_value_activation = lambda x: x
+        self.values_activation = lambda x: x
+        self.inverse_value_activation = lambda x: x
 
         self.rotation_activation = torch.nn.functional.normalize
 

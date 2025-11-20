@@ -6,7 +6,6 @@ import time
 from argparse import ArgumentParser, Namespace
 from random import randint
 import numpy as np
-import ipdb
 
 import torch
 import torch.nn.functional as F
@@ -21,6 +20,13 @@ from utils.debug_utils import tensor_to_vtk, analyze_array
 from utils.general_utils import get_expon_lr_func, safe_state
 from utils.image_utils import psnr
 from utils.loss_utils import bounding_box_regularization, create_window, l1_loss, l2_loss
+
+try:
+    from torch.utils.tensorboard import SummaryWriter
+
+    TENSORBOARD_FOUND = True
+except ImportError:
+    TENSORBOARD_FOUND = False
 
 DEBUG = True
 
@@ -180,8 +186,8 @@ def training(
     # y = oy + j * sy
     # z = oz + k * sz
     # mesh_samples = np.stack((x, y, z), axis=-1)
-    # # mesh_samples = gaussians.mesh.points
-    # mesh_vals = gaussians.mesh.point_data['value']
+    # mesh_samples = gaussians.mesh.points[idx]
+    # mesh_vals = gaussians.mesh.point_data['value'][idx]
     # big_gt = mesh_vals.reshape(num_batches, size)
     # big_samples = mesh_samples.reshape(num_batches, size, 3)
     # end = time.time()
@@ -281,7 +287,7 @@ def training(
         l1_lv = l1_loss(cells, gt)
         # TODO: FIX FP AND FN FOR CHANGING CELL COUNTS
         k = 10  # Adjust this to control decay rate
-        fn_mask = torch.logical_and(gt != -1, weights < 1)
+        fn_mask = torch.logical_and(gt != -1, weights < 10)
         if fn_mask.any():
             false_negative = 10 * torch.exp(-k * weights[fn_mask]).mean()
         else:
@@ -291,7 +297,7 @@ def training(
             false_positive = (1 * (1 - torch.exp(-k * weights[mask]))).mean()
         else:
             false_positive = torch.tensor(0., device="cuda")
-        loss = l1_lv
+        loss = l1_lv + false_negative
         loss.backward()
         iter_end.record()
 
@@ -346,7 +352,6 @@ def training(
             psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
             mse2 = torch.mean((cells[torch.logical_and(cells != -1, gt != -1)] - gt[torch.logical_and(cells != -1, gt != -1)]) ** 2)
             psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
-            # print(psnr)
             if iteration in testing_iterations:
                 print(f"Testing PSNR at iteration {iteration}: {psnr}")
                 print(f"Testing fraction of samples that are lossy: {np.count_nonzero(loss_idx) / size}, avg: {lossy_frac}")
@@ -362,11 +367,11 @@ def training(
             if iteration % 500 == 0:
                 progress_bar.set_postfix(
                     {
-                        "Loss": f"{ema_loss_for_log:.{10}f}",
-                        "L_v": f"{ema_lv_for_log:.{2}f}",
-                        "L_fp": f"{ema_lfp_for_log:.{2}f}",
-                        "L_fn": f"{ema_lfn_for_log:.{2}f}",
-                        "PSNR": f"{ema_lpsnr_for_log:.{2}f}"
+                        "Loss": f"{ema_loss_for_log:.{5}f}",
+                        "L_v": f"{ema_lv_for_log:.{5}f}",
+                        "L_fp": f"{ema_lfp_for_log:.{5}f}",
+                        "L_fn": f"{ema_lfn_for_log:.{5}f}",
+                        "PSNR": f"{ema_lpsnr_for_log:.{5}f}"
                     }
                 )
                 progress_bar.update(500)
@@ -489,7 +494,7 @@ if __name__ == "__main__":
     parser.add_argument("--min_weight", type=float, default=0.005)
     parser.add_argument("--detect_anomaly", action="store_true", default=False)
     parser.add_argument(
-        "--test_iterations", nargs="+", type=int, default=[]
+        "--test_iterations", nargs="+", type=int, default=[1]
     )
     # parser.add_argument(
     #     "--test_iterations", nargs="+", type=int, default=[1] + [i * 1000 for i in range(32)]

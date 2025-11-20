@@ -154,14 +154,8 @@ void CudaRasterizer::Rasterizer::forward(
 			}
 			const double avg = (P > 0) ? static_cast<double>(sum) / static_cast<double>(P) : 0.0;
 
-			// Copy the value for the gaussian with most intersections
-			float max_gaussian_value = 0.0f;
-			if (max_idx >= 0) {
-				CHECK_CUDA(cudaMemcpy(&max_gaussian_value, values + max_idx, sizeof(float), cudaMemcpyDeviceToHost), debug);
-			}
-
-			std::printf("Intersections: max=%d (gaussian %d, value=%.6f), avg=%.3f over %d gaussians\n",
-						max_val, max_idx, max_gaussian_value, avg, P);
+			std::printf("Intersections: max=%d (gaussian %d), avg=%.3f over %d gaussians\n",
+						max_val, max_idx, avg, P);
 		} 
 
 
