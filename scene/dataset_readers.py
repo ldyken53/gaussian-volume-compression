@@ -105,6 +105,7 @@ def readData(path, fraction, normalized=False):
 
 def readDatau(path, fraction, normalized=False):
     mesh = pv.read(path)
+    mesh = mesh.cell_data_to_point_data()
 
     if not normalized:
         # Rescale the values to the range [0, 1]
@@ -121,29 +122,33 @@ def readDatau(path, fraction, normalized=False):
         mesh.scale(1/(global_max - global_min), inplace=True)
         # mesh.translate(np.array([0.01,0.01,0.01]), inplace=True)
 
-    num_points = mesh.points.shape[0]
-    indices = np.random.choice(num_points, size=int(num_points * fraction), replace=False)
-    points_sampled = mesh.points[indices]
-    values_sampled = values[indices]
+    if fraction != -1:
+        num_points = mesh.points.shape[0]
+        print(num_points)
+        indices = np.random.choice(num_points, size=int(num_points * fraction), replace=False)
+        points_sampled = mesh.points[indices]
+        values_sampled = values[indices]
 
-    # cell_count = 50
-    # xmin, xmax, ymin, ymax, zmin, zmax = mesh.bounds
-    # x = np.linspace(xmin, xmax, cell_count)
-    # y = np.linspace(ymin, ymax, cell_count)
-    # z = np.linspace(zmin, zmax, cell_count)
-    # x, y, z = np.meshgrid(x, y, z, indexing='ij')
-    # samples = np.vstack([x.ravel(), y.ravel(), z.ravel()]).T
-    # samples_3d = samples.reshape(cell_count, cell_count, cell_count, 3)
-    # rot = np.rot90(samples_3d, k=1, axes=(2,0))
-    # samples_tf = np.flip(rot, axis=2)
-    # save_cell = samples_tf.reshape(-1, 3)
-    # save_gt = gpu_sampleu(
-    #     mesh.points, 
-    #     mesh.cell_connectivity.astype(np.int64),
-    #     mesh.point_data['scalar'],
-    #     save_cell
-    # )
-    # print(points_sampled.shape, values_sampled.shape)
-    # print(save_cell.shape, save_gt.reshape(-1, 1).shape)
+        # cell_count = 50
+        # xmin, xmax, ymin, ymax, zmin, zmax = mesh.bounds
+        # x = np.linspace(xmin, xmax, cell_count)
+        # y = np.linspace(ymin, ymax, cell_count)
+        # z = np.linspace(zmin, zmax, cell_count)
+        # x, y, z = np.meshgrid(x, y, z, indexing='ij')
+        # samples = np.vstack([x.ravel(), y.ravel(), z.ravel()]).T
+        # samples_3d = samples.reshape(cell_count, cell_count, cell_count, 3)
+        # rot = np.rot90(samples_3d, k=1, axes=(2,0))
+        # samples_tf = np.flip(rot, axis=2)
+        # save_cell = samples_tf.reshape(-1, 3)
+        # save_gt = gpu_sampleu(
+        #     mesh.points, 
+        #     mesh.cell_connectivity.astype(np.int64),
+        #     mesh.point_data['scalar'],
+        #     save_cell
+        # )
+        # print(points_sampled.shape, values_sampled.shape)
+        # print(save_cell.shape, save_gt.reshape(-1, 1).shape)
 
-    return mesh, BasicPointCloud(points=points_sampled, values=values_sampled)
+        return mesh, BasicPointCloud(points=points_sampled, values=values_sampled)
+    else:
+        return mesh, BasicPointCloud(points=None, values=None)
