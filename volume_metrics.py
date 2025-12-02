@@ -10,7 +10,7 @@ import pyvista as pv
 from arguments import ModelParams, OptimizationParams, PipelineParams
 from gaussian_renderer import init_rasterizer, render, build_bvh
 from scene import GaussianModel, Scene
-from gpu_mesh_sampling import gpu_sample
+from gpu_mesh_sampling import gpu_sample, gpu_sampleu
 from utils.debug_utils import tensor_to_vtk
 from utils.general_utils import get_expon_lr_func, safe_state
 from utils.image_utils import psnr
@@ -65,11 +65,19 @@ def training(
         #     np.array(gaussians.mins)[None, :], 
         #     np.array(gaussians.maxes)[None, :]
         # )
-        gt_cells = gpu_sample(
-            gaussians.mesh.dimensions,
-            gaussians.mesh.origin,
-            gaussians.mesh.spacing,
-            gaussians.mesh.point_data['value'],
+        # gt_cells = gpu_sample(
+        #     gaussians.mesh.dimensions,
+        #     gaussians.mesh.origin,
+        #     gaussians.mesh.spacing,
+        #     gaussians.mesh.point_data['value'],
+        #     samples_tf_flat
+        # )
+        gt_cells = gpu_sampleu(
+            gaussians.mesh.points, 
+            gaussians.mesh.cell_connectivity.astype(np.int64),
+            gaussians.mesh.celltypes.astype(np.int64),
+            gaussians.mesh.offset.astype(np.int64),
+            gaussians.mesh.point_data[gaussians.mesh.array_names[0]],
             samples_tf_flat
         )
         tensor_to_vtk(gt_cells.reshape(cell_count, cell_count, cell_count), "test_gt.vtk", spacing)
@@ -77,18 +85,19 @@ def training(
             torch.tensor(samples_tf_flat, dtype=torch.float, device="cuda")
         )
     else:
-        idx = np.random.choice(gaussians.mesh.n_points, size=(1000000), replace=True)
-        nx, ny, nz = gaussians.mesh.dimensions
-        ox, oy, oz = gaussians.mesh.origin
-        sx, sy, sz = gaussians.mesh.spacing
-        nxny = nx * ny
-        k, r = np.divmod(idx, nxny)
-        j, i = np.divmod(r, nx)
-        x = ox + i * sx
-        y = oy + j * sy
-        z = oz + k * sz
-        mesh_samples = np.stack((x, y, z), axis=-1)
-        gt_cells = gaussians.mesh.point_data['value'][idx]
+        idx = np.random.choice(gaussians.mesh.n_points, size=(100000), replace=True)
+        # nx, ny, nz = gaussians.mesh.dimensions
+        # ox, oy, oz = gaussians.mesh.origin
+        # sx, sy, sz = gaussians.mesh.spacing
+        # nxny = nx * ny
+        # k, r = np.divmod(idx, nxny)
+        # j, i = np.divmod(r, nx)
+        # x = ox + i * sx
+        # y = oy + j * sy
+        # z = oz + k * sz
+        mesh_samples = gaussians.mesh.points[idx]
+        # mesh_samples = np.stack((x, y, z), axis=-1)
+        gt_cells = gaussians.mesh.point_data[gaussians.mesh.array_names[0]][idx]
         build_bvh(
             torch.tensor(mesh_samples, dtype=torch.float, device="cuda")
         )
@@ -115,6 +124,11 @@ def training(
         print(f"False negative percent: {torch.count_nonzero(torch.logical_and(cells == -1, gt != -1)) / cell_count ** 3}")
         print(f"false positive percent: {torch.count_nonzero(torch.logical_and(cells != -1, gt == -1)) / cell_count ** 3}")
         tensor_to_vtk(cells.detach().cpu().numpy().reshape(cell_count, cell_count, cell_count), f"test.vtk", spacing)
+    else:
+        print(f"Invalid samples: {np.count_nonzero(gt_cells == -1) / 100000}")
+        print(f"False negative: {torch.count_nonzero(torch.logical_and(cells == -1, gt != -1))}")
+        print(f"false positive: {torch.count_nonzero(torch.logical_and(cells != -1, gt == -1))}")
+    gaussians.save_ply_activated('apoint_cloud.ply')
 
 if __name__ == "__main__":
     window = create_window()

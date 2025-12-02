@@ -34,14 +34,14 @@ class GaussianModel:
         self.weight_activation = torch.sigmoid
         self.inverse_weight_activation = inverse_sigmoid
 
-        # self.values_activation = torch.sigmoid
-        # self.inverse_value_activation = inverse_sigmoid
+        self.values_activation = torch.sigmoid
+        self.inverse_value_activation = inverse_sigmoid
 
         # self.values_activation = torch.tanh
         # self.inverse_value_activation = torch.atanh
 
-        self.values_activation = lambda x: x
-        self.inverse_value_activation = lambda x: x
+        # self.values_activation = lambda x: x
+        # self.inverse_value_activation = lambda x: x
 
         self.rotation_activation = torch.nn.functional.normalize
 
@@ -281,6 +281,24 @@ class GaussianModel:
 
         # Also produce an ascii version of the .ply file
         self.convert_ply_to_ascii(path)
+
+    def save_ply_activated(self, path):
+        # Apply activation functions to get the actual values
+        xyz = self.get_xyz.detach().cpu().numpy()  # _xyz (no activation)
+        weights = self.get_weight.detach().cpu().numpy()  # sigmoid activation
+        scaling = self.get_scaling.detach().cpu().numpy()  # exp activation
+        rotation = self.get_rotation.detach().cpu().numpy()  # normalize activation
+        values = self.get_values.detach().cpu().numpy()  # sigmoid activation
+
+        dtype_full = [
+            (attribute, "f4") for attribute in self.construct_list_of_attributes()
+        ]
+
+        elements = np.empty(xyz.shape[0], dtype=dtype_full)
+        attributes = np.concatenate((xyz, values, weights, scaling, rotation), axis=1)
+        elements[:] = list(map(tuple, attributes))
+        el = PlyElement.describe(elements, "vertex")
+        PlyData([el]).write(path)
 
     def reset_weight(self):
         weights_new = self.inverse_weight_activation(
