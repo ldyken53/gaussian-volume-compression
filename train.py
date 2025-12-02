@@ -172,22 +172,22 @@ def training(
     # end = time.time()
     # print(f"Time to sample gt: {end - start}")
 
-    # size = 262144
+    # size = 100000
     # start = time.time()
     # num_batches = 1000
     # idx = torch.randint(gaussians.mesh.n_points, (num_batches, size))
-    # nx, ny, nz = gaussians.mesh.dimensions
-    # ox, oy, oz = gaussians.mesh.origin
-    # sx, sy, sz = gaussians.mesh.spacing
-    # nxny = nx * ny
-    # k, r = np.divmod(idx, nxny)
-    # j, i = np.divmod(r, nx)
-    # x = ox + i * sx
-    # y = oy + j * sy
-    # z = oz + k * sz
-    # mesh_samples = np.stack((x, y, z), axis=-1)
+    # # nx, ny, nz = gaussians.mesh.dimensions
+    # # ox, oy, oz = gaussians.mesh.origin
+    # # sx, sy, sz = gaussians.mesh.spacing
+    # # nxny = nx * ny
+    # # k, r = np.divmod(idx, nxny)
+    # # j, i = np.divmod(r, nx)
+    # # x = ox + i * sx
+    # # y = oy + j * sy
+    # # z = oz + k * sz
+    # # mesh_samples = np.stack((x, y, z), axis=-1)
     # mesh_samples = gaussians.mesh.points[idx]
-    # mesh_vals = gaussians.mesh.point_data['value'][idx]
+    # mesh_vals = gaussians.mesh.point_data[gaussians.mesh.array_names[0]][idx]
     # big_gt = mesh_vals.reshape(num_batches, size)
     # big_samples = mesh_samples.reshape(num_batches, size, 3)
     # end = time.time()
@@ -252,7 +252,7 @@ def training(
     for iteration in range(first_iter, opt.iterations + 1):
         iter_start.record()
         deb = False
-        if iteration > 500:
+        if iteration == 1:
             deb = True
 
         if iteration in saving_iterations or iteration in testing_iterations:
@@ -297,14 +297,14 @@ def training(
             false_positive = (1 * (1 - torch.exp(-k * weights[mask]))).mean()
         else:
             false_positive = torch.tensor(0., device="cuda")
-        loss = l1_lv + false_negative
+        loss = l1_lv + false_negative + false_positive
         loss.backward()
         iter_end.record()
 
         with torch.no_grad():
             # Compute the lossy samples where new Gaussians are needed
-            # recon_mask = torch.logical_and(cells != -1, gt != -1)
-            recon_mask = (gt != -100)
+            recon_mask = torch.logical_and(cells != -1, gt != -1)
+            # recon_mask = (gt != -100)
             if iteration not in saving_iterations and iteration not in testing_iterations:
                 med = torch.median(torch.abs(cells - gt))
                 stdn, meann = torch.std_mean(torch.abs(cells - gt))
@@ -375,8 +375,9 @@ def training(
                     }
                 )
                 progress_bar.update(500)
-                print(f"0 cells: {torch.count_nonzero(gt == 0).cpu().numpy()}, -1: {torch.count_nonzero(gt == -1).cpu().numpy()}")
-                print(f"0 cells: {torch.count_nonzero(cells == 0).cpu().numpy()}, -1: {torch.count_nonzero(cells == -1).cpu().numpy()}")
+                # print(f"0 cells: {torch.count_nonzero(gt == 0).cpu().numpy()}, -1: {torch.count_nonzero(gt == -1).cpu().numpy()}")
+                # print(f"0 cells: {torch.count_nonzero(cells == 0).cpu().numpy()}, -1: {torch.count_nonzero(cells == -1).cpu().numpy()}")
+                print(f"False negative: {torch.count_nonzero(torch.logical_and(cells== -1, gt != -1))}, false positive: {torch.count_nonzero(torch.logical_and(cells != -1, gt == -1))}")
                 print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr2: {psnr2}, weight: {torch.mean(weights)}")
                 # print(f"scale: {torch.mean(gaussians.get_scaling)}, median: {torch.median(gaussians.get_scaling)}, std: {torch.std(gaussians.get_scaling)}")
                 # print(f"{torch.mean(gaussians.get_scaling[gaussians.get_values.squeeze(-1) != 0])}")
@@ -428,7 +429,6 @@ def training(
                     gt_cells[loss_idx].reshape(-1, 1)
                 )
                 densifies += 1
-                print(f"Num Gaussians: {gaussians.get_values.shape[0]}")
                 # error_thresh -= 0.002
 
                 # if iteration % opt.weight_reset_interval == 0 or (
