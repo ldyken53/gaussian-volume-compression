@@ -36,6 +36,7 @@ def training(
     
     gaussians = GaussianModel()
     scene = Scene(dataset, gaussians, load_iteration=-1, normalized=is_scaled, fraction=-1)
+    struct = dataset.source_path.lower().endswith('.vtk')
     pipe.debug = True
     init_rasterizer(
         gaussians,
@@ -65,21 +66,23 @@ def training(
         #     np.array(gaussians.mins)[None, :], 
         #     np.array(gaussians.maxes)[None, :]
         # )
-        # gt_cells = gpu_sample(
-        #     gaussians.mesh.dimensions,
-        #     gaussians.mesh.origin,
-        #     gaussians.mesh.spacing,
-        #     gaussians.mesh.point_data['value'],
-        #     samples_tf_flat
-        # )
-        gt_cells = gpu_sampleu(
-            gaussians.mesh.points, 
-            gaussians.mesh.cell_connectivity.astype(np.int64),
-            gaussians.mesh.celltypes.astype(np.int64),
-            gaussians.mesh.offset.astype(np.int64),
-            gaussians.mesh.point_data[gaussians.mesh.array_names[0]],
-            samples_tf_flat
-        )
+        if struct:
+            gt_cells = gpu_sample(
+                gaussians.mesh.dimensions,
+                gaussians.mesh.origin,
+                gaussians.mesh.spacing,
+                gaussians.mesh.point_data['value'],
+                samples_tf_flat
+            )
+        else:
+            gt_cells = gpu_sampleu(
+                gaussians.mesh.points, 
+                gaussians.mesh.cell_connectivity.astype(np.int64),
+                gaussians.mesh.celltypes.astype(np.int64),
+                gaussians.mesh.offset.astype(np.int64),
+                gaussians.mesh.point_data[gaussians.mesh.array_names[0]],
+                samples_tf_flat
+            )
         tensor_to_vtk(gt_cells.reshape(cell_count, cell_count, cell_count), "test_gt.vtk", spacing)
         build_bvh(
             torch.tensor(samples_tf_flat, dtype=torch.float, device="cuda")

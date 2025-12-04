@@ -32,8 +32,10 @@ class Scene:
             print("Loading trained model at iteration {}".format(self.loaded_iter))
 
         if os.path.exists(args.source_path) and args.source_path.lower().endswith(('.vtk', '.vtu')):
-            mesh, pcd = readDatau(args.source_path, fraction, normalized=normalized)
-            # mesh, pcd = readDatau(args.source_path, fraction)
+            if args.source_path.lower().endswith('.vtk'):
+                mesh, pcd = readData(args.source_path, fraction, normalized=normalized)
+            else:
+                mesh, pcd = readDatau(args.source_path, fraction, normalized=normalized)
         else:
             assert False, "Could not recognize scene type!"
 

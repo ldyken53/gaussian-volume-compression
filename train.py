@@ -52,6 +52,7 @@ def training(
     prepare_output(dataset)
     gaussians = GaussianModel()
     scene = Scene(dataset, gaussians, normalized=is_scaled, fraction=fraction)
+    struct = dataset.source_path.lower().endswith('.vtk')
     gaussians.training_setup(opt)
     print("Before save")
     scene.save(0)
@@ -93,21 +94,23 @@ def training(
     samples_tf = np.flip(rot, axis=2)
     save_cell = samples_tf.reshape(-1, 3)
     # print("Save cell made")
-    # save_gt = gpu_sample(
-    #     gaussians.mesh.dimensions,
-    #     gaussians.mesh.origin,
-    #     gaussians.mesh.spacing,
-    #     gaussians.mesh.point_data['value'],
-    #     save_cell
-    # )
-    save_gt = gpu_sampleu(
-        gaussians.mesh.points, 
-        gaussians.mesh.cell_connectivity.astype(np.int64),
-        gaussians.mesh.celltypes.astype(np.int64),
-        gaussians.mesh.offset.astype(np.int64),
-        gaussians.mesh.point_data[gaussians.mesh.array_names[0]],
-        save_cell
-    )
+    if struct:
+        save_gt = gpu_sample(
+            gaussians.mesh.dimensions,
+            gaussians.mesh.origin,
+            gaussians.mesh.spacing,
+            gaussians.mesh.point_data['value'],
+            save_cell
+        )
+    else:
+        save_gt = gpu_sampleu(
+            gaussians.mesh.points, 
+            gaussians.mesh.cell_connectivity.astype(np.int64),
+            gaussians.mesh.celltypes.astype(np.int64),
+            gaussians.mesh.offset.astype(np.int64),
+            gaussians.mesh.point_data[gaussians.mesh.array_names[0]],
+            save_cell
+        )
     num_batches = 1000
     size = cell_count ** 3
     big_samples = np.tile(save_cell, (num_batches, 1))
@@ -119,21 +122,23 @@ def training(
         np.array(gaussians.mins), 
         np.array(gaussians.maxes)
     )
-    # big_gt = gpu_sample(
-    #     gaussians.mesh.dimensions,
-    #     gaussians.mesh.origin,
-    #     gaussians.mesh.spacing,
-    #     gaussians.mesh.point_data['value'],
-    #     big_samples
-    # )
-    big_gt = gpu_sampleu(
-        gaussians.mesh.points, 
-        gaussians.mesh.cell_connectivity.astype(np.int64),
-        gaussians.mesh.celltypes.astype(np.int64),
-        gaussians.mesh.offset.astype(np.int64),
-        gaussians.mesh.point_data[gaussians.mesh.array_names[0]],
-        big_samples
-    )
+    if struct:
+        big_gt = gpu_sample(
+            gaussians.mesh.dimensions,
+            gaussians.mesh.origin,
+            gaussians.mesh.spacing,
+            gaussians.mesh.point_data['value'],
+            big_samples
+        )
+    else:
+        big_gt = gpu_sampleu(
+            gaussians.mesh.points, 
+            gaussians.mesh.cell_connectivity.astype(np.int64),
+            gaussians.mesh.celltypes.astype(np.int64),
+            gaussians.mesh.offset.astype(np.int64),
+            gaussians.mesh.point_data[gaussians.mesh.array_names[0]],
+            big_samples
+        )
     big_gt = big_gt.reshape(num_batches, cell_count**3)
     big_samples = big_samples.reshape(num_batches, cell_count**3, 3)
     end = time.time()
@@ -293,7 +298,7 @@ def training(
         else:
             false_negative = torch.tensor(0., device="cuda")
         mask = torch.logical_and(gt == -1, weights > 0)
-        if mask.any():
+        if mask.any() and not struct:
             false_positive = (1 * (1 - torch.exp(-k * weights[mask]))).mean()
         else:
             false_positive = torch.tensor(0., device="cuda")
