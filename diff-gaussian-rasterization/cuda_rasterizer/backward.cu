@@ -221,47 +221,47 @@ __global__ void renderCUDA(int P,
 		};
 		// Compute dL_dcov as -conic * dL_dconic * conic
 		// since conic is inverse of cov
-		const float dL_dconic_conic[6] = {
-			dL_dconic[0]*conic[0] + dL_dconic[1]*conic[1] + dL_dconic[2]*conic[2],
-			dL_dconic[0]*conic[1] + dL_dconic[1]*conic[3] + dL_dconic[2]*conic[4],
-			dL_dconic[0]*conic[2] + dL_dconic[1]*conic[4] + dL_dconic[2]*conic[5],
-			dL_dconic[1]*conic[1] + dL_dconic[3]*conic[3] + dL_dconic[4]*conic[4],
-			dL_dconic[1]*conic[2] + dL_dconic[3]*conic[4] + dL_dconic[4]*conic[5],
-			dL_dconic[2]*conic[2] + dL_dconic[4]*conic[4] + dL_dconic[5]*conic[5]
-		};
-		const float dL_dcov[6] = {
-			-1.0f * (conic[0]*dL_dconic_conic[0] + conic[1]*dL_dconic_conic[1] + conic[2]*dL_dconic_conic[2]),
-			-1.0f * (conic[0]*dL_dconic_conic[1] + conic[1]*dL_dconic_conic[3] + conic[2]*dL_dconic_conic[4]),
-			-1.0f * (conic[0]*dL_dconic_conic[2] + conic[1]*dL_dconic_conic[4] + conic[2]*dL_dconic_conic[5]),
-			-1.0f * (conic[1]*dL_dconic_conic[1] + conic[3]*dL_dconic_conic[3] + conic[4]*dL_dconic_conic[4]),
-			-1.0f * (conic[1]*dL_dconic_conic[2] + conic[3]*dL_dconic_conic[4] + conic[4]*dL_dconic_conic[5]),
-			-1.0f * (conic[2]*dL_dconic_conic[2] + conic[4]*dL_dconic_conic[4] + conic[5]*dL_dconic_conic[5])
-		};
-		// Unpack 'conic' and dL_dconic into full 3x3 matrices
-		// glm::mat3 C(
-		// 	conic[0], conic[1], conic[2],
-		// 	conic[1], conic[3], conic[4],
-		// 	conic[2], conic[4], conic[5]
-		// );
-
-		// glm::mat3 G(
-		// 	dL_dconic[0], dL_dconic[1], dL_dconic[2],
-		// 	dL_dconic[1], dL_dconic[3], dL_dconic[4],
-		// 	dL_dconic[2], dL_dconic[4], dL_dconic[5]
-		// );
-
-		// // dL/dSigma = -C * G * C
-		// glm::mat3 dL_dSigma_mat = -C * G * C;
-
-		// // Repack to 6 parameters (xx, xy, xz, yy, yz, zz)
-		// float dL_dcov[6] = {
-		// 	dL_dSigma_mat[0][0],
-		// 	dL_dSigma_mat[0][1],
-		// 	dL_dSigma_mat[0][2],
-		// 	dL_dSigma_mat[1][1],
-		// 	dL_dSigma_mat[1][2],
-		// 	dL_dSigma_mat[2][2]
+		// const float dL_dconic_conic[6] = {
+		// 	dL_dconic[0]*conic[0] + dL_dconic[1]*conic[1] + dL_dconic[2]*conic[2],
+		// 	dL_dconic[0]*conic[1] + dL_dconic[1]*conic[3] + dL_dconic[2]*conic[4],
+		// 	dL_dconic[0]*conic[2] + dL_dconic[1]*conic[4] + dL_dconic[2]*conic[5],
+		// 	dL_dconic[1]*conic[1] + dL_dconic[3]*conic[3] + dL_dconic[4]*conic[4],
+		// 	dL_dconic[1]*conic[2] + dL_dconic[3]*conic[4] + dL_dconic[4]*conic[5],
+		// 	dL_dconic[2]*conic[2] + dL_dconic[4]*conic[4] + dL_dconic[5]*conic[5]
 		// };
+		// const float dL_dcov[6] = {
+		// 	-1.0f * (conic[0]*dL_dconic_conic[0] + conic[1]*dL_dconic_conic[1] + conic[2]*dL_dconic_conic[2]),
+		// 	-1.0f * (conic[0]*dL_dconic_conic[1] + conic[1]*dL_dconic_conic[3] + conic[2]*dL_dconic_conic[4]),
+		// 	-1.0f * (conic[0]*dL_dconic_conic[2] + conic[1]*dL_dconic_conic[4] + conic[2]*dL_dconic_conic[5]),
+		// 	-1.0f * (conic[1]*dL_dconic_conic[1] + conic[3]*dL_dconic_conic[3] + conic[4]*dL_dconic_conic[4]),
+		// 	-1.0f * (conic[1]*dL_dconic_conic[2] + conic[3]*dL_dconic_conic[4] + conic[4]*dL_dconic_conic[5]),
+		// 	-1.0f * (conic[2]*dL_dconic_conic[2] + conic[4]*dL_dconic_conic[4] + conic[5]*dL_dconic_conic[5])
+		// };
+		// Unpack 'conic' and dL_dconic into full 3x3 matrices
+		glm::mat3 C(
+			conic[0], conic[1], conic[2],
+			conic[1], conic[3], conic[4],
+			conic[2], conic[4], conic[5]
+		);
+
+		glm::mat3 G(
+			dL_dconic[0], dL_dconic[1], dL_dconic[2],
+			dL_dconic[1], dL_dconic[3], dL_dconic[4],
+			dL_dconic[2], dL_dconic[4], dL_dconic[5]
+		);
+
+		// dL/dSigma = -C * G * C
+		glm::mat3 dL_dSigma_mat = -C * G * C;
+
+		// Repack to 6 parameters (xx, xy, xz, yy, yz, zz)
+		float dL_dcov[6] = {
+			dL_dSigma_mat[0][0],
+			dL_dSigma_mat[0][1],
+			dL_dSigma_mat[0][2],
+			dL_dSigma_mat[1][1],
+			dL_dSigma_mat[1][2],
+			dL_dSigma_mat[2][2]
+		};
 
 		float abs_Sigma00 = abs(Sigma[0][0]);
 		float abs_Sigma11 = abs(Sigma[1][1]);
@@ -739,48 +739,48 @@ __global__ void intersectCUDA(int P,
 			dL_dyz,
 			dL_dzz
 		};
-		// Compute dL_dcov as -conic * dL_dconic * conic
-		// since conic is inverse of cov
-		const float dL_dconic_conic[6] = {
-			dL_dconic[0]*conic[0] + dL_dconic[1]*conic[1] + dL_dconic[2]*conic[2],
-			dL_dconic[0]*conic[1] + dL_dconic[1]*conic[3] + dL_dconic[2]*conic[4],
-			dL_dconic[0]*conic[2] + dL_dconic[1]*conic[4] + dL_dconic[2]*conic[5],
-			dL_dconic[1]*conic[1] + dL_dconic[3]*conic[3] + dL_dconic[4]*conic[4],
-			dL_dconic[1]*conic[2] + dL_dconic[3]*conic[4] + dL_dconic[4]*conic[5],
-			dL_dconic[2]*conic[2] + dL_dconic[4]*conic[4] + dL_dconic[5]*conic[5]
-		};
-		const float dL_dcov[6] = {
-			-1.0f * (conic[0]*dL_dconic_conic[0] + conic[1]*dL_dconic_conic[1] + conic[2]*dL_dconic_conic[2]),
-			-1.0f * (conic[0]*dL_dconic_conic[1] + conic[1]*dL_dconic_conic[3] + conic[2]*dL_dconic_conic[4]),
-			-1.0f * (conic[0]*dL_dconic_conic[2] + conic[1]*dL_dconic_conic[4] + conic[2]*dL_dconic_conic[5]),
-			-1.0f * (conic[1]*dL_dconic_conic[1] + conic[3]*dL_dconic_conic[3] + conic[4]*dL_dconic_conic[4]),
-			-1.0f * (conic[1]*dL_dconic_conic[2] + conic[3]*dL_dconic_conic[4] + conic[4]*dL_dconic_conic[5]),
-			-1.0f * (conic[2]*dL_dconic_conic[2] + conic[4]*dL_dconic_conic[4] + conic[5]*dL_dconic_conic[5])
-		};
-		// glm::mat3 C(
-		// 	conic[0], conic[1], conic[2],
-		// 	conic[1], conic[3], conic[4],
-		// 	conic[2], conic[4], conic[5]
-		// );
-
-		// glm::mat3 G(
-		// 	dL_dconic[0], dL_dconic[1], dL_dconic[2],
-		// 	dL_dconic[1], dL_dconic[3], dL_dconic[4],
-		// 	dL_dconic[2], dL_dconic[4], dL_dconic[5]
-		// );
-
-		// // dL/dSigma = -C * G * C
-		// glm::mat3 dL_dSigma_mat = -C * G * C;
-
-		// // Repack to 6 parameters (xx, xy, xz, yy, yz, zz)
-		// float dL_dcov[6] = {
-		// 	dL_dSigma_mat[0][0],
-		// 	dL_dSigma_mat[0][1],
-		// 	dL_dSigma_mat[0][2],
-		// 	dL_dSigma_mat[1][1],
-		// 	dL_dSigma_mat[1][2],
-		// 	dL_dSigma_mat[2][2]
+		// // Compute dL_dcov as -conic * dL_dconic * conic
+		// // since conic is inverse of cov
+		// const float dL_dconic_conic[6] = {
+		// 	dL_dconic[0]*conic[0] + dL_dconic[1]*conic[1] + dL_dconic[2]*conic[2],
+		// 	dL_dconic[0]*conic[1] + dL_dconic[1]*conic[3] + dL_dconic[2]*conic[4],
+		// 	dL_dconic[0]*conic[2] + dL_dconic[1]*conic[4] + dL_dconic[2]*conic[5],
+		// 	dL_dconic[1]*conic[1] + dL_dconic[3]*conic[3] + dL_dconic[4]*conic[4],
+		// 	dL_dconic[1]*conic[2] + dL_dconic[3]*conic[4] + dL_dconic[4]*conic[5],
+		// 	dL_dconic[2]*conic[2] + dL_dconic[4]*conic[4] + dL_dconic[5]*conic[5]
 		// };
+		// const float dL_dcov[6] = {
+		// 	-1.0f * (conic[0]*dL_dconic_conic[0] + conic[1]*dL_dconic_conic[1] + conic[2]*dL_dconic_conic[2]),
+		// 	-1.0f * (conic[0]*dL_dconic_conic[1] + conic[1]*dL_dconic_conic[3] + conic[2]*dL_dconic_conic[4]),
+		// 	-1.0f * (conic[0]*dL_dconic_conic[2] + conic[1]*dL_dconic_conic[4] + conic[2]*dL_dconic_conic[5]),
+		// 	-1.0f * (conic[1]*dL_dconic_conic[1] + conic[3]*dL_dconic_conic[3] + conic[4]*dL_dconic_conic[4]),
+		// 	-1.0f * (conic[1]*dL_dconic_conic[2] + conic[3]*dL_dconic_conic[4] + conic[4]*dL_dconic_conic[5]),
+		// 	-1.0f * (conic[2]*dL_dconic_conic[2] + conic[4]*dL_dconic_conic[4] + conic[5]*dL_dconic_conic[5])
+		// };
+		glm::mat3 C(
+			conic[0], conic[1], conic[2],
+			conic[1], conic[3], conic[4],
+			conic[2], conic[4], conic[5]
+		);
+
+		glm::mat3 G(
+			dL_dconic[0], dL_dconic[1], dL_dconic[2],
+			dL_dconic[1], dL_dconic[3], dL_dconic[4],
+			dL_dconic[2], dL_dconic[4], dL_dconic[5]
+		);
+
+		// dL/dSigma = -C * G * C
+		glm::mat3 dL_dSigma_mat = -C * G * C;
+
+		// Repack to 6 parameters (xx, xy, xz, yy, yz, zz)
+		float dL_dcov[6] = {
+			dL_dSigma_mat[0][0],
+			dL_dSigma_mat[0][1],
+			dL_dSigma_mat[0][2],
+			dL_dSigma_mat[1][1],
+			dL_dSigma_mat[1][2],
+			dL_dSigma_mat[2][2]
+		};
 		float abs_Sigma00 = abs(Sigma[0][0]);
 		float abs_Sigma11 = abs(Sigma[1][1]);
 		float abs_Sigma22 = abs(Sigma[2][2]);
