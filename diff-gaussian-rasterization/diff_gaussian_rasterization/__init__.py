@@ -134,8 +134,113 @@ class _RasterizeGaussians(torch.autograd.Function):
             grad_rotations,
             grad_values,
             grad_weights,
-            None,
             None
+        )
+
+        return grads
+
+
+def intersect_gaussians(
+    means3D,
+    scales,
+    rotations,
+    raster_settings,
+):
+    return _IntersectGaussians.apply(
+        means3D,
+        scales,
+        rotations,
+        raster_settings,
+    )
+
+
+class _IntersectGaussians(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        means3D,
+        scales,
+        rotations,
+        raster_settings,
+    ):
+        volume_mins_x, volume_mins_y, volume_mins_z = raster_settings.volume_mins
+        volume_maxes_x, volume_maxes_y, volume_maxes_z = raster_settings.volume_maxes
+        
+        # Restructure arguments the way that the C++ lib expects them
+        args = (
+            means3D,
+            scales,
+            rotations,
+            raster_settings.scale_modifier,
+            volume_mins_x, volume_mins_y, volume_mins_z,
+            volume_maxes_x, volume_maxes_y, volume_maxes_z,
+            raster_settings.bg,
+            raster_settings.debug,
+        )
+
+        # Invoke C++/CUDA intersect
+        intersections, intersection_weight, conics = (
+            _C.intersect_gaussians(*args)
+        )
+
+        # Keep relevant tensors for backward
+        ctx.raster_settings = raster_settings
+        ctx.save_for_backward(
+            means3D,
+            scales,
+            rotations,
+            conics,
+            intersections,
+            intersection_weight,
+        )
+        return intersections, intersection_weight
+
+    @staticmethod
+    def backward(ctx, grad_intersections, grad_intersection_weight):
+
+        # Restore necessary values from context
+        raster_settings = ctx.raster_settings
+        (
+            means3D,
+            scales,
+            rotations,
+            conics,
+            intersections,
+            intersection_weight,
+        ) = ctx.saved_tensors
+
+        volume_mins_x, volume_mins_y, volume_mins_z = raster_settings.volume_mins
+        volume_maxes_x, volume_maxes_y, volume_maxes_z = raster_settings.volume_maxes
+
+        # Restructure args as C++ method expects them
+        args = (
+            means3D,
+            scales,
+            rotations,
+            conics,
+            intersections,
+            intersection_weight,
+            raster_settings.scale_modifier,
+            volume_mins_x, volume_mins_y, volume_mins_z,
+            volume_maxes_x, volume_maxes_y, volume_maxes_z,
+            raster_settings.bg,
+            grad_intersections,
+            grad_intersection_weight,
+            raster_settings.debug,
+        )
+
+        # Compute gradients for relevant tensors by invoking backward method
+        (
+            grad_means3D,
+            grad_scales,
+            grad_rotations,
+        ) = _C.intersect_gaussians_backward(*args)
+
+        grads = (
+            grad_means3D,
+            grad_scales,
+            grad_rotations,
+            None,
         )
 
         return grads
@@ -203,5 +308,30 @@ class GaussianRasterizer(nn.Module):
             rotations,
             values,
             weights,
+            raster_settings,
+        )
+
+    def intersect(
+        self,
+        means3D,
+        scales=None,
+        rotations=None,
+        debug=False
+    ):
+        if debug:
+            raster_settings = self.raster_settings._replace(debug=debug)
+        else:
+            raster_settings = self.raster_settings
+
+        if (scales is None or rotations is None):
+            raise Exception(
+                "Please provide scale/rotation pair!"
+            )
+
+        # Invoke C++/CUDA intersection routine
+        return intersect_gaussians(
+            means3D,
+            scales,
+            rotations,
             raster_settings,
         )

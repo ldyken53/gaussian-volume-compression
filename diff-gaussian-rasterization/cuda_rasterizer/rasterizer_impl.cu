@@ -335,3 +335,146 @@ void CudaRasterizer::Rasterizer::backward(
 		}
 	}
 }
+
+// Forward procedure for intersecting Gaussians
+void CudaRasterizer::Rasterizer::intersect_forward(
+	const int P,
+	const float* means3D,
+	const float* scales,
+	const float scale_modifier,
+	const float* rotations,
+	const float3 volume_mins,
+	const float3 volume_maxes,
+	cuBQL::bvh3f& gaussian_bvh,
+	float* conics,
+	float* intersections,
+	float* intersection_weights,
+	bool debug)
+{
+	// Create CUDA events for timing (only when debug is enabled)
+	cudaEvent_t events[6]; // 8 pairs of start/stop events
+	if (debug) {
+		for (int i = 0; i < 6; i++) {
+			cudaEventCreate(&events[i]);
+		}
+	}
+	
+	cuBQL::box3f* aabbs = nullptr;
+	CHECK_CUDA(cudaMalloc(&aabbs, sizeof(cuBQL::box3f) * P), debug);
+
+	// Preprocessing
+	if (debug) cudaEventRecord(events[0]);
+	CHECK_CUDA(FORWARD::intersect_preprocess(
+		P,
+		means3D,
+		(glm::vec3*)scales,
+		scale_modifier,
+		(glm::vec4*)rotations,
+		conics,
+		aabbs
+	), debug)
+	if (debug) cudaEventRecord(events[1]);
+
+	if (debug) cudaEventRecord(events[2]);
+	cuBQL::BuildConfig cfg;
+	cfg.makeLeafThreshold = 33;
+	cfg.maxAllowedLeafSize = 32;
+	cuBQL::cuda::radixBuilder(gaussian_bvh, aabbs, P, cfg);
+	if (debug) cudaEventRecord(events[3]);
+
+	// Rendering
+	if (debug) cudaEventRecord(events[4]);
+	CHECK_CUDA(FORWARD::intersect(
+		P,
+		means3D,
+		conics,
+		aabbs,
+		gaussian_bvh,
+		intersections,
+		intersection_weights
+	), debug);
+	if (debug) cudaEventRecord(events[5]);
+
+	CHECK_CUDA(cudaFree(aabbs), debug);
+
+	// Calculate and print timing (only when debug is enabled)
+	if (debug) {
+		cudaDeviceSynchronize();
+		
+		float elapsed_time;
+		const char* operation_names[] = {
+			"Preprocess", "BVH", "Render"
+		};
+		
+		for (int i = 0; i < 3; i++) {
+			cudaEventElapsedTime(&elapsed_time, events[i*2], events[i*2+1]);
+			std::cout << operation_names[i] << " time: " << elapsed_time << " ms" << std::endl;
+		}
+		
+		// Clean up events
+		for (int i = 0; i < 6; i++) {
+			cudaEventDestroy(events[i]);
+		}
+	}
+}
+
+// Produce gradients from intersecting Gaussians
+void CudaRasterizer::Rasterizer::intersect_backward(
+	const int P,
+	const float* means3D,
+	const float* scales,
+	const float scale_modifier,
+	const float3 volume_mins, const float3 volume_maxes,
+	const float* rotations,
+	const float* conics,
+	const cuBQL::bvh3f& gaussian_bvh,
+	const float* intersections,
+	const float* intersection_weights,
+	const float* dL_dintersections,
+	const float* dL_dintersection_weights,
+	float* dL_dmean3D,
+	float* dL_dscale,
+	float* dL_drot,
+	bool debug)
+{
+	// Create CUDA events for timing (only when debug is enabled)
+	cudaEvent_t events[2]; // 2 pairs of start/stop events
+	if (debug) {
+		for (int i = 0; i < 2; i++) {
+			cudaEventCreate(&events[i]);
+		}
+	}
+
+	if (debug) cudaEventRecord(events[0]);
+	CHECK_CUDA(BACKWARD::intersect(P,
+		means3D,
+		(glm::vec3*)scales,
+		scale_modifier,
+		(glm::vec4*)rotations,
+		conics,
+		volume_mins, volume_maxes,
+		gaussian_bvh,
+		intersections,
+		intersection_weights,
+		dL_dintersections,
+		dL_dintersection_weights,
+		dL_dmean3D,
+		(glm::vec3*)dL_dscale,
+		(glm::vec4*)dL_drot), debug);
+	if (debug) cudaEventRecord(events[1]);
+
+	if (debug) {
+		cudaDeviceSynchronize(); // ensure all events are completed
+		float elapsed_time;
+		const char* operation_names[] = { "Backward Render" };
+
+		for (int i = 0; i < 1; ++i) {
+			cudaEventElapsedTime(&elapsed_time, events[i * 2], events[i * 2 + 1]);
+			std::cout << operation_names[i] << " time: " << elapsed_time << " ms" << std::endl;
+		}
+
+		for (int i = 0; i < 2; ++i) {
+			cudaEventDestroy(events[i]);
+		}
+	}
+}
