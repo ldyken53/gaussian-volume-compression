@@ -320,6 +320,8 @@ void CudaRasterizer::Rasterizer::backward(
 
 	}
 
+	CHECK_CUDA(cudaFree(d_count_intersections), debug);
+
 	if (debug) {
 		cudaDeviceSynchronize(); // ensure all events are completed
 		float elapsed_time;
