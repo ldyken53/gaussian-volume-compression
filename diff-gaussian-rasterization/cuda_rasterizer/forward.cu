@@ -183,7 +183,7 @@ __global__ void intersectPreprocessCUDA(const int P,
 	conics[idx * 6 + 5] = (a * d - b * b) * det_inv;
 
 	// Scale S by 3 to include up to where the weight is a tenth the cutoff
-	float m = 3.0;
+	float m = 1.0;
 	const float3 scaled_S = { S[0][0] * m, S[1][1] * m, S[2][2] * m };
 
  	// Create array for corner computations
