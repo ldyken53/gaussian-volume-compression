@@ -13,7 +13,7 @@ from tqdm import tqdm
 import pyvista as pv
 
 from arguments import ModelParams, OptimizationParams, PipelineParams
-from gaussian_renderer import init_rasterizer, render, build_bvh
+from gaussian_renderer import init_rasterizer, render, build_bvh, intersect
 from gpu_mesh_sampling import gpu_sample, gpu_sampleu
 from scene import GaussianModel, Scene
 from utils.debug_utils import tensor_to_vtk, analyze_array
@@ -29,7 +29,6 @@ except ImportError:
     TENSORBOARD_FOUND = False
 
 DEBUG = True
-
 
 def training(
     dataset,
@@ -71,8 +70,8 @@ def training(
     std = 0
     mean = 0
     avg = 0
-    error_thresh = 0.05
-    new_scale = 0.006
+    error_thresh = 0.0125
+    new_scale = 0.1
     densifies = 0
     lossy_frac = 0.0
 
@@ -93,7 +92,7 @@ def training(
     rot = np.rot90(samples_3d, k=1, axes=(2,0))
     samples_tf = np.flip(rot, axis=2)
     save_cell = samples_tf.reshape(-1, 3)
-    # print("Save cell made")
+    print("Save cell made")
     if struct:
         save_gt = gpu_sample(
             gaussians.mesh.dimensions,
@@ -177,21 +176,21 @@ def training(
     # end = time.time()
     # print(f"Time to sample gt: {end - start}")
 
-    # size = 100000
+    # size = 262144
     # start = time.time()
     # num_batches = 1000
     # idx = torch.randint(gaussians.mesh.n_points, (num_batches, size))
-    # # nx, ny, nz = gaussians.mesh.dimensions
-    # # ox, oy, oz = gaussians.mesh.origin
-    # # sx, sy, sz = gaussians.mesh.spacing
-    # # nxny = nx * ny
-    # # k, r = np.divmod(idx, nxny)
-    # # j, i = np.divmod(r, nx)
-    # # x = ox + i * sx
-    # # y = oy + j * sy
-    # # z = oz + k * sz
-    # # mesh_samples = np.stack((x, y, z), axis=-1)
-    # mesh_samples = gaussians.mesh.points[idx]
+    # nx, ny, nz = gaussians.mesh.dimensions
+    # ox, oy, oz = gaussians.mesh.origin
+    # sx, sy, sz = gaussians.mesh.spacing
+    # nxny = nx * ny
+    # k, r = np.divmod(idx, nxny)
+    # j, i = np.divmod(r, nx)
+    # x = ox + i * sx
+    # y = oy + j * sy
+    # z = oz + k * sz
+    # mesh_samples = np.stack((x, y, z), axis=-1)
+    # # mesh_samples = gaussians.mesh.points[idx]
     # mesh_vals = gaussians.mesh.point_data[gaussians.mesh.array_names[0]][idx]
     # big_gt = mesh_vals.reshape(num_batches, size)
     # big_samples = mesh_samples.reshape(num_batches, size, 3)
@@ -257,25 +256,25 @@ def training(
     for iteration in range(first_iter, opt.iterations + 1):
         iter_start.record()
         deb = False
-        if iteration == 1:
+        if iteration % 1000 == 0:
             deb = True
 
-        if iteration in saving_iterations or iteration in testing_iterations:
-            gt_cells = save_gt
-            gt = torch.tensor(gt_cells).cuda()
-            current_samples = save_cell
-        else:
-            num_loss = loss_samples.shape[0]
-            jit_idx = np.random.randint(0, num_batches)
-            gt_cells = np.concatenate([
-                loss_gt,
-                big_gt[jit_idx][:(size - num_loss)]
-            ])
-            gt = torch.tensor(gt_cells).cuda()
-            current_samples = np.concatenate([
-                loss_samples,
-                big_samples[jit_idx][:(size - num_loss)]
-            ])
+        # if iteration in saving_iterations or iteration in testing_iterations:
+        #     gt_cells = save_gt
+        #     gt = torch.tensor(gt_cells).cuda()
+        #     current_samples = save_cell
+        # else:
+        num_loss = loss_samples.shape[0]
+        jit_idx = np.random.randint(0, num_batches)
+        gt_cells = np.concatenate([
+            loss_gt,
+            big_gt[jit_idx][:(size - num_loss)]
+        ])
+        gt = torch.tensor(gt_cells).cuda()
+        current_samples = np.concatenate([
+            loss_samples,
+            big_samples[jit_idx][:(size - num_loss)]
+        ])
         build_bvh(torch.tensor(current_samples, dtype=torch.float, device="cuda"), deb)
 
         gaussians.update_learning_rate(iteration)
@@ -289,12 +288,36 @@ def training(
             render_pkg["cells"],
             render_pkg["weights"]
         )
-        l1_lv = l1_loss(cells, gt)
+        # intersect_pkg = intersect(
+        #     gaussians,
+        #     deb
+        # )
+        # intersections, intersection_weights = (
+        #     intersect_pkg["intersections"],
+        #     intersect_pkg["intersection_weight"]
+        # )
+        overlap_loss = torch.tensor(0, device="cuda")
+        # overlap_loss = torch.mean(torch.pow(10, 100 * intersection_weights) - 1)
+        # overlap_loss = torch.mean(intersection_weights)
+        recon_mask = torch.logical_and(gt != -1, cells != -1)
+        l1_lv = l1_loss(cells[recon_mask], gt[recon_mask])
         # TODO: FIX FP AND FN FOR CHANGING CELL COUNTS
-        k = 10  # Adjust this to control decay rate
-        fn_mask = torch.logical_and(gt != -1, weights < 10)
+        k = 600  # Adjust this to control decay rate
+        fn_mask = torch.logical_and(gt != -1, weights > 0.0)
+        t = 0.01
+        delta = 0.002 
+        # fn_mask = (gt != -1)
         if fn_mask.any():
-            false_negative = 10 * torch.exp(-k * weights[fn_mask]).mean()
+            false_negative = torch.exp(-k * weights[fn_mask])
+            # false_negative = torch.exp(-k * torch.clamp(weights[fn_mask] - 0.01, 0.0))
+            # false_negative = torch.clamp(0.015 - weights[fn_mask], min=0)
+            # false_negative = 0.01 * (torch.clamp((t + delta - weights[fn_mask]) / delta, min=0.0) ** 2).mean()
+            # false_negative = (torch.pow(10, -1000 * (weights[fn_mask] - 0.01))).mean()
+            mean_mask = (false_negative > 0.0)
+            if mean_mask.any():
+                false_negative = false_negative[mean_mask].mean()
+            else:
+                false_negative = torch.tensor(0., device="cuda")
         else:
             false_negative = torch.tensor(0., device="cuda")
         mask = torch.logical_and(gt == -1, weights > 0)
@@ -302,14 +325,14 @@ def training(
             false_positive = (1 * (1 - torch.exp(-k * weights[mask]))).mean()
         else:
             false_positive = torch.tensor(0., device="cuda")
-        loss = l1_lv + false_negative + false_positive
+        loss = l1_lv + false_positive + false_negative + overlap_loss
         loss.backward()
         iter_end.record()
 
         with torch.no_grad():
             # Compute the lossy samples where new Gaussians are needed
-            recon_mask = torch.logical_and(cells != -1, gt != -1)
-            # recon_mask = (gt != -100)
+            # recon_mask = torch.logical_and(cells != -1, gt != -1)
+            recon_mask = (gt != -1)
             if iteration not in saving_iterations and iteration not in testing_iterations:
                 med = torch.median(torch.abs(cells - gt))
                 stdn, meann = torch.std_mean(torch.abs(cells - gt))
@@ -360,7 +383,6 @@ def training(
             if iteration in testing_iterations:
                 print(f"Testing PSNR at iteration {iteration}: {psnr}")
                 print(f"Testing fraction of samples that are lossy: {np.count_nonzero(loss_idx) / size}, avg: {lossy_frac}")
-                print(f"Num Gaussians: {gaussians.get_values.shape[0]}")
                 # if np.count_nonzero(loss_idx) / size < 0.01 and iteration > 1:
                 #     error_thresh -= 0.1
                 #     lossy_frac = 0
@@ -384,7 +406,11 @@ def training(
                 # print(f"0 cells: {torch.count_nonzero(cells == 0).cpu().numpy()}, -1: {torch.count_nonzero(cells == -1).cpu().numpy()}")
                 print(f"False negative: {torch.count_nonzero(torch.logical_and(cells== -1, gt != -1))}, false positive: {torch.count_nonzero(torch.logical_and(cells != -1, gt == -1))}")
                 print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr2: {psnr2}, weight: {torch.mean(weights)}")
-                # print(f"scale: {torch.mean(gaussians.get_scaling)}, median: {torch.median(gaussians.get_scaling)}, std: {torch.std(gaussians.get_scaling)}")
+                # print(f"Overlap loss: {overlap_loss} mean {torch.mean(intersection_weights)} max: {torch.max(intersection_weights)} median: {torch.median(intersection_weights)} intersections: {torch.mean(intersections)}, max: {torch.max(intersections)}")
+                # top5 = torch.topk(intersection_weights, 5)
+                # print(f"Top 5: {top5.values}, weight: {gaussians.get_weight[top5.indices]}, scale: {gaussians.get_scaling[top5.indices]}")
+                print(f"scale: {torch.mean(gaussians.get_scaling)}, median: {torch.median(gaussians.get_scaling)}, std: {torch.std(gaussians.get_scaling)}")
+                # print(f"Weights below 0.01: {torch.count_nonzero(torch.logical_and(weights > 0.0, weights < 0.01))}")
                 # print(f"{torch.mean(gaussians.get_scaling[gaussians.get_values.squeeze(-1) != 0])}")
             if iteration == opt.iterations:
                 progress_bar.close()
@@ -412,7 +438,7 @@ def training(
                  iteration not in saving_iterations and
                  iteration not in testing_iterations
             ):
-                if densifies > 0 and densifies % 30 == 0 and error_thresh > 0.00625:
+                if densifies > 0 and densifies % 30 == 0 and error_thresh > 0.0125:
                     error_thresh *= 0.5
                     new_scale *= 0.5
                     print(f"New thresh {error_thresh}, new scale {new_scale}")
@@ -426,8 +452,8 @@ def training(
                 gaussians.densify_and_prune(
                     opt.densify_grad_threshold,
                     min_weight,
-                    new_scale,
-                    # torch.mean(gaussians.get_scaling) / 6.0,
+                    # new_scale,
+                    torch.mean(gaussians.get_scaling) / 6.0,
                     # current_samples[np.logical_and(current_samples == -1, gt != -1)],
                     # gt_cells.ravel()[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)].reshape(-1, 1)
                     current_samples[loss_idx],
@@ -499,7 +525,7 @@ if __name__ == "__main__":
     parser.add_argument("--min_weight", type=float, default=0.005)
     parser.add_argument("--detect_anomaly", action="store_true", default=False)
     parser.add_argument(
-        "--test_iterations", nargs="+", type=int, default=[1]
+        "--test_iterations", nargs="+", type=int, default=[]
     )
     # parser.add_argument(
     #     "--test_iterations", nargs="+", type=int, default=[1] + [i * 1000 for i in range(32)]
@@ -508,7 +534,7 @@ if __name__ == "__main__":
     #     "--save_iterations", nargs="+", type=int, default=[1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 48_000, 64_000]
     # )
     parser.add_argument(
-        "--save_iterations", nargs="+", type=int, default=[16000, 32_000]
+        "--save_iterations", nargs="+", type=int, default=[]
     )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--log_to_file", action="store_true")
