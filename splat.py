@@ -38,8 +38,6 @@ def clean_and_process_ply(in_path, colormaps, constant_opacity, use_weight):
     valid_mask = ~(np.isnan(x) | np.isnan(y) | np.isnan(z) | np.isnan(value) |
                    np.isinf(x) | np.isinf(y) | np.isinf(z))
 
-    print(np.count_nonzero(np.isneginf(value)))
-
     cleaned_data = vertex_data[valid_mask]
     print(f"Cleaned vertices: {len(cleaned_data)} / Original vertices: {len(vertex_data)}")
     value = cleaned_data["value"]
@@ -48,7 +46,7 @@ def clean_and_process_ply(in_path, colormaps, constant_opacity, use_weight):
     cleaned_data['value'] = sigmoid(cleaned_data['value'].astype(np.float64)).astype(cleaned_data['value'].dtype)
     print(f"Max value: {np.max(cleaned_data['value'])}, min: {np.min(cleaned_data['value'])}, average: {np.mean(cleaned_data['value'])} ")
     cleaned_data['weight'] = sigmoid(cleaned_data['weight'].astype(np.float64)).astype(cleaned_data['weight'].dtype)
-    print(f"Max value: {np.max(cleaned_data['weight'])}, min: {np.min(cleaned_data['weight'])}, average: {np.mean(cleaned_data['weight'])} ")
+    print(f"Max weight: {np.max(cleaned_data['weight'])}, min: {np.min(cleaned_data['weight'])}, average: {np.mean(cleaned_data['weight'])} ")
     inverse_sigmoid_opacity = inverse_sigmoid(np.full(cleaned_data.shape, constant_opacity))
 
     for cmap_name in colormaps:
@@ -71,7 +69,9 @@ def clean_and_process_ply(in_path, colormaps, constant_opacity, use_weight):
         new_data['f_dc_0'] = f_dc_0
         new_data['f_dc_1'] = f_dc_1
         new_data['f_dc_2'] = f_dc_2
-        new_data['opacity'] = inverse_sigmoid(sigmoid(value) * 0.01)
+        # new_data['opacity'] = inverse_sigmoid(sigmoid(value) * 0.01)
+        new_data['opacity'] = inverse_sigmoid_opacity
+
 
         vertex_element = PlyElement.describe(new_data, 'vertex')
         os.makedirs('output', exist_ok=True)
