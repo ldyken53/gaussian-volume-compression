@@ -1,4 +1,3 @@
-
 from diff_gaussian_rasterization import (
     GaussianRasterizationSettings,
     GaussianRasterizer,
@@ -69,6 +68,34 @@ def render(
     out = {
         "cells": out_cells,
         "weights": out_weights
+    }
+
+    return out
+
+
+def intersect(
+    pc: GaussianModel,
+    debug = False
+):
+    """
+    Compute Gaussian intersections (differentiable).
+
+    """
+
+    means3D = pc.get_xyz
+    scales = pc.get_scaling
+    rotations = pc.get_rotation
+
+    intersections, intersection_weight = _rasterizer.intersect(
+        means3D=means3D,
+        scales=scales,
+        rotations=rotations,
+        debug=debug
+    )
+
+    out = {
+        "intersections": intersections,
+        "intersection_weight": intersection_weight
     }
 
     return out
