@@ -20,9 +20,11 @@ import torch.nn.functional as F
 
 class GaussianModel:
     def setup_functions(self):
-        def build_covariance_from_scaling_rotation(scaling, scaling_modifier, rotation):
+        def build_covariance_from_scaling_rotation(scaling, scaling_modifier, rotation, stripped=True):
             L = build_scaling_rotation(scaling_modifier * scaling, rotation)
             actual_covariance = L @ L.transpose(1, 2)
+            if not stripped:
+                return actual_covariance
             symm = strip_symmetric(actual_covariance)
             return symm
 
@@ -129,9 +131,9 @@ class GaussianModel:
     def get_values(self):
         return self.values_activation(self._values)
 
-    def get_covariance(self, scaling_modifier=1):
+    def get_covariance(self, scaling_modifier=1, stripped=True):
         return self.covariance_activation(
-            self.get_scaling, scaling_modifier, self._rotation
+            self.get_scaling, scaling_modifier, self._rotation, stripped
         )
 
     def create_from_pcd(
@@ -669,6 +671,12 @@ class GaussianModel:
         self.densify_in_empty(empty_points, empty_values, new_scale)
 
         prune_mask = (self.get_weight < min_weight).squeeze()
+
+        # scales = self.get_scaling  # (N, 3)
+        # max_axis_scale = torch.min(scales, dim=1).values  # (N,)
+        # prune_mask_scale = max_axis_scale < 0.000001
+        # prune_mask = torch.logical_or(prune_mask, prune_mask_scale)
+
         # print(f"Number of Gaussians pruned: {torch.count_nonzero(prune_mask)}")
         self.prune_points(prune_mask)
 
