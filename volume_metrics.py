@@ -186,17 +186,19 @@ def training(
         )
     else:
         idx = np.random.choice(gaussians.mesh.n_points, size=(100000), replace=True)
-        nx, ny, nz = gaussians.mesh.dimensions
-        ox, oy, oz = gaussians.mesh.origin
-        sx, sy, sz = gaussians.mesh.spacing
-        nxny = nx * ny
-        k, r = np.divmod(idx, nxny)
-        j, i = np.divmod(r, nx)
-        x = ox + i * sx
-        y = oy + j * sy
-        z = oz + k * sz
-        # mesh_samples = gaussians.mesh.points[idx]
-        mesh_samples = np.stack((x, y, z), axis=-1)
+        if struct:
+            nx, ny, nz = gaussians.mesh.dimensions
+            ox, oy, oz = gaussians.mesh.origin
+            sx, sy, sz = gaussians.mesh.spacing
+            nxny = nx * ny
+            k, r = np.divmod(idx, nxny)
+            j, i = np.divmod(r, nx)
+            x = ox + i * sx
+            y = oy + j * sy
+            z = oz + k * sz
+            mesh_samples = np.stack((x, y, z), axis=-1)
+        else:
+            mesh_samples = gaussians.mesh.points[idx]
         gt_cells = gaussians.mesh.point_data[gaussians.mesh.array_names[0]][idx]
         build_bvh(
             torch.tensor(mesh_samples, dtype=torch.float, device="cuda")
