@@ -27,6 +27,7 @@ def render(
     cell_count=100,
     bg=-1.0,
     scaling_modifier=1.0,
+    debug=False
 ):
     """
     Render the scene.
@@ -39,7 +40,7 @@ def render(
         cell_count=cell_count,
         bg=bg,
         scale_modifier=scaling_modifier,
-        debug=pipe.debug,
+        debug=pipe.debug if not debug else True,
     )
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)

@@ -66,12 +66,12 @@ def training(
     ema_lfp_for_log = 0.0
     ema_lfn_for_log = 0.0
     ema_lpsnr_for_log = 0.0
-    error_thresh = 0.05
+    error_thresh = 0.01
     new_scale = 0.006 # 4 * 100^3 cell?
     densifies = 0
 
     # Make ground truth
-    cell_count = 64
+    cell_count = 128
     spacing = [
         (gaussians.maxes[0] - gaussians.mins[0]) / (cell_count - 1),
         (gaussians.maxes[1] - gaussians.mins[1]) / (cell_count - 1),
@@ -87,7 +87,7 @@ def training(
     samples_tf = np.flip(rot, axis=2)
     samples_tf_flat = samples_tf.reshape(-1, 3)
     start = time.time()
-    num_jitters = 1000
+    num_jitters = 500
     big_samples = np.tile(samples_tf_flat, (num_jitters, 1))
     big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
     big_jitter *= np.array(spacing)[None, :]
@@ -133,7 +133,7 @@ def training(
     first_iter += 1
     done = 0
     for iteration in range(first_iter, opt.iterations + 1):
-
+        deb = False
         iter_start.record()
 
         jit_idx = 0
@@ -153,11 +153,15 @@ def training(
         if (iteration - 1) == debug_from:
             pipe.debug = True
 
+        if iteration % 1000 == 0:
+            deb = True
+
         render_pkg = render(
             gaussians,
             pipe,
             jitter_cuda,
-            cell_count
+            cell_count,
+            deb
         )
         cells, weights, visibility_filter, radii = (
             render_pkg["cells"],
@@ -167,12 +171,24 @@ def training(
         )
         l1_lv = l1_loss(cells, gt)
         # TODO: FIX FP AND FN FOR CHANGING CELL COUNTS
-        k = 10  # Adjust this to control decay rate
-        fn_mask = (gt != -1)
+        k = 600  # Adjust this to control decay rate
+        fn_mask = torch.logical_and(gt != -1, weights < 0.1)
         if fn_mask.any():
-            false_negative = 10 * torch.exp(-k * weights[fn_mask]).mean()
+            false_negative = torch.exp(-k * weights[fn_mask])
+            # false_negative = torch.exp(-k * torch.clamp(weights[fn_mask] - 0.01, 0.0))
+            # false_negative = torch.clamp(0.015 - weights[fn_mask], min=0) * l1_lv.detach()
+            mean_mask = (false_negative > 0.0)
+            if mean_mask.any():
+                false_negative = false_negative[mean_mask].mean()
+            else:
+                false_negative = torch.tensor(0., device="cuda")
         else:
             false_negative = torch.tensor(0., device="cuda")
+        overlap_mask = torch.logical_and(gt != -1, weights > 1.0)
+        if overlap_mask.any():
+            overlap_loss = (torch.exp(weights[overlap_mask] - 1) - 1).mean()
+        else:
+            overlap_loss = torch.tensor(0., device="cuda")
         mask = torch.logical_and(gt < 0, weights > 0)
         if mask.any():
             false_positive = (2 * (1 - torch.exp(-k * weights[mask]))).mean()
@@ -184,7 +200,7 @@ def training(
         #     false_positive = torch.relu(min_allowed_scale - gaussians.get_scaling[mask]).mean()
         # else:
         #     false_positive = torch.tensor(0., device="cuda")
-        loss = l1_lv + false_negative
+        loss = l1_lv + false_negative + 0.0000 * overlap_loss
         # false_positive = l1_loss(weights[gt == -1 ], gt_weights[gt == -1])
         # loss = l1_lv + false_negative
         loss.backward()
@@ -192,7 +208,7 @@ def training(
         iter_end.record()
 
         with torch.no_grad():
-            recon_mask = torch.logical_and(weights.ravel() > 0, gt.ravel() != -1)
+            recon_mask = (gt.ravel() != -1)
             # recon_mask = gt.ravel() != -2
             if iteration not in saving_iterations and iteration not in testing_iterations and iteration >= opt.densify_from_iter:
                 loss_idx = torch.logical_and(
@@ -253,6 +269,8 @@ def training(
                 mean_weight = torch.mean(gaussians.get_weight)
                 print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr2: {psnr2}, mean weight: {torch.mean(weights)}")
                 print(f"Gaussian weight: {mean_weight}, gaussian scale: {torch.mean(gaussians.get_scaling)}, scale var: {torch.std(gaussians.get_scaling)}")
+                print(f"False negative: {torch.count_nonzero(torch.logical_and(cells == -1, gt != -1))}, false positive: {torch.count_nonzero(torch.logical_and(cells != -1, gt == -1))}")
+                print(f"Overlaps: {torch.count_nonzero(torch.logical_and(gt != -1, weights > 1.0))}, overloss: {overlap_loss.item()}")
                 # print(f"Loss samples: {loss_samples.shape}")
                 x = cells * weights
                 low = (x) / (weights + mean_weight)
@@ -289,7 +307,7 @@ def training(
                 iteration not in testing_iterations
                 # and gaussians.get_values.shape[0] < (1/(4096 * 48)) * 246415360
             ):
-                if densifies > 0 and densifies % 30 == 0 and error_thresh > 0.00625:
+                if densifies > 0 and densifies % 20 == 0 and error_thresh > 0.0625:
                     error_thresh *= 0.5
                     new_scale *= 0.5
                     print(f"New thresh {error_thresh}, new scale {new_scale}")
@@ -386,8 +404,11 @@ if __name__ == "__main__":
     parser.add_argument("--min_weight", type=float, default=0.005)
     parser.add_argument("--detect_anomaly", action="store_true", default=False)
     parser.add_argument("--is_scaled", action="store_true")
+    # parser.add_argument(
+    #     "--test_iterations", nargs="+", type=int, default=[i * 1000 for i in range(20)]
+    # )
     parser.add_argument(
-        "--test_iterations", nargs="+", type=int, default=[i * 1000 for i in range(20)]
+        "--test_iterations", nargs="+", type=int, default=[]
     )
     # parser.add_argument(
     #     "--save_iterations", nargs="+", type=int, default=[1, 16, 32, 64, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
