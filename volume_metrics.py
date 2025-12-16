@@ -33,7 +33,7 @@ def training(
 ):
     
     gaussians = GaussianModel()
-    scene = Scene(dataset, gaussians, load_iteration=-1)
+    scene = Scene(dataset, gaussians, load_iteration=-1, normalized=True)
     # Make ground truth
     cell_count = 200
     spacing = [
@@ -103,10 +103,13 @@ def training(
     print(f"false positive percent: {torch.count_nonzero(torch.logical_and(cells != -1, gt == -1)) / cell_count ** 3}")
     mse2 = torch.mean((cells[torch.logical_and(gt != -1, cells != -1)] - gt[torch.logical_and(gt != -1, cells != -1)]) ** 2)
     psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
+    mse3 = torch.mean((gt) ** 2)
+    psnr3 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse3 + 1e-8)
     print(f"L1 loss: {l1_l.item()}")
     print(f"L2 loss: {mse}")
     print(f"PSNR: {psnr}")
     print(f"PSNR without false positives/negatives: {psnr2}")
+    print(f"PSNR of ground truth: {psnr3}")
     tensor_to_vtk(cells.detach().cpu().numpy(), f"test.vtk", spacing)
 
 if __name__ == "__main__":
