@@ -172,7 +172,7 @@ def training(
         l1_lv = l1_loss(cells, gt)
         # TODO: FIX FP AND FN FOR CHANGING CELL COUNTS
         k = 600  # Adjust this to control decay rate
-        fn_mask = torch.logical_and(gt != -1, weights < 0.1)
+        fn_mask = torch.logical_and(gt != -1, weights < 0.03)
         if fn_mask.any():
             false_negative = torch.exp(-k * weights[fn_mask])
             # false_negative = torch.exp(-k * torch.clamp(weights[fn_mask] - 0.01, 0.0))
@@ -307,10 +307,10 @@ def training(
                 iteration not in testing_iterations
                 # and gaussians.get_values.shape[0] < (1/(4096 * 48)) * 246415360
             ):
-                if densifies > 0 and densifies % 20 == 0 and error_thresh > 0.0625:
-                    error_thresh *= 0.5
-                    new_scale *= 0.5
-                    print(f"New thresh {error_thresh}, new scale {new_scale}")
+                # if densifies > 0 and densifies % 10 == 0 and error_thresh > 0.05:
+                #     error_thresh *= 0.5
+                #     new_scale *= 0.5
+                #     print(f"New thresh {error_thresh}, new scale {new_scale}")
                 cpu_cells = cells.cpu().numpy()
                 # print(f"False negative: {np.count_nonzero(np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1))}, false positive: {np.count_nonzero(np.logical_and(cpu_cells.ravel() != -1, gt_cells.ravel() == -1))}")
                 gaussians.densify_and_prune(
