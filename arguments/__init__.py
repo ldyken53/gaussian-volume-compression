@@ -99,8 +99,8 @@ class OptimizationParams(ParamGroup):
         self.densification_interval = 100
         self.weight_reset_interval = 3000
         self.densify_from_iter = 500
-        self.densify_until_iter = 8_000
-        self.prune_until_iter = 8_000
+        self.densify_until_iter = 12_000
+        self.prune_until_iter = 12_000
         self.densify_grad_threshold = 0.0002
         self.depth_l1_weight_init = 1.0
         self.depth_l1_weight_final = 0.01
