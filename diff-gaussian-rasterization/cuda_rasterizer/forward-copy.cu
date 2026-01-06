@@ -171,11 +171,8 @@ __global__ void preprocessCUDA(int P,
     volumes[idx] = static_cast<float>(block_dims.x * block_dims.y * block_dims.z);
 }
 
-// Main rasterization method. Collaboratively works on one tile per
-// block, each thread treats one pixel. Alternates between fetching 
-// and rasterizing data.
 template <uint32_t CHANNELS>
-__global__ void __launch_bounds__(BLOCK_X * BLOCK_Y * BLOCK_Z)
+__global__ void __launch_bounds__(256)
 renderCUDA(
 	const uint2* __restrict__ ranges,
 	const uint32_t* __restrict__ point_list,
@@ -193,99 +190,77 @@ renderCUDA(
 	uint32_t* __restrict__ n_contrib,
 	float* __restrict__ out_cells)
 {
-	// Identify current tile and associated min/max pixel range.
-	auto block = cg::this_thread_block();
-	uint3 cell_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y, block.group_index().z * BLOCK_Z};
-	uint3 cell_max = { min(cell_min.x + BLOCK_X, num_cells.x), min(cell_min.y + BLOCK_Y , num_cells.y), min(cell_min.z + BLOCK_Z , num_cells.z) };
-	uint3 cell = { cell_min.x + block.thread_index().x, cell_min.y + block.thread_index().y, cell_min.z + block.thread_index().z  };
-	uint32_t cell_id = cell.z * num_cells.x * num_cells.y + cell.y * num_cells.x + cell.x;
-	float3 cell_pos =  make_float3(
-		static_cast<float>(cell.x) * cell_size.x + volume_mins.x + jitter[cell_id * 3], 
-		static_cast<float>(cell.y) * cell_size.y + volume_mins.y + jitter[cell_id * 3 + 1], 
-		static_cast<float>(cell.z) * cell_size.z + volume_mins.z + jitter[cell_id * 3 + 2]
+	// Compute global cell index from 1D grid of threads
+	uint32_t cell_id = blockIdx.x * 256 + threadIdx.x;
+	uint32_t total_cells = num_cells.x * num_cells.y * num_cells.z;
+	
+	if (cell_id >= total_cells)
+		return;
+
+	// Convert linear cell_id to 3D coordinates
+	uint32_t cell_x = cell_id % num_cells.x;
+	uint32_t cell_y = (cell_id / num_cells.x) % num_cells.y;
+	uint32_t cell_z = cell_id / (num_cells.x * num_cells.y);
+
+	float3 cell_pos = make_float3(
+		static_cast<float>(cell_x) * cell_size.x + volume_mins.x + jitter[cell_id * 3], 
+		static_cast<float>(cell_y) * cell_size.y + volume_mins.y + jitter[cell_id * 3 + 1], 
+		static_cast<float>(cell_z) * cell_size.z + volume_mins.z + jitter[cell_id * 3 + 2]
 	);
 
-	// Check if this thread is associated with a valid cell or outside.
-	bool inside = cell.x < num_cells.x && cell.y < num_cells.y && cell.z < num_cells.z;
-	// Done threads can help with fetching, but don't rasterize
-	bool done = !inside;
+	// Compute tile index for range lookup
+	uint32_t tile_x = cell_x / BLOCK_X;
+	uint32_t tile_y = cell_y / BLOCK_Y;
+	uint32_t tile_z = cell_z / BLOCK_Z;
+	uint32_t tile_id = tile_z * grid.y * grid.x + tile_y * grid.x + tile_x;
+	
+	uint2 range = ranges[tile_id];
 
-	// Load start/end range of IDs to process in bit sorted list.
-	uint2 range = ranges[block.group_index().z * grid.y * grid.x + block.group_index().y * grid.x + block.group_index().x];
-	const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
-	int toDo = range.y - range.x;
-
-	// Allocate storage for batches of collectively fetched data.
-	__shared__ int collected_id[BLOCK_SIZE];
-	__shared__ float3 collected_means[BLOCK_SIZE];
-	__shared__ float collected_values[BLOCK_SIZE];
-	__shared__ float collected_weights[BLOCK_SIZE];
-	__shared__ float collected_conic[BLOCK_SIZE * 6];
-
-	// Initialize helper variables
+	// Initialize accumulators
 	float accumulated_weight = 0;
 	float accumulated_value = 0;
 	uint32_t n_contributor = 0;
 
-	// Iterate over batches until all done or range is complete
-	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
+	// Each thread independently iterates over its range
+	for (uint32_t idx = range.x; idx < range.y; idx++)
 	{
-		// End if entire block votes that it is done rasterizing
-		int num_done = __syncthreads_count(done);
-		if (num_done == BLOCK_SIZE)
-			break;
-
-		// Collectively fetch per-Gaussian data from global to shared
-		int progress = i * BLOCK_SIZE + block.thread_rank();
-		if (range.x + progress < range.y) // TODO: try using float4s, align to 128 bit for bank conflict
-		{
-			int coll_id = point_list[range.x + progress];
-			collected_id[block.thread_rank()] = coll_id;
-			collected_means[block.thread_rank()] = means[coll_id];
-			collected_values[block.thread_rank()] = values[coll_id];
-			collected_weights[block.thread_rank()] = weights[coll_id];
-			for (int k = 0; k < 6; k++)
-                collected_conic[block.thread_rank() * 6 + k] = conic[coll_id * 6 + k];
-		}
-		block.sync();
-
-		// Iterate over current batch
-		for (int j = 0; !done && j < min(BLOCK_SIZE, toDo); j++)
-		{
-			// Keep track of current position in range
-			n_contributor++;
-
-			float3 d = make_float3(cell_pos.x - collected_means[j].x, cell_pos.y - collected_means[j].y, cell_pos.z - collected_means[j].z);
-			float quad_form = (
-				d.x * (collected_conic[j * 6] * d.x + collected_conic[j * 6 + 1] * d.y + collected_conic[j * 6 + 2] * d.z) +
-				d.y * (collected_conic[j * 6 + 1] * d.x + collected_conic[j * 6 + 3] * d.y + collected_conic[j * 6 + 4] * d.z) +
-				d.z * (collected_conic[j * 6 + 2] * d.x + collected_conic[j * 6 + 4] * d.y + collected_conic[j * 6 + 5] * d.z)
-			);
-			float power = -0.5 * quad_form;
-			if (power < -14.0 || power > 0.0) continue;
-			float weight = collected_weights[j] * exp(power);
-
-			accumulated_value += collected_values[j] * weight;
-			accumulated_weight += weight;
-		}
+		n_contributor++;
+		
+		int pt_id = point_list[idx];
+		float3 mean = means[pt_id];
+		
+		float3 d = make_float3(cell_pos.x - mean.x, cell_pos.y - mean.y, cell_pos.z - mean.z);
+		
+		float c0 = conic[pt_id * 6];
+		float c1 = conic[pt_id * 6 + 1];
+		float c2 = conic[pt_id * 6 + 2];
+		float c3 = conic[pt_id * 6 + 3];
+		float c4 = conic[pt_id * 6 + 4];
+		float c5 = conic[pt_id * 6 + 5];
+		
+		float quad_form = (
+			d.x * (c0 * d.x + c1 * d.y + c2 * d.z) +
+			d.y * (c1 * d.x + c3 * d.y + c4 * d.z) +
+			d.z * (c2 * d.x + c4 * d.y + c5 * d.z)
+		);
+		
+		float power = -0.5f * quad_form;
+		if (power < -14.0f || power > 0.0f) continue;
+		
+		float weight = weights[pt_id] * expf(power);
+		accumulated_value += values[pt_id] * weight;
+		accumulated_weight += weight;
 	}
 
-	// All threads that treat valid pixel write out their final
-	// rendering data to the frame and auxiliary buffers.
-	if (inside)
-	{
-		// This both gives a dropoff where we have to have a certain weight to set a value
-		// and prevents numerical issues of dividing by something close to 0
-		if (accumulated_weight > WEIGHT_CUTOFF) {
-			out_cells[cell_id] = accumulated_value / accumulated_weight;
-			accumulated_weights[cell_id] = accumulated_weight;
-			n_contrib[cell_id] = n_contributor;
-
-		} else {
-			out_cells[cell_id] = -1.0;
-			accumulated_weights[cell_id] = 0.0;
-			n_contrib[cell_id] = n_contributor;
-		}
+	// Write output
+	if (accumulated_weight > WEIGHT_CUTOFF) {
+		out_cells[cell_id] = accumulated_value / accumulated_weight;
+		accumulated_weights[cell_id] = accumulated_weight;
+		n_contrib[cell_id] = n_contributor;
+	} else {
+		out_cells[cell_id] = -1.0f;
+		accumulated_weights[cell_id] = 0.0f;
+		n_contrib[cell_id] = n_contributor;
 	}
 }
 
@@ -306,10 +281,13 @@ void FORWARD::render(
 	uint32_t* n_contrib,
 	float* out_cells)
 {
-	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
+	uint32_t total_cells = num_cells.x * num_cells.y * num_cells.z;
+	uint32_t num_blocks = (total_cells + 256 - 1) / 256;
+	
+	renderCUDA<NUM_CHANNELS> <<<num_blocks, 256>>> (
 		ranges,
 		point_list,
-		grid,
+		grid,  // still needed for tile->range lookup
 		volume_mins,
 		num_cells,
 		cell_size,
@@ -323,6 +301,7 @@ void FORWARD::render(
 		n_contrib,
 		out_cells);
 }
+
 
 void FORWARD::preprocess(int P,
 	const float* means3D,

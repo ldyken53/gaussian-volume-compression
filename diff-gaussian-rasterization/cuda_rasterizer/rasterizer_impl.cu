@@ -459,11 +459,15 @@ int CudaRasterizer::Rasterizer::forward(
 			"Sorting", "Memory set", "Tile range identification", "Rendering"
 		};
 		
+		float total = 0.0;
 		for (int i = 0; i < 7; i++) {
 			if (i == 5 && num_intersections == 0) continue; // Skip tile range if no intersections
 			cudaEventElapsedTime(&elapsed_time, events[i*2], events[i*2+1]);
 			std::cout << operation_names[i] << " time: " << elapsed_time << " ms" << std::endl;
+			total += elapsed_time;
 		}
+		std::cout << "Total time: " << total << " ms" << std::endl;
+
 		
 		// Clean up events
 		for (int i = 0; i < 14; i++) {
