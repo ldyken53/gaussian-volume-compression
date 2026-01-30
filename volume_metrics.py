@@ -4,6 +4,7 @@ from random import randint
 import numpy as np
 
 import torch
+from torchmetrics.functional.image import structural_similarity_index_measure
 from tqdm import tqdm
 import pyvista as pv
 
@@ -35,7 +36,7 @@ def training(
     gaussians = GaussianModel()
     scene = Scene(dataset, gaussians, load_iteration=-1, normalized=True)
     # Make ground truth
-    cell_count = 200
+    cell_count = 512
     spacing = [
         (gaussians.maxes[0] - gaussians.mins[0]) / (cell_count - 1),
         (gaussians.maxes[1] - gaussians.mins[1]) / (cell_count - 1),
@@ -48,11 +49,14 @@ def training(
     samples = np.vstack([x.ravel(), y.ravel(), z.ravel()]).T
     samples_3d = samples.reshape(cell_count, cell_count, cell_count, 3)
     rot = np.rot90(samples_3d, k=1, axes=(2,0))
+    print(f"Mean scaling: {torch.mean(gaussians.get_scaling)}")
+    print(f"Mean position: {torch.mean(gaussians.get_xyz, dim=0)}")
 
     samples_tf = np.flip(rot, axis=2)
     samples_tf_flat = samples_tf.reshape(-1, 3)
     jitter = np.random.uniform(-0.5, 0.5, samples_tf_flat.shape)
     jitter *= np.array(spacing)[None, :]
+    jitter = np.zeros_like(jitter)
     samples_tf_flat = np.clip(
         samples_tf_flat + jitter,
         np.array(gaussians.mins),
@@ -62,7 +66,7 @@ def training(
         gaussians.mesh.dimensions,
         gaussians.mesh.origin,
         gaussians.mesh.spacing,
-        gaussians.mesh.point_data['value'],
+        gaussians.mesh.point_data[gaussians.mesh.point_data.keys()[0]],
         samples_tf_flat
     )
     # gt_cells = gpu_sample(
@@ -77,16 +81,16 @@ def training(
     gt_weights[gt_weights != -1] = 1
     gt_weights[gt_weights == -1] = 0
     gt_weights = torch.tensor(gt_weights).cuda()
-    tensor_to_vtk(gt_cells, "test_gt.vtk", spacing)
+    # tensor_to_vtk(gt_cells, "test_gt.vtk", spacing)
     # tensor_to_vtk(gt_weights, "test_gt_weight.vtk", spacing)
 
     pipe.debug = True
     render_pkg = render(
         gaussians,
         pipe,
-        # torch.tensor(np.zeros_like(jitter).ravel(), dtype=torch.float, device="cuda"),
         torch.tensor(jitter.ravel(), dtype=torch.float, device="cuda"),
         cell_count,
+        # scaling_modifier=2.0
     )
     cells, weights, visibility_filter, radii = (
         render_pkg["cells"],
@@ -94,7 +98,7 @@ def training(
         render_pkg["visibility_filter"],
         render_pkg["radii"],
     )
-
+    cells[cells == -1.0] = 0.0
     l1_l = l1_loss(cells, gt)
     mse = torch.mean((cells - gt) ** 2)
     psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
@@ -110,6 +114,15 @@ def training(
     print(f"PSNR: {psnr}")
     print(f"PSNR without false positives/negatives: {psnr2}")
     print(f"PSNR of ground truth: {psnr3}")
+    # cells_5d = cells.unsqueeze(0).unsqueeze(0).float()
+    # gt_5d = gt.unsqueeze(0).unsqueeze(0).float()
+    # ssim = structural_similarity_index_measure(
+    #     cells_5d, gt_5d,
+    #     data_range=1.0,
+    #     kernel_size=(11, 11, 11),
+    #     sigma=(1.5, 1.5, 1.5)
+    # )
+    # print(f"SSIM: {ssim}")
     tensor_to_vtk(cells.detach().cpu().numpy(), f"test.vtk", spacing)
 
 if __name__ == "__main__":

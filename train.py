@@ -66,7 +66,7 @@ def training(
     ema_lfp_for_log = 0.0
     ema_lfn_for_log = 0.0
     ema_lpsnr_for_log = 0.0
-    error_thresh = 0.01
+    error_thresh = 0.05
     new_scale = 0.006 # 4 * 100^3 cell?
     densifies = 0
 
@@ -87,7 +87,7 @@ def training(
     samples_tf = np.flip(rot, axis=2)
     samples_tf_flat = samples_tf.reshape(-1, 3)
     start = time.time()
-    num_jitters = 500
+    num_jitters = 100
     big_samples = np.tile(samples_tf_flat, (num_jitters, 1))
     big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
     big_jitter *= np.array(spacing)[None, :]
@@ -97,6 +97,9 @@ def training(
         np.array(gaussians.mins),
         np.array(gaussians.maxes)
     )
+    # probe = pv.PolyData(big_samples)
+    # sampled = probe.sample(gaussians.mesh)
+    # big_gt = sampled.point_data['value']
     big_gt = gpu_sample(
         gaussians.mesh.dimensions,
         gaussians.mesh.origin,
