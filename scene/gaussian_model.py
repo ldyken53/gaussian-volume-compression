@@ -65,7 +65,7 @@ class GaussianModel:
         self.last_interpolated_xyz = None
         self.should_interpolate = False
         self.mesh = None
-        self.max_scale = 0.03
+        self.max_scale = 0.02
         self.setup_functions()
 
     def _apply_cap(self, s):
@@ -113,7 +113,7 @@ class GaussianModel:
 
     @property
     def get_scaling(self):
-        return self.scaling_activation(self._scaling)
+        return self._apply_cap(self.scaling_activation(self._scaling))
 
     @property
     def get_rotation(self):

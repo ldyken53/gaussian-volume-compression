@@ -47,7 +47,7 @@ void BuildBVH(const torch::Tensor& samples, const bool debug) {
     const int blocks  = (N + threads - 1) / threads;
     buildBoxes<<<blocks, threads>>>(d_boxes, ptr, N);
     cuBQL::BuildConfig cfg;
-    cfg.makeLeafThreshold = 33;
+    cfg.makeLeafThreshold = 257;
     // cfg.maxAllowedLeafSize = 256;
     cuBQL::cuda::radixBuilder(samples_bvh, d_boxes, N, cfg);
     // cuBQL::gpuBuilder(samples_bvh, d_boxes, N, cfg);

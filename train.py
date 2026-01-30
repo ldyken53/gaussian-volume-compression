@@ -70,14 +70,14 @@ def training(
     std = 0
     mean = 0
     avg = 0
-    error_thresh = 0.0125
+    error_thresh = 0.05
     new_scale = 0.1
     densifies = 0
     lossy_frac = 0.0
 
     # Make ground truth
     print("Before cell")
-    cell_count = 64
+    cell_count = 128
     spacing = [
         (gaussians.maxes[0] - gaussians.mins[0]) / (cell_count - 1),
         (gaussians.maxes[1] - gaussians.mins[1]) / (cell_count - 1),
@@ -110,7 +110,7 @@ def training(
             gaussians.mesh.point_data[gaussians.mesh.array_names[0]],
             save_cell
         )
-    num_batches = 1000
+    num_batches = 100
     size = cell_count ** 3
     big_samples = np.tile(save_cell, (num_batches, 1))
     big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
@@ -144,40 +144,6 @@ def training(
 
     # size = 262144
     # start = time.time()
-    # num_batches = 3000
-    # n_voxels_per_dim = int(round(size ** (1/3)))
-    # assert n_voxels_per_dim ** 3 == size, f"size must be a perfect cube, got {size}"
-    # nx, ny, nz = gaussians.mesh.dimensions
-    # ox, oy, oz = gaussians.mesh.origin
-    # sx, sy, sz = gaussians.mesh.spacing
-    # x_max = ox + (nx - 1) * sx
-    # y_max = oy + (ny - 1) * sy
-    # z_max = oz + (nz - 1) * sz
-    # points = gaussians.mesh.points
-    # voxel_i = np.clip(((points[:, 0] - ox) / (x_max - ox) * n_voxels_per_dim).astype(np.int64), 0, n_voxels_per_dim - 1)
-    # voxel_j = np.clip(((points[:, 1] - oy) / (y_max - oy) * n_voxels_per_dim).astype(np.int64), 0, n_voxels_per_dim - 1)
-    # voxel_k = np.clip(((points[:, 2] - oz) / (z_max - oz) * n_voxels_per_dim).astype(np.int64), 0, n_voxels_per_dim - 1)
-    # voxel_id = voxel_i + voxel_j * n_voxels_per_dim + voxel_k * (n_voxels_per_dim ** 2)
-    # sort_indices = np.argsort(voxel_id)
-    # sorted_voxel_ids = voxel_id[sort_indices]
-    # voxel_range = np.arange(size)
-    # voxel_starts = np.searchsorted(sorted_voxel_ids, voxel_range, side='left')
-    # voxel_ends = np.searchsorted(sorted_voxel_ids, voxel_range, side='right')
-    # voxel_counts = voxel_ends - voxel_starts
-    # random_offsets = (np.random.rand(num_batches, size) * voxel_counts[np.newaxis, :]).astype(np.int64)
-    # random_offsets = np.clip(random_offsets, 0, np.maximum(voxel_counts[np.newaxis, :] - 1, 0))
-    # idx = sort_indices[np.clip(voxel_starts[np.newaxis, :] + random_offsets, 0, len(sort_indices) - 1)]
-    # empty_voxels = (voxel_counts == 0)[np.newaxis, :].repeat(num_batches, axis=0)
-    # idx[empty_voxels] = np.random.randint(0, len(points), size=empty_voxels.sum())
-    # mesh_samples = gaussians.mesh.points[idx]
-    # mesh_vals = gaussians.mesh.point_data['value'][idx]
-    # big_gt = mesh_vals.reshape(num_batches, size)
-    # big_samples = mesh_samples.reshape(num_batches, size, 3)
-    # end = time.time()
-    # print(f"Time to sample gt: {end - start}")
-
-    # size = 262144
-    # start = time.time()
     # num_batches = 1000
     # idx = torch.randint(gaussians.mesh.n_points, (num_batches, size))
     # nx, ny, nz = gaussians.mesh.dimensions
@@ -196,41 +162,6 @@ def training(
     # big_samples = mesh_samples.reshape(num_batches, size, 3)
     # end = time.time()
     # print(f"Time to sample gt: {end - start}")
-
-    # start = time.time()
-    # sub = 64                       # edge length of the cubic patch
-    # size = sub ** 3                # = 262 144 points per batch
-    # num_batches = 100
-    # nx, ny, nz = gaussians.mesh.dimensions
-    # ox, oy, oz = gaussians.mesh.origin
-    # sx, sy, sz = gaussians.mesh.spacing
-    # nxny = nx * ny
-    # # 1. random cube origins (x0, y0, z0) for every batch
-    # x0 = torch.randint(0, nx - sub + 1, (num_batches,))
-    # y0 = torch.randint(0, ny - sub + 1, (num_batches,))
-    # z0 = torch.randint(0, nz - sub + 1, (num_batches,))
-    # # 2. 64³ offsets inside one cube, in (k, j, i) order
-    # i = torch.arange(sub)
-    # j = torch.arange(sub)
-    # k = torch.arange(sub)
-    # k, j, i = torch.meshgrid(k, j, i, indexing='ij')        # shape (64,64,64)
-    # cube_offsets = (k * nxny + j * nx + i).reshape(-1)      # (262144,)
-    # # 3. linear indices for every batch
-    # base_idx = z0 * nxny + y0 * nx + x0                     # (num_batches,)
-    # idx = base_idx[:, None] + cube_offsets[None, :]         # (num_batches, size)
-    # # Look-ups exactly as before
-    # mesh_vals = gaussians.mesh.point_data['value'][idx]
-    # big_gt = mesh_vals                                     # already (num_batches, size)
-
-    # # convert back to (x, y, z)
-    # k, r = np.divmod(idx.numpy(), nxny)
-    # j, i = np.divmod(r, nx)
-    # x = ox + i * sx
-    # y = oy + j * sy
-    # z = oz + k * sz
-    # big_samples = np.stack((x, y, z), axis=-1)              # (num_batches, size, 3)
-    # end = time.time()
-    # print(f"Time to sample gt: {end - start:.2f} s")
     
     gt_cells = big_gt[0]
     print(f"Number of invalid samples: {np.count_nonzero(gt_cells == -1)}")
@@ -303,7 +234,7 @@ def training(
         l1_lv = l1_loss(cells[recon_mask], gt[recon_mask])
         # TODO: FIX FP AND FN FOR CHANGING CELL COUNTS
         k = 600  # Adjust this to control decay rate
-        fn_mask = torch.logical_and(gt != -1, weights > 0.0)
+        fn_mask = torch.logical_and(gt != -1, weights < 0.03)
         t = 0.01
         delta = 0.002 
         # fn_mask = (gt != -1)
@@ -331,30 +262,23 @@ def training(
 
         with torch.no_grad():
             # Compute the lossy samples where new Gaussians are needed
-            # recon_mask = torch.logical_and(cells != -1, gt != -1)
-            recon_mask = (gt != -1)
-            if iteration not in saving_iterations and iteration not in testing_iterations:
+            recon_mask = torch.logical_and(cells != -1, gt != -1)
+            # recon_mask = (gt != -1)
+            if iteration >= opt.densify_from_iter and iteration not in saving_iterations and iteration not in testing_iterations:
                 med = torch.median(torch.abs(cells - gt))
                 stdn, meann = torch.std_mean(torch.abs(cells - gt))
                 mean = (mean * avg + meann) / (avg + 1)
                 avg += 1
                 loss_idx = torch.logical_and(
-                # torch.logical_or(
-                    # torch.logical_or(
-                    #     torch.logical_and(gt == -1, weights > 0.07),
-                    #     torch.logical_and(gt != -1, torch.logical_and(
-                    #         weights > 0,
-                    #         weights < 0.07
-                    #         )
-                    # ),
-                    # torch.logical_and(
-                        torch.abs(cells - gt) > error_thresh,
-                        recon_mask
-                    # )
+                    torch.abs(cells - gt) > error_thresh,
+                    recon_mask
                 ).cpu().numpy()
                 lossy_frac = 0.9 * lossy_frac + 0.1 * np.count_nonzero(loss_idx) / size
                 # loss_samples = current_samples[loss_idx]
                 # loss_gt = gt_cells[loss_idx]
+                # if loss_idx.sum() < 1000:
+                #     error_thresh *= 0.9
+                #     print(f"Lossy samples low, new error thresh: {error_thresh}")
 
             # Logging
             if log_to_file and iteration % 20 == 0:
@@ -391,7 +315,7 @@ def training(
             ema_lfp_for_log = 0.1 * false_positive + 0.9 * ema_lfp_for_log
             ema_lfn_for_log = 0.1 * false_negative + 0.9 * ema_lfn_for_log
             ema_lpsnr_for_log = 0.1 * psnr + 0.9 * ema_lpsnr_for_log
-            if iteration % 500 == 0:
+            if iteration % 250 == 0:
                 progress_bar.set_postfix(
                     {
                         "Loss": f"{ema_loss_for_log:.{5}f}",
@@ -401,15 +325,17 @@ def training(
                         "PSNR": f"{ema_lpsnr_for_log:.{5}f}"
                     }
                 )
-                progress_bar.update(500)
+                progress_bar.update(250)
                 # print(f"0 cells: {torch.count_nonzero(gt == 0).cpu().numpy()}, -1: {torch.count_nonzero(gt == -1).cpu().numpy()}")
                 # print(f"0 cells: {torch.count_nonzero(cells == 0).cpu().numpy()}, -1: {torch.count_nonzero(cells == -1).cpu().numpy()}")
                 print(f"False negative: {torch.count_nonzero(torch.logical_and(cells== -1, gt != -1))}, false positive: {torch.count_nonzero(torch.logical_and(cells != -1, gt == -1))}")
                 print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr2: {psnr2}, weight: {torch.mean(weights)}")
+                print(f"False negative mask: {fn_mask.sum()}")
+                print(loss_samples.shape)
                 # print(f"Overlap loss: {overlap_loss} mean {torch.mean(intersection_weights)} max: {torch.max(intersection_weights)} median: {torch.median(intersection_weights)} intersections: {torch.mean(intersections)}, max: {torch.max(intersections)}")
                 # top5 = torch.topk(intersection_weights, 5)
                 # print(f"Top 5: {top5.values}, weight: {gaussians.get_weight[top5.indices]}, scale: {gaussians.get_scaling[top5.indices]}")
-                print(f"scale: {torch.mean(gaussians.get_scaling)}, median: {torch.median(gaussians.get_scaling)}, std: {torch.std(gaussians.get_scaling)}")
+                # print(f"scale: {torch.mean(gaussians.get_scaling)}, median: {torch.median(gaussians.get_scaling)}, std: {torch.std(gaussians.get_scaling)}")
                 # print(f"Weights below 0.01: {torch.count_nonzero(torch.logical_and(weights > 0.0, weights < 0.01))}")
                 # print(f"{torch.mean(gaussians.get_scaling[gaussians.get_values.squeeze(-1) != 0])}")
             if iteration == opt.iterations:
@@ -431,17 +357,17 @@ def training(
                     "time": float(saving_iterations.index(iteration))
                 })
 
-            # # Densification
+            # Densification
             if (iteration <= opt.densify_until_iter and
                 iteration >= opt.densify_from_iter and
                 iteration % opt.densification_interval == 0 and
                  iteration not in saving_iterations and
                  iteration not in testing_iterations
             ):
-                if densifies > 0 and densifies % 30 == 0 and error_thresh > 0.0125:
-                    error_thresh *= 0.5
-                    new_scale *= 0.5
-                    print(f"New thresh {error_thresh}, new scale {new_scale}")
+                # if densifies > 0 and densifies % 30 == 0 and error_thresh > 0.0125:
+                #     error_thresh *= 0.5
+                #     new_scale *= 0.5
+                #     print(f"New thresh {error_thresh}, new scale {new_scale}")
 
                 # cpu_cells = cells.cpu().numpy()
                 # print(f"False negative: {np.count_nonzero(np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1))}, false positive: {np.count_nonzero(np.logical_and(cpu_cells.ravel() != -1, gt_cells.ravel() == -1))}")
