@@ -171,7 +171,7 @@ class GaussianModel:
 
 
         print(
-            f"Number of points at initialisation : {fused_point_cloud.shape[0]}"
+            f"Number of points at initialisation: {fused_point_cloud.shape[0]}"
         )
 
         dist2 = torch.clamp_min(

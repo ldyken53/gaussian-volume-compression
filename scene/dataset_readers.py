@@ -3,7 +3,7 @@ import pyvista as pv
 import torch
 
 from scene.gaussian_model import BasicPointCloud
-from gpu_mesh_sampling import gpu_sample
+# from gpu_mesh_sampling import gpu_sample
 
 def readData(path, fraction, normalized):
     mesh = pv.read(path)
@@ -28,16 +28,15 @@ def readData(path, fraction, normalized):
     # points_sampled = mesh.points[indices]
     # values_sampled = values[indices]
     # print("dropout")
-
+    scalar_name = mesh.point_data.keys()[0]
 
     if not normalized:
         # Rescale the values to the range [0, 1]
-        values = mesh.get_array("value").reshape(-1, 1)
+        values = mesh.get_array(scalar_name).reshape(-1, 1)
         values_min = values.min()
         values_max = values.max()
         values = (values - values_min) / (values_max - values_min)
-        mesh.get_array("value")[:] = values.ravel()
-
+        mesh.get_array(scalar_name)[:] = values.ravel()
         # Scale mesh to the unit cube
         xmin, xmax, ymin, ymax, zmin, zmax = mesh.bounds
         global_min = min(xmin, ymin, zmin)
@@ -69,7 +68,7 @@ def readData(path, fraction, normalized):
         ], dim=1)
         print("Points gathered")
 
-        vals = mesh.point_data["value"][mask].reshape(-1, 1)  
+        vals = mesh.point_data[scalar_name][mask].reshape(-1, 1)  
         print("Mesh dropout")
         return mesh, BasicPointCloud(points=pts_sampled, values=vals)
 
