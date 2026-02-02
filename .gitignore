@@ -66,5 +66,6 @@ diff_gaussian_rasterization/dist/
 diff_gaussian_rasterization/.vscode/
 diff_gaussian_rasterization/third_party/cuBQL/
 test*.vtk
+*.npy
 _skbuild/
 out_vtk/
