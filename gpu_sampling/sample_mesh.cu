@@ -3,6 +3,7 @@
 #include <iostream>
 #include <numeric>
 #include <cstring>
+#include <cstdint>
 
 #include <viskores/cont/Initialize.h>
 #include <viskores/cont/DataSetBuilderUniform.h>
@@ -22,11 +23,11 @@
 
 namespace py = pybind11;
 
-py::array_t<double> sample_mesh(
+py::array sample_mesh(
     py::array_t<int64_t> dims_arr,
     py::array_t<float>   origin_arr,
     py::array_t<float>   spacing_arr,
-    py::array_t<double>  val_arr,
+    py::array            val_arr,
     py::array_t<float>   samp_arr)
 {
   // 0) Pick CUDA device for timing async kernels
@@ -62,11 +63,18 @@ py::array_t<double> sample_mesh(
   auto s_ptr = static_cast<float*>(sp_buf.ptr);
 
   // values
-  auto val_buf = val_arr.request();
-  auto v_ptr   = static_cast<double*>(val_buf.ptr);
   std::size_t totalPts = static_cast<std::size_t>(nx) * ny * nz;
-  std::vector<viskores::Float64> val_vec(v_ptr, v_ptr + totalPts);
-  auto valHandle = viskores::cont::make_ArrayHandleMove(std::move(val_vec));
+  auto val_c = py::array::ensure(val_arr, py::array::c_style);
+  if (!val_c) {
+    throw std::runtime_error("Values array must be C-contiguous.");
+  }
+  if (static_cast<std::size_t>(val_c.size()) != totalPts) {
+    throw std::runtime_error("Values array size does not match dims.");
+  }
+  const auto dtype = val_c.dtype();
+
+  enum class ValueDtype { Float64, Float32, UInt16, UInt8 };
+  ValueDtype val_dtype;
 
   // build uniform DataSet
   viskores::Id3 dims3{nx, ny, nz};
@@ -75,7 +83,36 @@ py::array_t<double> sample_mesh(
   auto inData = viskores::cont::DataSetBuilderUniform::Create(
     dims3, origin, spacing, "coords"
   );
-  inData.AddPointField("value", valHandle);
+
+  if (dtype.is(py::dtype::of<double>())) {
+    val_dtype = ValueDtype::Float64;
+    const auto *v_ptr = static_cast<const double*>(val_c.data());
+    std::vector<viskores::Float64> val_vec(v_ptr, v_ptr + totalPts);
+    auto valHandle = viskores::cont::make_ArrayHandleMove(std::move(val_vec));
+    inData.AddPointField("value", valHandle);
+  } else if (dtype.is(py::dtype::of<float>())) {
+    val_dtype = ValueDtype::Float32;
+    const auto *v_ptr = static_cast<const float*>(val_c.data());
+    std::vector<viskores::Float32> val_vec(v_ptr, v_ptr + totalPts);
+    auto valHandle = viskores::cont::make_ArrayHandleMove(std::move(val_vec));
+    inData.AddPointField("value", valHandle);
+  } else if (dtype.is(py::dtype::of<std::uint16_t>())) {
+    val_dtype = ValueDtype::UInt16;
+    const auto *v_ptr = static_cast<const std::uint16_t*>(val_c.data());
+    std::vector<viskores::UInt16> val_vec(v_ptr, v_ptr + totalPts);
+    auto valHandle = viskores::cont::make_ArrayHandleMove(std::move(val_vec));
+    inData.AddPointField("value", valHandle);
+  } else if (dtype.is(py::dtype::of<std::uint8_t>())) {
+    val_dtype = ValueDtype::UInt8;
+    const auto *v_ptr = static_cast<const std::uint8_t*>(val_c.data());
+    std::vector<viskores::UInt8> val_vec(v_ptr, v_ptr + totalPts);
+    auto valHandle = viskores::cont::make_ArrayHandleMove(std::move(val_vec));
+    inData.AddPointField("value", valHandle);
+  } else {
+    throw std::runtime_error(
+      "Unsupported values dtype. Expected float64, float32, uint16, or uint8."
+    );
+  }
 
   timer.Stop();
   std::cout << "ReadDataSet: " 
@@ -138,16 +175,61 @@ py::array_t<double> sample_mesh(
   timer.Start();
 
   const auto array = sampled.GetPointField("value").GetData();
-  auto concrete = array.AsArrayHandle<viskores::cont::ArrayHandle<viskores::Float64>>();
-  concrete.SyncControlArray();
-  auto readPortal = concrete.ReadPortal();
+  py::array result;
 
-  std::size_t n = readPortal.GetNumberOfValues();
-  py::array_t<double> result(n);
-  auto out_ptr = result.mutable_data();
-  for (std::size_t i = 0; i < n; ++i)
-  {
-    out_ptr[i] = readPortal.Get(i);
+  switch (val_dtype) {
+    case ValueDtype::Float64: {
+      auto concrete = array.AsArrayHandle<viskores::cont::ArrayHandle<viskores::Float64>>();
+      concrete.SyncControlArray();
+      auto readPortal = concrete.ReadPortal();
+      std::size_t n = readPortal.GetNumberOfValues();
+      py::array_t<double> out(n);
+      auto out_ptr = out.mutable_data();
+      for (std::size_t i = 0; i < n; ++i) {
+        out_ptr[i] = readPortal.Get(i);
+      }
+      result = std::move(out);
+      break;
+    }
+    case ValueDtype::Float32: {
+      auto concrete = array.AsArrayHandle<viskores::cont::ArrayHandle<viskores::Float32>>();
+      concrete.SyncControlArray();
+      auto readPortal = concrete.ReadPortal();
+      std::size_t n = readPortal.GetNumberOfValues();
+      py::array_t<float> out(n);
+      auto out_ptr = out.mutable_data();
+      for (std::size_t i = 0; i < n; ++i) {
+        out_ptr[i] = readPortal.Get(i);
+      }
+      result = std::move(out);
+      break;
+    }
+    case ValueDtype::UInt16: {
+      auto concrete = array.AsArrayHandle<viskores::cont::ArrayHandle<viskores::UInt16>>();
+      concrete.SyncControlArray();
+      auto readPortal = concrete.ReadPortal();
+      std::size_t n = readPortal.GetNumberOfValues();
+      py::array_t<std::uint16_t> out(n);
+      auto out_ptr = out.mutable_data();
+      for (std::size_t i = 0; i < n; ++i) {
+        out_ptr[i] = static_cast<std::uint16_t>(readPortal.Get(i));
+      }
+      result = std::move(out);
+      break;
+    }
+    case ValueDtype::UInt8: {
+      auto concrete = array.AsArrayHandle<viskores::cont::ArrayHandle<viskores::UInt8>>();
+      concrete.SyncControlArray();
+      auto readPortal = concrete.ReadPortal();
+      std::size_t n = readPortal.GetNumberOfValues();
+      py::array_t<std::uint8_t> out(n);
+      auto out_ptr = out.mutable_data();
+      for (std::size_t i = 0; i < n; ++i) {
+        out_ptr[i] = static_cast<std::uint8_t>(readPortal.Get(i));
+      }
+      result = std::move(out);
+      break;
+    }
   }
 
   timer.Stop();
