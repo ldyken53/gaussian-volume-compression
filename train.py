@@ -42,7 +42,8 @@ def training(
     log_to_file,
     fraction,
     min_weight,
-    is_scaled
+    is_scaled,
+    precompute_samples
 ):
     vtk_files = []
     vtk_files_loss = []
@@ -93,58 +94,64 @@ def training(
     samples_tf = np.flip(rot, axis=2)
     save_cell = samples_tf.reshape(-1, 3)
     print("Save cell made")
-    if struct:
-        save_gt = gpu_sample(
-            gaussians.mesh.dimensions,
-            gaussians.mesh.origin,
-            gaussians.mesh.spacing,
-            gaussians.mesh.point_data['value'],
-            save_cell
-        )
+    if precompute_samples:
+        big_gt = np.load("big_gt.npy")
+        num_batches = big_gt.shape[0]
+        size = big_gt.shape[1]
+        big_samples = np.load("big_samples.npy")
     else:
-        save_gt = gpu_sampleu(
-            gaussians.mesh.points, 
-            gaussians.mesh.cell_connectivity.astype(np.int64),
-            gaussians.mesh.celltypes.astype(np.int64),
-            gaussians.mesh.offset.astype(np.int64),
-            gaussians.mesh.point_data[gaussians.mesh.array_names[0]],
-            save_cell
+        # if struct:
+        #     save_gt = gpu_sample(
+        #         gaussians.mesh.dimensions,
+        #         gaussians.mesh.origin,
+        #         gaussians.mesh.spacing,
+        #         gaussians.mesh.point_data['value'],
+        #         save_cell
+        #     )
+        # else:
+        #     save_gt = gpu_sampleu(
+        #         gaussians.mesh.points, 
+        #         gaussians.mesh.cell_connectivity.astype(np.int64),
+        #         gaussians.mesh.celltypes.astype(np.int64),
+        #         gaussians.mesh.offset.astype(np.int64),
+        #         gaussians.mesh.point_data[gaussians.mesh.array_names[0]],
+        #         save_cell
+        #     )
+        num_batches = 100
+        size = cell_count ** 3
+        big_samples = np.tile(save_cell, (num_batches, 1))
+        big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
+        big_jitter *= np.array(spacing)[None, :]
+        big_jitter[: cell_count**3, :] = 0
+        big_samples = np.clip(
+            big_samples + big_jitter, 
+            np.array(gaussians.mins), 
+            np.array(gaussians.maxes)
         )
-    num_batches = 100
-    size = cell_count ** 3
-    big_samples = np.tile(save_cell, (num_batches, 1))
-    big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
-    big_jitter *= np.array(spacing)[None, :]
-    big_jitter[: cell_count**3, :] = 0
-    big_samples = np.clip(
-        big_samples + big_jitter, 
-        np.array(gaussians.mins), 
-        np.array(gaussians.maxes)
-    )
-    if struct:
-        big_gt = gpu_sample(
-            gaussians.mesh.dimensions,
-            gaussians.mesh.origin,
-            gaussians.mesh.spacing,
-            gaussians.mesh.point_data['value'],
-            big_samples
-        )
-    else:
-        big_gt = gpu_sampleu(
-            gaussians.mesh.points, 
-            gaussians.mesh.cell_connectivity.astype(np.int64),
-            gaussians.mesh.celltypes.astype(np.int64),
-            gaussians.mesh.offset.astype(np.int64),
-            gaussians.mesh.point_data[gaussians.mesh.array_names[0]],
-            big_samples
-        )
-    big_gt = big_gt.reshape(num_batches, cell_count**3)
-    big_samples = big_samples.reshape(num_batches, cell_count**3, 3)
-    end = time.time()
+        if struct:
+            big_gt = gpu_sample(
+                gaussians.mesh.dimensions,
+                gaussians.mesh.origin,
+                gaussians.mesh.spacing,
+                gaussians.mesh.point_data['value'],
+                big_samples
+            )
+        else:
+            big_gt = gpu_sampleu(
+                gaussians.mesh.points, 
+                gaussians.mesh.cell_connectivity.astype(np.int64),
+                gaussians.mesh.celltypes.astype(np.int64),
+                gaussians.mesh.offset.astype(np.int64),
+                gaussians.mesh.point_data[gaussians.mesh.array_names[0]],
+                big_samples
+            )
+        big_gt = big_gt.reshape(num_batches, cell_count**3)
+        big_samples = big_samples.reshape(num_batches, cell_count**3, 3)
+        end = time.time()
 
-    # size = 262144
+    # size = cell_count ** 3
     # start = time.time()
-    # num_batches = 1000
+    # num_batches = 100
     # idx = torch.randint(gaussians.mesh.n_points, (num_batches, size))
     # nx, ny, nz = gaussians.mesh.dimensions
     # ox, oy, oz = gaussians.mesh.origin
@@ -264,7 +271,7 @@ def training(
             # Compute the lossy samples where new Gaussians are needed
             recon_mask = torch.logical_and(cells != -1, gt != -1)
             # recon_mask = (gt != -1)
-            if iteration >= opt.densify_from_iter and iteration not in saving_iterations and iteration not in testing_iterations:
+            if iteration not in saving_iterations and iteration not in testing_iterations:
                 med = torch.median(torch.abs(cells - gt))
                 stdn, meann = torch.std_mean(torch.abs(cells - gt))
                 mean = (mean * avg + meann) / (avg + 1)
@@ -330,8 +337,8 @@ def training(
                 # print(f"0 cells: {torch.count_nonzero(cells == 0).cpu().numpy()}, -1: {torch.count_nonzero(cells == -1).cpu().numpy()}")
                 print(f"False negative: {torch.count_nonzero(torch.logical_and(cells== -1, gt != -1))}, false positive: {torch.count_nonzero(torch.logical_and(cells != -1, gt == -1))}")
                 print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr2: {psnr2}, weight: {torch.mean(weights)}")
-                print(f"False negative mask: {fn_mask.sum()}")
-                print(loss_samples.shape)
+                # print(f"False negative mask: {fn_mask.sum()}")
+                # print(f"loss_samples.shape: {loss_samples.shape[0]}")
                 # print(f"Overlap loss: {overlap_loss} mean {torch.mean(intersection_weights)} max: {torch.max(intersection_weights)} median: {torch.median(intersection_weights)} intersections: {torch.mean(intersections)}, max: {torch.max(intersections)}")
                 # top5 = torch.topk(intersection_weights, 5)
                 # print(f"Top 5: {top5.values}, weight: {gaussians.get_weight[top5.indices]}, scale: {gaussians.get_scaling[top5.indices]}")
@@ -465,6 +472,7 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--log_to_file", action="store_true")
     parser.add_argument("--is_scaled", action="store_true")
+    parser.add_argument("--precompute_samples", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default=None)
     args = parser.parse_args(sys.argv[1:])
@@ -488,7 +496,8 @@ if __name__ == "__main__":
         args.log_to_file,
         args.fraction,
         args.min_weight,
-        args.is_scaled
+        args.is_scaled,
+        args.precompute_samples
     )
 
     # All done
