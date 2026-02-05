@@ -602,11 +602,8 @@ class GaussianModel:
         )
 
     def densify_in_empty(self, empty_points, empty_values, new_scale, new_weight):
-        # Extract points that satisfy the gradient condition
-        new_points = torch.tensor(empty_points).float().cuda()
-
         # Concatenate existing and new points for distance computation
-        all_points = torch.cat([self.get_xyz, new_points], dim=0)
+        all_points = torch.cat([self.get_xyz, empty_points], dim=0)
         all_dist2 = torch.clamp_min(
             distCUDA2(all_points) * 0.1,
             0.0000001,
@@ -630,11 +627,11 @@ class GaussianModel:
         )
 
         new_values = self.inverse_value_activation(
-            torch.tensor(empty_values, dtype=torch.float, device="cuda")
+            empty_values
         )
 
         self.densification_postfix(
-            new_points,
+            empty_points,
             new_weights,
             new_scaling,
             new_rotation,
