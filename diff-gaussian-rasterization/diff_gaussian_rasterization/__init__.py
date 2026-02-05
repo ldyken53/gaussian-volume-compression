@@ -182,9 +182,13 @@ class GaussianRasterizer(nn.Module):
         rotations=None,
         values=None,
         weights=None,
-        jitter=None
+        jitter=None,
+        debug=False
     ):
-        raster_settings = self.raster_settings
+        if debug:
+            raster_settings = self.raster_settings._replace(debug=debug)
+        else:
+            raster_settings = self.raster_settings
 
         if (scales is None or rotations is None):
             raise Exception(

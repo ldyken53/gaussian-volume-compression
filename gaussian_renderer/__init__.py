@@ -59,7 +59,8 @@ def render(
         rotations=rotations,
         values=values,
         weights=weights,
-        jitter=jitter
+        jitter=jitter,
+        debug=debug
     )
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
