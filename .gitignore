@@ -60,6 +60,7 @@ vtk
 point_clouds
 3dgs
 raw
+*.npy
 diff_gaussian_rasterization/build/
 diff_gaussian_rasterization/diff_gaussian_rasterization.egg-info/
 diff_gaussian_rasterization/dist/
