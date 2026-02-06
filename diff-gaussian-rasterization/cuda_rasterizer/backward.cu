@@ -158,15 +158,12 @@ renderCUDA(
 	const uint3 num_cells,
 	const float3 cell_size,
 	const float* __restrict__ jitter,
-	const bool* __restrict__ clamped,
 	const float3* __restrict__ means3D,
 	const float* __restrict__ values,
 	const float* __restrict__ weights,
 	const float* __restrict__ out_cells,
-	const float* __restrict__ volumes,
 	const float* __restrict__ conic,
 	const float* __restrict__ accumulated_weights,
-	const uint32_t* __restrict__ n_contrib,
 	const float* __restrict__ dL_dcells,
 	const float* __restrict__ dL_dcell_weights,
 	float3* __restrict__ dL_dmeans,
@@ -177,7 +174,7 @@ renderCUDA(
 {
 	// We rasterize again. Compute necessary block info.
 	auto block = cg::this_thread_block();
-	auto tile = cg::tiled_partition<BLOCK_SIZE>(block);
+	auto tile = cg::tiled_partition<32>(block);
 	uint3 cell_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y, block.group_index().z * BLOCK_Z};
 	uint3 cell_max = { min(cell_min.x + BLOCK_X, num_cells.x), min(cell_min.y + BLOCK_Y , num_cells.y), min(cell_min.z + BLOCK_Z , num_cells.z) };
 	uint3 cell = { cell_min.x + block.thread_index().x, cell_min.y + block.thread_index().y, cell_min.z + block.thread_index().z  };
@@ -201,19 +198,19 @@ renderCUDA(
 	// Allocate storage for batches of collectively fetched data.
 	__shared__ int collected_id[BLOCK_SIZE];
 	__shared__ float3 collected_means[BLOCK_SIZE];
-	__shared__ float collected_volumes[BLOCK_SIZE];
 	__shared__ float collected_values[BLOCK_SIZE];
 	__shared__ float collected_weights[BLOCK_SIZE];
-	__shared__ float collected_clamped[BLOCK_SIZE];
 	__shared__ float collected_conic[BLOCK_SIZE * 6];
 
 	float acc_weight = 0.0;
 	float dL_doutv = 0.0;
 	float dL_doutw = 0.0;
+	float out_cell_val = 0.0f;
 	if (inside) {
 		acc_weight = accumulated_weights[cell_id];
 		dL_doutv = dL_dcells[cell_id];
 		dL_doutw = dL_dcell_weights[cell_id];
+		out_cell_val = out_cells[cell_id] / acc_weight;
 	} 
 	
 	// Iterate over batches
@@ -226,10 +223,8 @@ renderCUDA(
 			int coll_id = point_list[range.x + progress];
 			collected_id[block.thread_rank()] = coll_id;
 			collected_means[block.thread_rank()] = means3D[coll_id];
-			collected_volumes[block.thread_rank()] = volumes[coll_id];
 			collected_values[block.thread_rank()] = values[coll_id];
 			collected_weights[block.thread_rank()] = weights[coll_id];
-			collected_clamped[block.thread_rank()] = clamped[coll_id];
 			for (int k = 0; k < 6; k++)
 				collected_conic[block.thread_rank() * 6 + k] = conic[coll_id * 6 + k];
 		}
@@ -261,14 +256,14 @@ renderCUDA(
 				);
 				float power = -0.5 * quad_form;
 				if (power >= -14.0 && power <= 0.0) {
-					float e = exp(power);
+					float e = __expf(power);
 					float weight = collected_weights[j] * e;
 
 					// Compute gradients
 					dL_dvalue = dL_doutv * weight / acc_weight;
 
 					// Gradient for weight terms
-					float dLv_dweight = dL_doutv * (collected_values[j] / acc_weight - out_cells[cell_id] / acc_weight);
+					float dLv_dweight = dL_doutv * (collected_values[j] / acc_weight - out_cell_val / acc_weight);
 					float dLv_dw = dLv_dweight * e;
 
 					float dweight_dquad = -0.5f * weight;
@@ -298,11 +293,7 @@ renderCUDA(
 				}
 			}
 			
-			// If clamped don't add gradient (Pytorch rules)
-			if (!collected_clamped[j]) {
-				float block_dL_dvalue = cg::reduce(tile, dL_dvalue, cg::plus<float>());
-				if (block.thread_rank() == 0) { atomicAdd(&dL_dvalues[point_idx], block_dL_dvalue); }
-			}
+			float block_dL_dvalue = cg::reduce(tile, dL_dvalue, cg::plus<float>());
 			float block_dL_dw = cg::reduce(tile, dL_dw, cg::plus<float>());
 			float block_dL_dmean_x = cg::reduce(tile, dL_dmean_x, cg::plus<float>());
 			float block_dL_dmean_y = cg::reduce(tile, dL_dmean_y, cg::plus<float>());
@@ -314,7 +305,8 @@ renderCUDA(
 			float block_dL_dyz = cg::reduce(tile, dL_dyz, cg::plus<float>());
 			float block_dL_dzz = cg::reduce(tile, dL_dzz, cg::plus<float>());
 
-			if (block.thread_rank() == 0) {
+			if (tile.thread_rank() == 0) {
+				atomicAdd(&dL_dvalues[point_idx], block_dL_dvalue);
 				atomicAdd(&dL_dweights[point_idx], block_dL_dw);
 				
 				atomicAdd(&dL_dmeans[point_idx].x, block_dL_dmean_x);
@@ -390,15 +382,12 @@ void BACKWARD::render(
 		num_cells,
 		cell_size,
 		jitter,
-		clamped,
 		means3D,
 		values,
 		weights,
 		out_cells,
-		volumes,
 		conic,
 		accumulated_weights,
-		n_contrib,
 		dL_dcells,
 		dL_dcell_weights,
 		dL_dmean3D,

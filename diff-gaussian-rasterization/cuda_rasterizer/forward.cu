@@ -187,7 +187,6 @@ renderCUDA(
 	const float3* __restrict__ means,
 	const float* __restrict__ values,
 	const float* __restrict__ weights,
-	const float* __restrict__ volumes,
 	const float* __restrict__ conic,
 	float* __restrict__ accumulated_weights,
 	uint32_t* __restrict__ n_contrib,
@@ -216,7 +215,6 @@ renderCUDA(
 	int toDo = range.y - range.x;
 
 	// Allocate storage for batches of collectively fetched data.
-	__shared__ int collected_id[BLOCK_SIZE];
 	__shared__ float3 collected_means[BLOCK_SIZE];
 	__shared__ float collected_values[BLOCK_SIZE];
 	__shared__ float collected_weights[BLOCK_SIZE];
@@ -240,7 +238,6 @@ renderCUDA(
 		if (range.x + progress < range.y) // TODO: try using float4s, align to 128 bit for bank conflict
 		{
 			int coll_id = point_list[range.x + progress];
-			collected_id[block.thread_rank()] = coll_id;
 			collected_means[block.thread_rank()] = means[coll_id];
 			collected_values[block.thread_rank()] = values[coll_id];
 			collected_weights[block.thread_rank()] = weights[coll_id];
@@ -253,7 +250,7 @@ renderCUDA(
 		for (int j = 0; !done && j < min(BLOCK_SIZE, toDo); j++)
 		{
 			// Keep track of current position in range
-			n_contributor++;
+			// n_contributor++;
 
 			float3 d = make_float3(cell_pos.x - collected_means[j].x, cell_pos.y - collected_means[j].y, cell_pos.z - collected_means[j].z);
 			float quad_form = (
@@ -263,7 +260,20 @@ renderCUDA(
 			);
 			float power = -0.5 * quad_form;
 			if (power < -14.0 || power > 0.0) continue;
-			float weight = collected_weights[j] * exp(power);
+			float weight = collected_weights[j] * __expf(power);
+			// float dx = cell_pos.x - collected_means[j].x;
+			// float dy = cell_pos.y - collected_means[j].y;
+			// float dz = cell_pos.z - collected_means[j].z;
+			// int base = j * 6;
+			// float t;
+			// t = collected_conic[base] * dx + collected_conic[base + 1] * dy + collected_conic[base + 2] * dz;
+			// float qf = dx * t;
+			// t = collected_conic[base + 1] * dx + collected_conic[base + 3] * dy + collected_conic[base + 4] * dz;
+			// qf += dy * t;
+			// t = collected_conic[base + 2] * dx + collected_conic[base + 4] * dy + collected_conic[base + 5] * dz;
+			// qf += dz * t;
+			// if (qf > 28.0f || qf < 0.0f) continue;  // equivalent to power check
+			// float weight = collected_weights[j] * __expf(-0.5f * qf);
 
 			accumulated_value += collected_values[j] * weight;
 			accumulated_weight += weight;
@@ -279,12 +289,12 @@ renderCUDA(
 		if (accumulated_weight > WEIGHT_CUTOFF) {
 			out_cells[cell_id] = accumulated_value / accumulated_weight;
 			accumulated_weights[cell_id] = accumulated_weight;
-			n_contrib[cell_id] = n_contributor;
+			n_contrib[cell_id] = 0;
 
 		} else {
 			out_cells[cell_id] = -1.0;
 			accumulated_weights[cell_id] = 0.0;
-			n_contrib[cell_id] = n_contributor;
+			n_contrib[cell_id] = 0;
 		}
 	}
 }
@@ -317,7 +327,6 @@ void FORWARD::render(
 		means,
 		values,
 		weights,
-		volumes,
 		conic,
 		accumulated_weights,
 		n_contrib,

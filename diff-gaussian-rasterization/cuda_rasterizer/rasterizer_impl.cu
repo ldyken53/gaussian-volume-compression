@@ -285,6 +285,7 @@ int CudaRasterizer::Rasterizer::forward(
 	CHECK_CUDA(cudaMemcpy(&num_intersections, geomState.point_offsets + P - 1, sizeof(int), cudaMemcpyDeviceToHost), debug);
 	if (debug) {
 		std::cout << "Total Num Intersections: " << num_intersections << "\n";
+		std::cout << "BLOCK_SIZE compiled as: " << BLOCK_SIZE << std::endl;
 		// int* host_blocks_touched = new int[P];
 		// CHECK_CUDA(cudaMemcpy(host_blocks_touched,
 		// 					geomState.blocks_touched,
