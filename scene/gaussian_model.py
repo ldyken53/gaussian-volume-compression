@@ -292,7 +292,7 @@ class GaussianModel:
         optimizable_tensors = self.replace_tensor_to_optimizer(weights_new, "weight")
         self._weight = optimizable_tensors["weight"]
 
-    def load_ply(self, path, mesh, use_train_test_exp=False):
+    def load_ply(self, path, mesh=None, use_train_test_exp=False):
         plydata = PlyData.read(path)
         print(
             f"Number of points at initialisation : {plydata.elements[0]['x'].shape[0]}"
@@ -305,7 +305,12 @@ class GaussianModel:
             ),
             axis=1,
         )
-        xmin, xmax, ymin, ymax, zmin, zmax = mesh.bounds
+        if mesh:
+            xmin, xmax, ymin, ymax, zmin, zmax = mesh.bounds
+        else:
+            xmin, xmax = 0, 1
+            ymin, ymax = 0, 1
+            zmin, zmax = 0, 1
         # self.mins = [
         #     xmin - 0.01,
         #     ymin - 0.01,

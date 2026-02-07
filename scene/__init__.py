@@ -22,7 +22,7 @@ class Scene:
         self.loaded_iter = None
         self.gaussians = gaussians
 
-        if load_iteration:
+        if load_iteration is not None:
             if load_iteration == -1:
                 self.loaded_iter = searchForMaxIteration(
                     os.path.join(self.model_path, "point_cloud")
@@ -31,12 +31,14 @@ class Scene:
                 self.loaded_iter = load_iteration
             print("Loading trained model at iteration {}".format(self.loaded_iter))
 
-        if os.path.exists(args.source_path) and args.source_path.lower().endswith(('.vtk', '.vtu')):
-            mesh, pcd = readData(args.source_path, fraction, normalized)
-        else:
-            assert False, "Could not recognize scene type!"
+        mesh = None
+        if self.loaded_iter is None or load_iteration == -1:
+            if os.path.exists(args.source_path) and args.source_path.lower().endswith(('.vtk', '.vtu')):
+                mesh, pcd = readData(args.source_path, fraction, normalized)
+            else:
+                assert False, "Could not recognize scene type!"
 
-        if self.loaded_iter:
+        if self.loaded_iter is not None:
             self.gaussians.load_ply(
                 os.path.join(
                     self.model_path,

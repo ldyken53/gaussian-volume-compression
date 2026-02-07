@@ -52,7 +52,12 @@ def training(
     first_iter = 0
     prepare_output(dataset)
     gaussians = GaussianModel()
-    scene = Scene(dataset, gaussians, normalized=is_scaled, fraction=fraction)
+    scene = Scene(
+        dataset, 
+        gaussians, 
+        load_iteration=0 if args.precomputed_samples else None, 
+        normalized=is_scaled, 
+        fraction=fraction)
     gaussians.training_setup(opt)
     scene.save(0)
     if checkpoint:
@@ -284,7 +289,7 @@ def training(
                 progress_bar.update(500)
                 print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr2: {psnr2}")
                 # print(f"Gaussian weight: {mean_weight}, gaussian scale: {torch.mean(gaussians.get_scaling)}, scale var: {torch.std(gaussians.get_scaling)}")
-                # print(f"False negative: {torch.count_nonzero(torch.logical_and(cells == -1, gt != -1))}, false positive: {torch.count_nonzero(torch.logical_and(cells != -1, gt == -1))}")
+                print(f"False negative: {torch.count_nonzero(torch.logical_and(cells == -1, gt != -1))}, false positive: {torch.count_nonzero(torch.logical_and(cells != -1, gt == -1))}")
                 # print(f"Overlaps: {torch.count_nonzero(torch.logical_and(gt != -1, weights > 1.0))}, overloss: {overlap_loss.item()}")
                 # print(f"Loss samples: {loss_samples.shape}")
                 # x = cells * weights
