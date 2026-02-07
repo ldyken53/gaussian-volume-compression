@@ -210,8 +210,10 @@ renderCUDA(
 		acc_weight = accumulated_weights[cell_id];
 		dL_doutv = dL_dcells[cell_id];
 		dL_doutw = dL_dcell_weights[cell_id];
-		out_cell_val = out_cells[cell_id] / acc_weight;
+		out_cell_val = out_cells[cell_id];
 	} 
+	float inv_acc_weight = (inside && acc_weight > WEIGHT_CUTOFF) ? 1.0f / acc_weight : 0.0f;
+	float dL_doutv_over_accw = dL_doutv * inv_acc_weight;
 	
 	// Iterate over batches
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
@@ -233,6 +235,7 @@ renderCUDA(
 		// Process current batch
 		for (int j = 0; j < min(BLOCK_SIZE, toDo); j++)
 		{
+			bool has_contribution = false;
 			float dL_dvalue = 0.0;
 			float dL_dw = 0.0;
 			float dL_dmean_x = 0.0;
@@ -256,14 +259,15 @@ renderCUDA(
 				);
 				float power = -0.5 * quad_form;
 				if (power >= -14.0 && power <= 0.0) {
+					has_contribution = true;
 					float e = __expf(power);
 					float weight = collected_weights[j] * e;
 
 					// Compute gradients
-					dL_dvalue = dL_doutv * weight / acc_weight;
+					dL_dvalue = dL_doutv_over_accw * weight;
 
 					// Gradient for weight terms
-					float dLv_dweight = dL_doutv * (collected_values[j] / acc_weight - out_cell_val / acc_weight);
+					float dLv_dweight = dL_doutv_over_accw * (collected_values[j] - out_cell_val);
 					float dLv_dw = dLv_dweight * e;
 
 					float dweight_dquad = -0.5f * weight;
@@ -292,6 +296,8 @@ renderCUDA(
 					dL_dzz = dL_dquad * d.z * d.z;
 				}
 			}
+			if (__ballot_sync(0xFFFFFFFF, has_contribution) == 0)
+				continue; // skip all reductions and atomics for this point
 			
 			float block_dL_dvalue = cg::reduce(tile, dL_dvalue, cg::plus<float>());
 			float block_dL_dw = cg::reduce(tile, dL_dw, cg::plus<float>());
