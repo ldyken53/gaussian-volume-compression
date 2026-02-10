@@ -43,3 +43,11 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const torch::Tensor& binningBuffer,
 	const torch::Tensor& imageBuffer,
 	const bool debug);
+
+std::tuple<torch::Tensor, torch::Tensor> 
+ComputeRelocationCUDA(
+	torch::Tensor& opacity_old,
+	torch::Tensor& scale_old,
+	torch::Tensor& N,
+	torch::Tensor& binoms,
+	const int n_max);

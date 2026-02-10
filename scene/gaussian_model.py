@@ -7,6 +7,7 @@ from utils.general_utils import (
     inverse_sigmoid,
     strip_symmetric,
 )
+from utils.reloc_utils import compute_relocation_cuda
 import os
 
 import numpy as np
@@ -392,6 +393,118 @@ class GaussianModel:
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
 
+    def replace_tensors_to_optimizer(self, inds=None):
+        tensors_dict = {
+            "xyz": self._xyz,
+            "scaling" : self._scaling,
+            "rotation" : self._rotation,
+            "weight": self._weight,
+            "value": self._values
+            }
+
+        optimizable_tensors = {}
+        for group in self.optimizer.param_groups:
+            assert len(group["params"]) == 1
+            tensor = tensors_dict[group["name"]]
+            stored_state = self.optimizer.state.get(group['params'][0], None)
+            
+            if inds is not None:
+                stored_state["exp_avg"][inds] = 0
+                stored_state["exp_avg_sq"][inds] = 0
+            else:
+                stored_state["exp_avg"] = torch.zeros_like(tensor)
+                stored_state["exp_avg_sq"] = torch.zeros_like(tensor)
+
+            del self.optimizer.state[group['params'][0]]
+            group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
+            self.optimizer.state[group['params'][0]] = stored_state
+
+            optimizable_tensors[group["name"]] = group["params"][0]
+
+        self._xyz = optimizable_tensors["xyz"]
+        self._weight = optimizable_tensors["weight"]
+        self._scaling = optimizable_tensors["scaling"]
+        self._rotation = optimizable_tensors["rotation"]
+        self._values = optimizable_tensors["value"] 
+
+        return optimizable_tensors
+
+    def _update_params(self, idxs, ratio):
+        new_weight, new_scaling = compute_relocation_cuda(
+            opacity_old=self.get_weight[idxs, 0],
+            scale_old=self.get_scaling[idxs],
+            N=ratio[idxs, 0] + 1
+        )
+        new_weight = torch.clamp(new_weight.unsqueeze(-1), max=1.0 - torch.finfo(torch.float32).eps, min=0.005)
+        new_weight = self.inverse_weight_activation(new_weight)
+        new_scaling = self.inverse_scaling_activation(new_scaling.reshape(-1, 3))
+
+        return self._xyz[idxs], new_weight, new_scaling, self._rotation[idxs], self._values[idxs]
+
+    def _sample_alives(self, probs, num, alive_indices=None):
+        probs = probs / (probs.sum() + torch.finfo(torch.float32).eps)
+        sampled_idxs = torch.multinomial(probs, num, replacement=True)
+        if alive_indices is not None:
+            sampled_idxs = alive_indices[sampled_idxs]
+        ratio = torch.bincount(sampled_idxs).unsqueeze(-1)
+        return sampled_idxs, ratio
+
+    def relocate_gs(self, dead_mask=None, cells=None, gt=None):
+
+        if dead_mask.sum() == 0:
+            return
+
+        alive_mask = ~dead_mask 
+        dead_indices = dead_mask.nonzero(as_tuple=True)[0]
+        alive_indices = alive_mask.nonzero(as_tuple=True)[0]
+
+        if alive_indices.shape[0] <= 0:
+            return
+
+        # sample from alive ones based on weight
+        probs = (self.get_weight[alive_indices, 0]) 
+        reinit_idx, ratio = self._sample_alives(alive_indices=alive_indices, probs=probs, num=dead_indices.shape[0])
+
+        (
+            self._xyz[dead_indices], 
+            self._weight[dead_indices],
+            self._scaling[dead_indices],
+            self._rotation[dead_indices],
+            self._values[dead_indices] 
+        ) = self._update_params(reinit_idx, ratio=ratio)
+        
+        self._weight[reinit_idx] = self._weight[dead_indices]
+        self._scaling[reinit_idx] = self._scaling[dead_indices]
+
+        self.replace_tensors_to_optimizer(inds=reinit_idx) 
+
+    def add_new_gs(self, cap_max):
+        current_num_points = self._weight.shape[0]
+        target_num = min(cap_max, int(1.1 * current_num_points))
+        num_gs = max(0, target_num - current_num_points)
+
+        if num_gs <= 0:
+            return 0
+
+        probs = self.get_weight.squeeze(-1) 
+        add_idx, ratio = self._sample_alives(probs=probs, num=num_gs)
+
+        (
+            new_xyz, 
+            new_weight,
+            new_scaling,
+            new_rotation,
+            new_values
+        ) = self._update_params(add_idx, ratio=ratio)
+
+        self._weight[add_idx] = new_weight
+        self._scaling[add_idx] = new_scaling
+
+        self.densification_postfix(new_xyz, new_weight, new_scaling, new_rotation, new_values, reset_params=False)
+        self.replace_tensors_to_optimizer(inds=add_idx)
+
+        return num_gs
+
     def _prune_optimizer(self, mask):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
@@ -474,7 +587,8 @@ class GaussianModel:
         new_weights,
         new_scaling,
         new_rotation,
-        new_values
+        new_values,
+        reset_params=True
     ):
         d = {
             "xyz": new_xyz,
@@ -535,9 +649,10 @@ class GaussianModel:
         self._rotation = optimizable_tensors["rotation"]
         self._values = optimizable_tensors["value"]
 
-        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        if reset_params:
+            self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+            self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+            self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
