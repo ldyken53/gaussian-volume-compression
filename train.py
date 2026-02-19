@@ -47,6 +47,7 @@ def training(
     precomputed_samples,
     use_mcmc
 ):
+    print(use_mcmc)
     vtk_files = []
     vtk_files_loss = []
     log_data = []
@@ -73,7 +74,7 @@ def training(
     ema_lfp_for_log = 0.0
     ema_lfn_for_log = 0.0
     ema_lpsnr_for_log = 0.0
-    error_thresh = 0.2
+    error_thresh = 0.05
     new_scale = 0.006 # 4 * 100^3 cell?
     densifies = 0
 
@@ -150,6 +151,7 @@ def training(
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     done = 0
+    n = False
     for iteration in range(first_iter, opt.iterations + 1):
         deb = False
         iter_start.record()
@@ -169,7 +171,7 @@ def training(
         if (iteration - 1) == debug_from:
             pipe.debug = True
 
-        if iteration % 1000 == 0:
+        if iteration % 2000 == 0:
             deb = True
 
         render_pkg = render(
@@ -189,16 +191,16 @@ def training(
         l1_lv = torch.mean((cells - gt) ** 2)
         # TODO: FIX FP AND FN FOR CHANGING CELL COUNTS
         k = 600  # Adjust this to control decay rate
-        # fn_mask = torch.logical_and(gt != -1, weights < 0.015)
+        # fn_mask = torch.logical_and(gt != -1, weights < 0.02)
         # false_negative = torch.exp(-k * weights[fn_mask])
         # false_negative = false_negative[false_negative > 0].mean()
             # false_negative = torch.exp(-k * torch.clamp(weights[fn_mask] - 0.01, 0.0))
         fn_mask = torch.logical_and(gt != -1, weights > 0.0)
-        fn_vals = torch.clamp(0.011 - weights[fn_mask], min=0)
+        fn_vals = torch.clamp(0.011 - weights, min=0)
         false_negative = args.fn_reg * fn_vals.sum() / ((fn_vals > 0).sum().float() + 1e-8)    
         # overlap_mask = torch.logical_and(gt != -1, weights > 1.0)
         # if overlap_mask.any():
-        #     overlap_loss = (torch.exp(weights[overlap_mask] - 1) - 1).mean()
+            # overlap_loss = (torch.exp(weights[overlap_mask] - 1) - 1).mean()
         # else:
         #     overlap_loss = torch.tensor(0., device="cuda")
         # mask = torch.logical_and(gt < 0, weights > 0)
@@ -214,6 +216,8 @@ def training(
         #     false_positive = torch.tensor(0., device="cuda")
         # loss = l1_lv + false_negative + 0.0000 * overlap_loss
         loss = l1_lv + false_negative
+        # if gaussians.get_values.shape[0] > args.cap_max:
+        #     n = True
         if use_mcmc:
             loss = loss + args.weight_reg * torch.abs(gaussians.get_weight).mean()
             loss = loss + args.scale_reg * torch.abs(gaussians.get_scaling).mean()
@@ -222,19 +226,6 @@ def training(
         iter_end.record()
 
         with torch.no_grad():
-            recon_mask = (gt.ravel() != -1)
-            # recon_mask = gt.ravel() != -2
-            if (
-                iteration not in saving_iterations and 
-                iteration not in testing_iterations and 
-                iteration >= opt.densify_from_iter and
-                iteration % opt.densification_interval == 0
-            ):
-                loss_idx = torch.logical_and(
-                    torch.abs(cells.ravel() - gt.ravel()) > error_thresh,
-                    recon_mask
-                )
-
             # Logging
             if log_to_file and iteration % 100 == 0:
                 mse = torch.mean((cells - gt) ** 2)
@@ -253,7 +244,7 @@ def training(
                 })
             
             # Progress bar
-            if iteration % 500 == 0:
+            if iteration % 1000 == 0:
                 ema_loss_for_log = 0.9 * loss.item() + 0.1 * ema_loss_for_log
                 mse = torch.mean((cells - gt) ** 2)
                 psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
@@ -272,13 +263,14 @@ def training(
                         # "PSNR": f"{ema_lpsnr_for_log:.{5}f}"
                     }
                 )
-                progress_bar.update(500)
+                progress_bar.update(1000)
                 print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr2: {psnr2}, l_v: {l1_lv.item()}")
+                # print(f"Num Gaussians: {gaussians.get_values.shape[0]}")
                 print(f"w= {(args.weight_reg * torch.abs(gaussians.get_weight).mean()).item()}, {(args.scale_reg * torch.abs(gaussians.get_scaling).mean()).item()}, fn: {false_negative}")
-                # print(f"Gaussian weight: {torch.mean(gaussians.get_weight)}, gaussian scale: {torch.mean(gaussians.get_scaling)}, scale var: {torch.std(gaussians.get_scaling)}")
+                print(f"Gaussian weight: {torch.mean(gaussians.get_weight)}, gaussian scale: {torch.mean(gaussians.get_scaling)}, scale var: {torch.std(gaussians.get_scaling)}")
                 print(f"False negative: {torch.count_nonzero(torch.logical_and(cells == -1, gt != -1))}, false positive: {torch.count_nonzero(torch.logical_and(cells != -1, gt == -1))}")
-                # print(f"Overlaps: {torch.count_nonzero(torch.logical_and(gt != -1, weights > 1.0))}, overloss: {overlap_loss.item()}")
-                # print(f"Number of Gaussians to prune: {torch.count_nonzero((gaussians.get_weight < min_weight))}")
+                # print(f"Overlaps: {torch.count_nonzero(torch.logical_and(gt != -1, weights > 1.0))}")
+                print(f"Number of Gaussians to prune: {torch.count_nonzero((gaussians.get_weight < min_weight))}")
                # print(f"Loss samples: {loss_samples.shape}")
                 # x = cells * weights
                 # low = (x) / (weights + mean_weight)
@@ -319,21 +311,26 @@ def training(
                 #     error_thresh *= 0.5
                 #     new_scale *= 0.5
                 #     print(f"New thresh {error_thresh}, new scale {new_scale}")
+                # if gaussians.get_values.shape[0] > args.cap_max:
                 if use_mcmc:
+                    # pass
                     dead_mask = (gaussians.get_weight <= 0.005).squeeze(-1)
                     gaussians.relocate_gs(dead_mask=dead_mask, cells=cells, gt=gt)
                     gaussians.add_new_gs(cap_max=args.cap_max)
                 else:
-                    # loss_idx = torch.topk(
-                    #     torch.abs(cells.ravel() - gt.ravel()),
-                    #     # 20 * int((args.cap_max - gaussians.get_values.shape[0]) // (1 + (opt.iterations - iteration) / opt.densification_interval)),
-                    #     5000
-                    # ).indices
+                    loss_idx = torch.topk(
+                        torch.abs(cells.ravel() - gt.ravel()),
+                        # (cells.ravel() - gt.ravel()) ** 2,
+                        # 20 * int((args.cap_max - gaussians.get_values.shape[0]) // (1 + (opt.iterations - iteration) / opt.densification_interval)),
+                        min(20000, args.cap_max - gaussians.get_values.shape[0] + torch.count_nonzero(gaussians.get_weight <= 0.005) + 1000)
+                    ).indices
+                    # loss_idx = (torch.abs(cells.ravel() - gt.ravel()) > error_thresh)
                     gaussians.densify_and_prune(
                         opt.densify_grad_threshold,
                         min_weight,
                         torch.mean(gaussians.get_scaling) / 6.0,
                         0.01,
+                        # torch.mean(gaussians.get_weight),
                         samples_cuda[loss_idx],
                         # np.clip(new_vals.cpu().ravel()[loss_idx].reshape(-1, 1), 0.01, 0.99),
                         gt.ravel()[loss_idx].reshape(-1, 1),
@@ -348,6 +345,7 @@ def training(
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none=True)
                 
+                # if gaussians.get_values.shape[0] > args.cap_max and iteration % 10 == 0:
                 if use_mcmc:
                     L = build_scaling_rotation(gaussians.get_scaling, gaussians.get_rotation)
                     actual_covariance = L @ L.transpose(1, 2)
