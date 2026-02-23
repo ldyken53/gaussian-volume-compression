@@ -55,17 +55,9 @@ class GaussianModel:
         self._rotation = torch.empty(0)
         self._weight = torch.empty(0)
         self._values = torch.empty(0)
-        self.max_radii2D = torch.empty(0)
-        self.xyz_gradient_accum = torch.empty(0)
-        self.denom = torch.empty(0)
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
-        self.interpolator = None
-        self.interpolation_threshold = 0.05
-        self.interpolation_mask = None
-        self.last_interpolated_xyz = None
-        self.should_interpolate = False
         self.mesh = None
         self.max_scale = 0.02
         self.setup_functions()
@@ -85,9 +77,6 @@ class GaussianModel:
             self._rotation,
             self._weight,
             self._values,
-            self.max_radii2D,
-            self.xyz_gradient_accum,
-            self.denom,
             self.optimizer.state_dict(),
             self.spatial_lr_scale,
         )
@@ -99,19 +88,11 @@ class GaussianModel:
             self._rotation,
             self._weight,
             self._values,
-            self.max_radii2D,
-            xyz_gradient_accum,
-            denom,
             opt_dict,
             self.spatial_lr_scale,
         ) = model_args
         self.training_setup(training_args)
-        self.xyz_gradient_accum = xyz_gradient_accum
-        self.denom = denom
         self.optimizer.load_state_dict(opt_dict)
-        self.last_interpolated_xyz = self._xyz.clone()
-        self.interpolation_mask = np.full(self._xyz.shape[0], True)
-        self.should_interpolate = True
 
     @property
     def get_scaling(self):
@@ -202,14 +183,9 @@ class GaussianModel:
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
         self.mesh = mesh
-        self.last_interpolated_xyz = self._xyz.clone()
-        self.interpolation_mask = np.full(self._xyz.shape[0], True)
-        self.should_interpolate = True
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
-        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
 
         optimizer_params = [
             {
@@ -375,9 +351,6 @@ class GaussianModel:
         )
         self.mesh = mesh
 
-        self.last_interpolated_xyz = self._xyz.clone()
-        self.interpolation_mask = np.full(len(self._values), True)
-
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
@@ -537,15 +510,6 @@ class GaussianModel:
         self._rotation = optimizable_tensors["rotation"]
         self._values = optimizable_tensors["value"]
 
-        self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
-        self.denom = self.denom[valid_points_mask]
-        self.max_radii2D = self.max_radii2D[valid_points_mask]
-
-        self.last_interpolated_xyz = self.last_interpolated_xyz[valid_points_mask]
-        self.interpolation_mask = self.interpolation_mask[
-            valid_points_mask.detach().cpu().numpy()
-        ]
-
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
@@ -611,59 +575,11 @@ class GaussianModel:
 
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
 
-        # The sizes may not be the same, which necessitates extending the arrays
-        # used for interpolation
-        new_size = optimizable_tensors["xyz"].shape[0]
-        old_size = self._xyz.shape[0]
-
-        # We always want the interpolation mask to be the same size as the incoming xyz tensor
-        interpolation_mask = np.full(new_size, False)
-
-        if new_size > old_size:
-            # Always interpolate the new points
-            interpolation_mask[old_size:] = True
-
-            # Extend these tensors to avoid size mismatches during interpolation
-            self.last_interpolated_xyz = torch.cat(
-                (self.last_interpolated_xyz, optimizable_tensors["xyz"][old_size:]),
-                dim=0,
-            )
-            self._values = torch.cat(
-                (
-                    self._values,
-                    self.inverse_value_activation(torch.tensor(
-                        np.zeros((new_size - old_size, 1)),
-                        dtype=torch.float,
-                        device="cuda",
-                    )),
-                ),
-                dim=0,
-            )
-
-        # Compute the distances between the new points and the last interpolated points
-        new_xyz = optimizable_tensors["xyz"][:old_size]
-        diff = new_xyz - self.last_interpolated_xyz[:old_size]
-        distances = torch.norm(diff, dim=1)
-
-        # If a Gaussian's position has moved more than the threshold, re-interpolate its value
-        interpolation_mask[:old_size] = (
-            (distances > self.interpolation_threshold).detach().cpu().numpy()
-        )
-
-        self.interpolation_mask = interpolation_mask
-        # Only bother interpolating if there are any points that need updating
-        self.should_interpolate = np.any(interpolation_mask)
-
         self._xyz = optimizable_tensors["xyz"]
         self._weight = optimizable_tensors["weight"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
         self._values = optimizable_tensors["value"]
-
-        if reset_params:
-            self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-            self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-            self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
@@ -770,9 +686,6 @@ class GaussianModel:
         )
 
     def densify_and_prune(self, max_grad, min_weight, new_scale, new_weight, empty_points, empty_values, prune_only=False):
-        grads = self.xyz_gradient_accum / self.denom
-        grads[grads.isnan()] = 0.0
-
         # self.densify_and_clone(grads, max_grad, extent)
         # self.densify_and_split(grads, max_grad, extent)
         if not prune_only:
@@ -783,40 +696,6 @@ class GaussianModel:
         self.prune_points(prune_mask)
 
         torch.cuda.empty_cache()
-
-    def add_densification_stats(self, viewspace_point_tensor, update_filter):
-        self.xyz_gradient_accum[update_filter] += torch.norm(
-            viewspace_point_tensor.grad[update_filter, :2], dim=-1, keepdim=True
-        )
-        self.denom[update_filter] += 1
-
-    def interpolate_new_values(self):
-        # Return early if there are no new points to interpolate
-        if not self.should_interpolate:
-            return
-
-        # Filter out the positions that need to be interpolated
-        gaussian_positions = self._xyz.detach().cpu().numpy()
-        gaussian_positions = gaussian_positions[self.interpolation_mask]
-
-        interpolated_values = self.get_values.detach().cpu().numpy()
-        interpolated_values[self.interpolation_mask] = self.interpolator(
-            gaussian_positions
-        )
-        interpolated_values = np.nan_to_num(interpolated_values, nan=0.0)
-
-        new_values = self.inverse_value_activation(torch.tensor(
-            interpolated_values, dtype=torch.float, device="cuda"
-        ).reshape(-1, 1))
-
-        self._values = nn.Parameter(new_values.requires_grad_(False))
-
-        # Update the last interpolated positions, and reset the interpolation mask
-        self.last_interpolated_xyz[self.interpolation_mask] = self._xyz[
-            self.interpolation_mask
-        ]
-        self.interpolation_mask = np.full(self._xyz.shape[0], False)
-        self.should_interpolate = False
 
     def convert_ply_to_ascii(self, binary_ply_file_path):
         ascii_ply_file_path = binary_ply_file_path.replace(".ply", "_ascii.ply")
