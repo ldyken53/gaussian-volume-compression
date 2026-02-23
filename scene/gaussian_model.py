@@ -480,7 +480,7 @@ class GaussianModel:
 
     def add_new_gs(self, cap_max):
         current_num_points = self._weight.shape[0]
-        target_num = min(cap_max, int(1.1 * current_num_points))
+        target_num = min(cap_max, int(1.5 * current_num_points))
         num_gs = max(0, target_num - current_num_points)
 
         if num_gs <= 0:
@@ -553,13 +553,24 @@ class GaussianModel:
             extension_tensor = tensors_dict[group["name"]]
             stored_state = self.optimizer.state.get(group["params"][0], None)
             if stored_state is not None:
-
+                avg_sq = stored_state["exp_avg_sq"].mean(dim=0, keepdim=True)
+                avg_sq = avg_sq.expand_as(extension_tensor)
+                avg = stored_state["exp_avg"].mean(dim=0, keepdim=True)
+                avg = avg.expand_as(extension_tensor)
+                if False:
+                    stored_state["exp_avg_sq"] = torch.cat(
+                        (stored_state["exp_avg_sq"], avg_sq), dim=0
+                    )
+                    # stored_state["exp_avg"] = torch.cat(
+                    #     (stored_state["exp_avg"], avg), dim=0
+                    # )
+                else:
+                    stored_state["exp_avg_sq"] = torch.cat(
+                        (stored_state["exp_avg_sq"], torch.zeros_like(extension_tensor)),
+                        dim=0,
+                    )
                 stored_state["exp_avg"] = torch.cat(
                     (stored_state["exp_avg"], torch.zeros_like(extension_tensor)), dim=0
-                )
-                stored_state["exp_avg_sq"] = torch.cat(
-                    (stored_state["exp_avg_sq"], torch.zeros_like(extension_tensor)),
-                    dim=0,
                 )
 
                 del self.optimizer.state[group["params"][0]]

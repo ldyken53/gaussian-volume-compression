@@ -32,7 +32,7 @@ class Scene:
             print("Loading trained model at iteration {}".format(self.loaded_iter))
 
         mesh = None
-        if self.loaded_iter is None or load_iteration == -1:
+        if self.loaded_iter is None or load_iteration == -1 or load_iteration > 0:
             if os.path.exists(args.source_path) and args.source_path.lower().endswith(('.vtk', '.vtu')):
                 mesh, pcd = readData(args.source_path, fraction, normalized)
             else:

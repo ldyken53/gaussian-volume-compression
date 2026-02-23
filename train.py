@@ -96,11 +96,11 @@ def training(
     samples_tf_flat = samples_tf.reshape(-1, 3)
     start = time.time()
     if precomputed_samples:
-        big_gt = np.load("big_gt.npy")
+        big_gt = np.load("richtmyer_meshkov_big_gt.npy")
         num_jitters = big_gt.shape[0]
         size = big_gt.shape[1]
-        big_samples = np.load("big_samples.npy")
-        big_jitter = np.load("big_jitter.npy")
+        big_samples = np.load("richtmyer_meshkov_big_samples.npy")
+        big_jitter = np.load("richtmyer_meshkov_big_jitter.npy")
     else:
         num_jitters = 100
         big_samples = np.tile(samples_tf_flat, (num_jitters, 1))
@@ -155,7 +155,6 @@ def training(
     for iteration in range(first_iter, opt.iterations + 1):
         deb = False
         iter_start.record()
-
         jit_idx = 0
         if iteration not in saving_iterations and iteration not in testing_iterations and done != 1:
             jit_idx = np.random.randint(0, num_jitters)
@@ -216,9 +215,9 @@ def training(
         #     false_positive = torch.tensor(0., device="cuda")
         # loss = l1_lv + false_negative + 0.0000 * overlap_loss
         loss = l1_lv + false_negative
-        # if gaussians.get_values.shape[0] > args.cap_max:
-        #     n = True
-        if use_mcmc:
+        if gaussians.get_values.shape[0] > args.cap_max:
+            n = True
+        if n:
             loss = loss + args.weight_reg * torch.abs(gaussians.get_weight).mean()
             loss = loss + args.scale_reg * torch.abs(gaussians.get_scaling).mean()
         loss.backward()
@@ -226,6 +225,8 @@ def training(
         iter_end.record()
 
         with torch.no_grad():
+            if iteration > opt.densify_from_iter:
+                args.fn_reg = args.fn_reg2
             # Logging
             if log_to_file and iteration % 100 == 0:
                 mse = torch.mean((cells - gt) ** 2)
@@ -244,7 +245,7 @@ def training(
                 })
             
             # Progress bar
-            if iteration % 1000 == 0:
+            if iteration % 500 == 0:
                 ema_loss_for_log = 0.9 * loss.item() + 0.1 * ema_loss_for_log
                 mse = torch.mean((cells - gt) ** 2)
                 psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
@@ -263,12 +264,12 @@ def training(
                         # "PSNR": f"{ema_lpsnr_for_log:.{5}f}"
                     }
                 )
-                progress_bar.update(1000)
+                progress_bar.update(500)
                 print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr2: {psnr2}, l_v: {l1_lv.item()}")
                 # print(f"Num Gaussians: {gaussians.get_values.shape[0]}")
-                print(f"w= {(args.weight_reg * torch.abs(gaussians.get_weight).mean()).item()}, {(args.scale_reg * torch.abs(gaussians.get_scaling).mean()).item()}, fn: {false_negative}")
+                print(f"w= {(torch.clamp(l1_lv, max=args.weight_reg) * torch.abs(gaussians.get_weight).mean()).item()}, {(args.scale_reg * torch.abs(gaussians.get_scaling).mean()).item()}, fn: {false_negative}")
                 print(f"Gaussian weight: {torch.mean(gaussians.get_weight)}, gaussian scale: {torch.mean(gaussians.get_scaling)}, scale var: {torch.std(gaussians.get_scaling)}")
-                print(f"False negative: {torch.count_nonzero(torch.logical_and(cells == -1, gt != -1))}, false positive: {torch.count_nonzero(torch.logical_and(cells != -1, gt == -1))}")
+                print(f"False negative: {torch.count_nonzero(torch.logical_and(cells == -1, gt != -1))}, fn_reg: {args.fn_reg}")
                 # print(f"Overlaps: {torch.count_nonzero(torch.logical_and(gt != -1, weights > 1.0))}")
                 print(f"Number of Gaussians to prune: {torch.count_nonzero((gaussians.get_weight < min_weight))}")
                # print(f"Loss samples: {loss_samples.shape}")
@@ -305,14 +306,9 @@ def training(
                 iteration >= opt.densify_from_iter and
                 iteration % opt.densification_interval == 0 and
                 iteration not in testing_iterations
-                # and gaussians.get_values.shape[0] < (1/(4096 * 48)) * 246415360
             ):
-                # if densifies > 0 and densifies % 10 == 0 and error_thresh > 0.05:
-                #     error_thresh *= 0.5
-                #     new_scale *= 0.5
-                #     print(f"New thresh {error_thresh}, new scale {new_scale}")
                 # if gaussians.get_values.shape[0] > args.cap_max:
-                if use_mcmc:
+                if n:
                     # pass
                     dead_mask = (gaussians.get_weight <= 0.005).squeeze(-1)
                     gaussians.relocate_gs(dead_mask=dead_mask, cells=cells, gt=gt)
@@ -322,7 +318,7 @@ def training(
                         torch.abs(cells.ravel() - gt.ravel()),
                         # (cells.ravel() - gt.ravel()) ** 2,
                         # 20 * int((args.cap_max - gaussians.get_values.shape[0]) // (1 + (opt.iterations - iteration) / opt.densification_interval)),
-                        min(20000, args.cap_max - gaussians.get_values.shape[0] + torch.count_nonzero(gaussians.get_weight <= 0.005) + 1000)
+                        min(100000, args.cap_max - gaussians.get_values.shape[0] + torch.count_nonzero(gaussians.get_weight <= 0.005) + 1000)
                     ).indices
                     # loss_idx = (torch.abs(cells.ravel() - gt.ravel()) > error_thresh)
                     gaussians.densify_and_prune(
@@ -336,15 +332,12 @@ def training(
                         gt.ravel()[loss_idx].reshape(-1, 1),
                         iteration > opt.densify_until_iter
                     )
-                # loss_samples = np.empty((0, 3))
-                # loss_vals = np.empty((0, 1))
-                # densifies += 1
 
             # Optimizer step
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none=True)
-                
+
                 # if gaussians.get_values.shape[0] > args.cap_max and iteration % 10 == 0:
                 if use_mcmc:
                     L = build_scaling_rotation(gaussians.get_scaling, gaussians.get_rotation)
@@ -364,13 +357,6 @@ def training(
                     os.path.join(scene.model_path, "/chkpnt{iteration}.pth"),
                 )
 
-            # if gaussians.get_values.shape[0] > (1/(4096 * 48)) * 246415360:
-            #     if not check_done:
-            #         done = 1000
-            #         check_done = True
-            #     done -= 1
-            #     if done == 0:
-            #         break
     series = {
         "file-series-version": "1.0",
         "files": vtk_files
