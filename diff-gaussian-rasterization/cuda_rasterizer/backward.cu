@@ -148,9 +148,11 @@ __global__ void preprocessCUDA(
 }
 
 // Backward version of the rendering procedure.
+// Each thread handles one Gaussian that intersects this block,
+// accumulating gradient contributions from all cells in the block
+// before writing to global memory with a single set of atomicAdds.
 template <uint32_t C>
-__global__ void __launch_bounds__(BLOCK_X * BLOCK_Y * BLOCK_Z)
-renderCUDA(
+__global__ void renderCUDA(
 	const dim3 grid,
 	const uint2* __restrict__ ranges,
 	const uint32_t* __restrict__ point_list,
@@ -172,161 +174,135 @@ renderCUDA(
 	float* __restrict__ dL_dweights
 )
 {
-	// We rasterize again. Compute necessary block info.
-	auto block = cg::this_thread_block();
-	auto tile = cg::tiled_partition<32>(block);
-	uint3 cell_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y, block.group_index().z * BLOCK_Z};
-	uint3 cell_max = { min(cell_min.x + BLOCK_X, num_cells.x), min(cell_min.y + BLOCK_Y , num_cells.y), min(cell_min.z + BLOCK_Z , num_cells.z) };
-	uint3 cell = { cell_min.x + block.thread_index().x, cell_min.y + block.thread_index().y, cell_min.z + block.thread_index().z  };
-	uint32_t cell_id = cell.z * num_cells.x * num_cells.y + cell.y * num_cells.x + cell.x;
-	float3 cell_pos =  make_float3(
-		static_cast<float>(cell.x) * cell_size.x + volume_mins.x + jitter[cell_id * 3], 
-		static_cast<float>(cell.y) * cell_size.y + volume_mins.y + jitter[cell_id * 3 + 1], 
-		static_cast<float>(cell.z) * cell_size.z + volume_mins.z + jitter[cell_id * 3 + 2]
-	);
+	// Block tile boundaries in cell space
+	uint3 cell_min = { blockIdx.x * BLOCK_X, blockIdx.y * BLOCK_Y, blockIdx.z * BLOCK_Z };
+	uint3 cell_max = { min(cell_min.x + BLOCK_X, num_cells.x), min(cell_min.y + BLOCK_Y, num_cells.y), min(cell_min.z + BLOCK_Z, num_cells.z) };
+	uint32_t bx = cell_max.x - cell_min.x;
+	uint32_t by = cell_max.y - cell_min.y;
+	uint32_t bz = cell_max.z - cell_min.z;
+	uint32_t num_cells_in_block = bx * by * bz;
 
-	// Check if this thread is associated with a valid cell or outside.
-	bool inside = cell.x < num_cells.x && cell.y < num_cells.y && cell.z < num_cells.z;
-	// Done threads can help with fetching, but don't rasterize
-	bool done = !inside;
+	// Load all cell data for this block into shared memory
+	__shared__ float3 s_cell_pos[BLOCK_X * BLOCK_Y * BLOCK_Z];
+	__shared__ float s_acc_weight[BLOCK_X * BLOCK_Y * BLOCK_Z];
+	__shared__ float s_inv_acc_weight[BLOCK_X * BLOCK_Y * BLOCK_Z];
+	__shared__ float s_dL_doutv_over_accw[BLOCK_X * BLOCK_Y * BLOCK_Z];
+	__shared__ float s_dL_doutw[BLOCK_X * BLOCK_Y * BLOCK_Z];
+	__shared__ float s_out_cell_val[BLOCK_X * BLOCK_Y * BLOCK_Z];
 
-	// Load start/end range of IDs to process in bit sorted list.
-	uint2 range = ranges[block.group_index().z * grid.y * grid.x + block.group_index().y * grid.x + block.group_index().x];
-	const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
-	int toDo = range.y - range.x;
-
-	// Allocate storage for batches of collectively fetched data.
-	__shared__ int collected_id[BLOCK_SIZE];
-	__shared__ float3 collected_means[BLOCK_SIZE];
-	__shared__ float collected_values[BLOCK_SIZE];
-	__shared__ float collected_weights[BLOCK_SIZE];
-	__shared__ float collected_conic[BLOCK_SIZE * 6];
-
-	float acc_weight = 0.0;
-	float dL_doutv = 0.0;
-	float dL_doutw = 0.0;
-	float out_cell_val = 0.0f;
-	if (inside) {
-		acc_weight = accumulated_weights[cell_id];
-		dL_doutv = dL_dcells[cell_id];
-		dL_doutw = dL_dcell_weights[cell_id];
-		out_cell_val = out_cells[cell_id];
-	} 
-	float inv_acc_weight = (inside && acc_weight > WEIGHT_CUTOFF) ? 1.0f / acc_weight : 0.0f;
-	float dL_doutv_over_accw = dL_doutv * inv_acc_weight;
-	
-	// Iterate over batches
-	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
+	for (uint32_t idx = threadIdx.x; idx < num_cells_in_block; idx += blockDim.x)
 	{
-		// Collective fetch similar to forward pass
-		int progress = i * BLOCK_SIZE + block.thread_rank();
-		if (range.x + progress < range.y)
+		uint32_t lz = idx / (bx * by);
+		uint32_t ly = (idx % (bx * by)) / bx;
+		uint32_t lx = idx % bx;
+
+		uint3 cell = { cell_min.x + lx, cell_min.y + ly, cell_min.z + lz };
+		uint32_t cell_id = cell.z * num_cells.x * num_cells.y + cell.y * num_cells.x + cell.x;
+
+		s_cell_pos[idx] = make_float3(
+			static_cast<float>(cell.x) * cell_size.x + volume_mins.x + jitter[cell_id * 3],
+			static_cast<float>(cell.y) * cell_size.y + volume_mins.y + jitter[cell_id * 3 + 1],
+			static_cast<float>(cell.z) * cell_size.z + volume_mins.z + jitter[cell_id * 3 + 2]
+		);
+
+		float aw = accumulated_weights[cell_id];
+		s_acc_weight[idx] = aw;
+		float inv_aw = (aw > WEIGHT_CUTOFF) ? 1.0f / aw : 0.0f;
+		s_inv_acc_weight[idx] = inv_aw;
+		s_dL_doutv_over_accw[idx] = dL_dcells[cell_id] * inv_aw;
+		s_dL_doutw[idx] = dL_dcell_weights[cell_id];
+		s_out_cell_val[idx] = out_cells[cell_id];
+	}
+	__syncthreads();
+
+	// Load range of Gaussians for this block
+	uint2 range = ranges[blockIdx.z * grid.y * grid.x + blockIdx.y * grid.x + blockIdx.x];
+	uint32_t num_gaussians = range.y - range.x;
+
+	// Each thread processes one (or more) Gaussians, striding by blockDim.x
+	for (uint32_t g = threadIdx.x; g < num_gaussians; g += blockDim.x)
+	{
+		int point_idx = point_list[range.x + g];
+
+		// Load Gaussian data into registers
+		float3 mean = means3D[point_idx];
+		float value = values[point_idx];
+		float w = weights[point_idx];
+		float con_xx = conic[point_idx * 6 + 0];
+		float con_xy = conic[point_idx * 6 + 1];
+		float con_xz = conic[point_idx * 6 + 2];
+		float con_yy = conic[point_idx * 6 + 3];
+		float con_yz = conic[point_idx * 6 + 4];
+		float con_zz = conic[point_idx * 6 + 5];
+
+		// Accumulate gradients across all cells in the block
+		float acc_dL_dvalue = 0.0f;
+		float acc_dL_dxx = 0.0f;
+		float acc_dL_dxy = 0.0f;
+		float acc_dL_dxz = 0.0f;
+		float acc_dL_dyy = 0.0f;
+		float acc_dL_dyz = 0.0f;
+		float acc_dL_dzz = 0.0f;
+		// Replace the 3 mean accumulators + weight accumulator with:
+		float acc_Gx = 0.0f, acc_Gy = 0.0f, acc_Gz = 0.0f;
+		float acc_sum_dLdq = 0.0f;
+		// acc_dL_dvalue stays the same
+
+		for (uint32_t c = 0; c < num_cells_in_block; c++)
 		{
-			int coll_id = point_list[range.x + progress];
-			collected_id[block.thread_rank()] = coll_id;
-			collected_means[block.thread_rank()] = means3D[coll_id];
-			collected_values[block.thread_rank()] = values[coll_id];
-			collected_weights[block.thread_rank()] = weights[coll_id];
-			for (int k = 0; k < 6; k++)
-				collected_conic[block.thread_rank() * 6 + k] = conic[coll_id * 6 + k];
+			if (s_acc_weight[c] <= WEIGHT_CUTOFF) continue;
+
+			float3 d = make_float3(s_cell_pos[c].x - mean.x, s_cell_pos[c].y - mean.y, s_cell_pos[c].z - mean.z);
+			float quad_form = d.x*(con_xx*d.x + con_xy*d.y + con_xz*d.z)
+							+ d.y*(con_xy*d.x + con_yy*d.y + con_yz*d.z)
+							+ d.z*(con_xz*d.x + con_yz*d.y + con_zz*d.z);
+			float power = -0.5f * quad_form;
+			if (power < -14.0f || power > 0.0f) continue;
+
+			float e = __expf(power);
+			float weight_val = w * e;
+			float dL_doutv_over_accw = s_dL_doutv_over_accw[c];
+
+			acc_dL_dvalue += dL_doutv_over_accw * weight_val;
+
+			float F = dL_doutv_over_accw * (value - s_out_cell_val[c]) + s_dL_doutw[c];
+			float dL_dquad = F * (-0.5f * weight_val);
+
+			acc_sum_dLdq += dL_dquad;          // replaces acc_dL_dw computation
+			acc_Gx += dL_dquad * d.x;          // replaces the con-multiply mean grad lines
+			acc_Gy += dL_dquad * d.y;
+			acc_Gz += dL_dquad * d.z;
+
+			acc_dL_dxx += dL_dquad * d.x * d.x;
+			acc_dL_dxy += dL_dquad * d.x * d.y;
+			acc_dL_dxz += dL_dquad * d.x * d.z;
+			acc_dL_dyy += dL_dquad * d.y * d.y;
+			acc_dL_dyz += dL_dquad * d.y * d.z;
+			acc_dL_dzz += dL_dquad * d.z * d.z;
 		}
-		block.sync();
 
-		// Process current batch
-		for (int j = 0; j < min(BLOCK_SIZE, toDo); j++)
-		{
-			bool has_contribution = false;
-			float dL_dvalue = 0.0;
-			float dL_dw = 0.0;
-			float dL_dmean_x = 0.0;
-			float dL_dmean_y = 0.0;
-			float dL_dmean_z = 0.0;
-			float dL_dxx = 0.0;
-			float dL_dxy = 0.0;
-			float dL_dxz = 0.0;
-			float dL_dyy = 0.0;
-			float dL_dyz = 0.0;
-			float dL_dzz = 0.0;
-			int point_idx = collected_id[j];
-			if (!done && acc_weight > WEIGHT_CUTOFF) {
-				float3 d = make_float3(cell_pos.x - collected_means[j].x, cell_pos.y - collected_means[j].y, cell_pos.z - collected_means[j].z);
-				
-				// Compute quadratic form and weight as in forward pass
-				float quad_form = (
-					d.x * (collected_conic[j * 6] * d.x + collected_conic[j * 6 + 1] * d.y + collected_conic[j * 6 + 2] * d.z) +
-					d.y * (collected_conic[j * 6 + 1] * d.x + collected_conic[j * 6 + 3] * d.y + collected_conic[j * 6 + 4] * d.z) +
-					d.z * (collected_conic[j * 6 + 2] * d.x + collected_conic[j * 6 + 4] * d.y + collected_conic[j * 6 + 5] * d.z)
-				);
-				float power = -0.5 * quad_form;
-				if (power >= -14.0 && power <= 0.0) {
-					has_contribution = true;
-					float e = __expf(power);
-					float weight = collected_weights[j] * e;
+		// Recover mean grads post-loop (con is still in registers)
+		float dL_dmean_x = -2.0f * (con_xx*acc_Gx + con_xy*acc_Gy + con_xz*acc_Gz);
+		float dL_dmean_y = -2.0f * (con_xy*acc_Gx + con_yy*acc_Gy + con_yz*acc_Gz);
+		float dL_dmean_z = -2.0f * (con_xz*acc_Gx + con_yz*acc_Gy + con_zz*acc_Gz);
 
-					// Compute gradients
-					dL_dvalue = dL_doutv_over_accw * weight;
+		// Recover weight grad: since dL_dquad = F * (-0.5*w*e), and acc_dL_dw = sum(F*e) = sum(-2*dL_dquad/w)
+		float acc_dL_dw = -2.0f * acc_sum_dLdq / w;
 
-					// Gradient for weight terms
-					float dLv_dweight = dL_doutv_over_accw * (collected_values[j] - out_cell_val);
-					float dLv_dw = dLv_dweight * e;
+		// Single atomic write per Gaussian — all cell contributions already accumulated
+		atomicAdd(&dL_dvalues[point_idx], acc_dL_dvalue);
+		atomicAdd(&dL_dweights[point_idx], acc_dL_dw);
 
-					float dweight_dquad = -0.5f * weight;
-					float dLv_dquad = dLv_dweight * dweight_dquad;
+		atomicAdd(&dL_dmeans[point_idx].x, dL_dmean_x);
+		atomicAdd(&dL_dmeans[point_idx].y, dL_dmean_y);
+		atomicAdd(&dL_dmeans[point_idx].z, dL_dmean_z);
 
-					float dLw_dw = dL_doutw * e;
-					float dLw_dquad = dL_doutw * dweight_dquad;
-
-					dL_dw = dLv_dw + dLw_dw;
-					float dL_dquad = dLw_dquad + dLv_dquad;
-					
-					// Gradients for means
-					dL_dmean_x = dL_dquad * 2 * -1 *
-						(collected_conic[j * 6] * d.x + collected_conic[j * 6 + 1] * d.y + collected_conic[j * 6 + 2] * d.z);
-					dL_dmean_y = dL_dquad * 2 * -1 *
-						(collected_conic[j * 6 + 1] * d.x + collected_conic[j * 6 + 3] * d.y + collected_conic[j * 6 + 4] * d.z);
-					dL_dmean_z = dL_dquad * 2 * -1 *
-						(collected_conic[j * 6 + 2] * d.x + collected_conic[j * 6 + 4] * d.y + collected_conic[j * 6 + 5] * d.z);
-
-					// Gradients for conic
-					dL_dxx = dL_dquad * d.x * d.x;
-					dL_dxy = dL_dquad * d.x * d.y;
-					dL_dxz = dL_dquad * d.x * d.z;
-					dL_dyy = dL_dquad * d.y * d.y;
-					dL_dyz = dL_dquad * d.y * d.z;
-					dL_dzz = dL_dquad * d.z * d.z;
-				}
-			}
-			if (__ballot_sync(0xFFFFFFFF, has_contribution) == 0)
-				continue; // skip all reductions and atomics for this point
-			
-			float block_dL_dvalue = cg::reduce(tile, dL_dvalue, cg::plus<float>());
-			float block_dL_dw = cg::reduce(tile, dL_dw, cg::plus<float>());
-			float block_dL_dmean_x = cg::reduce(tile, dL_dmean_x, cg::plus<float>());
-			float block_dL_dmean_y = cg::reduce(tile, dL_dmean_y, cg::plus<float>());
-			float block_dL_dmean_z = cg::reduce(tile, dL_dmean_z, cg::plus<float>());
-			float block_dL_dxx = cg::reduce(tile, dL_dxx, cg::plus<float>());
-			float block_dL_dxy = cg::reduce(tile, dL_dxy, cg::plus<float>());
-			float block_dL_dxz = cg::reduce(tile, dL_dxz, cg::plus<float>());
-			float block_dL_dyy = cg::reduce(tile, dL_dyy, cg::plus<float>());
-			float block_dL_dyz = cg::reduce(tile, dL_dyz, cg::plus<float>());
-			float block_dL_dzz = cg::reduce(tile, dL_dzz, cg::plus<float>());
-
-			if (tile.thread_rank() == 0) {
-				atomicAdd(&dL_dvalues[point_idx], block_dL_dvalue);
-				atomicAdd(&dL_dweights[point_idx], block_dL_dw);
-				
-				atomicAdd(&dL_dmeans[point_idx].x, block_dL_dmean_x);
-				atomicAdd(&dL_dmeans[point_idx].y, block_dL_dmean_y);
-				atomicAdd(&dL_dmeans[point_idx].z, block_dL_dmean_z);
-
-				atomicAdd(&dL_dconic[point_idx * 6], block_dL_dxx);
-				atomicAdd(&dL_dconic[point_idx * 6 + 1], block_dL_dxy);
-				atomicAdd(&dL_dconic[point_idx * 6 + 2], block_dL_dxz);
-				atomicAdd(&dL_dconic[point_idx * 6 + 3], block_dL_dyy);
-				atomicAdd(&dL_dconic[point_idx * 6 + 4], block_dL_dyz);
-				atomicAdd(&dL_dconic[point_idx * 6 + 5], block_dL_dzz);
-			}
-        }
+		atomicAdd(&dL_dconic[point_idx * 6 + 0], acc_dL_dxx);
+		atomicAdd(&dL_dconic[point_idx * 6 + 1], acc_dL_dxy);
+		atomicAdd(&dL_dconic[point_idx * 6 + 2], acc_dL_dxz);
+		atomicAdd(&dL_dconic[point_idx * 6 + 3], acc_dL_dyy);
+		atomicAdd(&dL_dconic[point_idx * 6 + 4], acc_dL_dyz);
+		atomicAdd(&dL_dconic[point_idx * 6 + 5], acc_dL_dzz);
 	}
 }
 
@@ -380,7 +356,7 @@ void BACKWARD::render(
 	float* dL_dweights
 )
 {
-	renderCUDA<NUM_CHANNELS> << <grid, block >> >(
+	renderCUDA<NUM_CHANNELS> << <grid, 128 >> >(
 		grid,
 		ranges,
 		point_list,

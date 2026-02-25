@@ -40,8 +40,35 @@ uint32_t getHigherMsb(uint32_t n)
 	return msb;
 }
 
-// Generates one key/value pair for all Gaussian / tile overlaps. 
-// Run once per Gaussian (1:N mapping).
+// // Generates one key/value pair for all Gaussian / tile overlaps. 
+// // Run once per Gaussian (1:N mapping).
+// __global__ void duplicateWithKeys(
+// 	int P,
+// 	const uint* aabbs,
+// 	const uint32_t* offsets,
+// 	uint32_t* gaussian_keys_unsorted,
+// 	uint32_t* gaussian_values_unsorted,
+// 	dim3 grid)
+// {
+// 	auto idx = cg::this_grid().thread_rank();
+// 	if (idx >= P)
+// 		return;
+
+// 	// Find this Gaussian's offset in buffer for writing keys/values.
+// 	uint32_t off = (idx == 0) ? 0 : offsets[idx - 1];
+// 	for (int z = aabbs[idx * 6 + 2]; z < aabbs[idx * 6 + 5]; z++) {
+// 		for (int y = aabbs[idx * 6 + 1]; y < aabbs[idx * 6 + 4]; y++) {
+// 			for (int x = aabbs[idx * 6]; x < aabbs[idx * 6 + 3]; x++) {
+// 				gaussian_keys_unsorted[off] =  z * grid.x * grid.y + y * grid.x + x;
+// 				gaussian_values_unsorted[off] = idx;
+// 				off++;
+// 			}
+// 		}
+// 	}
+// }
+
+// Generates one key/value pair for all Gaussian / tile overlaps.
+// Run once per Gaussian using one warp (32 threads) per Gaussian.
 __global__ void duplicateWithKeys(
 	int P,
 	const uint* aabbs,
@@ -50,20 +77,39 @@ __global__ void duplicateWithKeys(
 	uint32_t* gaussian_values_unsorted,
 	dim3 grid)
 {
-	auto idx = cg::this_grid().thread_rank();
+	unsigned int idx = blockIdx.x * (blockDim.x / 32) + (threadIdx.x / 32);
 	if (idx >= P)
 		return;
 
-	// Find this Gaussian's offset in buffer for writing keys/values.
+	unsigned int lane = threadIdx.x & 31;
+
 	uint32_t off = (idx == 0) ? 0 : offsets[idx - 1];
-	for (int z = aabbs[idx * 6 + 2]; z < aabbs[idx * 6 + 5]; z++) {
-		for (int y = aabbs[idx * 6 + 1]; y < aabbs[idx * 6 + 4]; y++) {
-			for (int x = aabbs[idx * 6]; x < aabbs[idx * 6 + 3]; x++) {
-				gaussian_keys_unsorted[off] =  z * grid.x * grid.y + y * grid.x + x;
-				gaussian_values_unsorted[off] = idx;
-				off++;
-			}
-		}
+
+	uint x0 = aabbs[idx * 6 + 0];
+	uint y0 = aabbs[idx * 6 + 1];
+	uint z0 = aabbs[idx * 6 + 2];
+	uint x1 = aabbs[idx * 6 + 3];
+	uint y1 = aabbs[idx * 6 + 4];
+	uint z1 = aabbs[idx * 6 + 5];
+
+	uint nx = x1 - x0;
+	uint ny = y1 - y0;
+	uint nz = z1 - z0;
+	uint total = nx * ny * nz;
+
+	for (uint i = lane; i < total; i += 32) {
+		uint rem = i;
+		uint iz = rem / (nx * ny);
+		rem -= iz * (nx * ny);
+		uint iy = rem / nx;
+		uint ix = rem - iy * nx;
+
+		uint x = x0 + ix;
+		uint y = y0 + iy;
+		uint z = z0 + iz;
+
+		gaussian_keys_unsorted[off + i] = z * grid.x * grid.y + y * grid.x + x;
+		gaussian_values_unsorted[off + i] = idx;
 	}
 }
 
@@ -81,7 +127,6 @@ __global__ void duplicateWithKeysParallel(
     if (tid >= total_intersections) return;
     
     // Binary search to find which Gaussian this output belongs to
-    // Note: This is a simplified binary search - you may want to use a proper CUDA implementation
     int left = 0, right = P - 1;
     int gaussian_id = 0;
     while (left <= right) {
@@ -332,7 +377,7 @@ int CudaRasterizer::Rasterizer::forward(
 
 	// Key duplication
 	if (debug) cudaEventRecord(events[4]);
-	// duplicateWithKeys << <(P + 255) / 256, 256 >> > (
+	// duplicateWithKeys << <(P + 3) / 4, 256 >> > (
 	// 	P,
 	// 	geomState.aabbs,
 	// 	geomState.point_offsets,
