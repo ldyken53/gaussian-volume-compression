@@ -357,6 +357,7 @@ __global__ void sampleRenderCUDA(const int S,
 	float* dL_dweights,
 	glm::vec3* dL_dscales,
 	glm::vec4* dL_drots,
+	float* dL_dconics,
 	int* count_intersections)
 {
 	const int THREADS_PER_SAMPLE = 1; // One warp per sample
@@ -485,14 +486,21 @@ __global__ void sampleRenderCUDA(const int S,
 		atomicAdd(&dL_dmeans[primID * 3 + 1], dL_dmean_y);
 		atomicAdd(&dL_dmeans[primID * 3 + 2], dL_dmean_z);
 
-		float dL_dconic[6] = {
-			dL_dxx,
-			dL_dxy,
-			dL_dxz,
-			dL_dyy,
-			dL_dyz,
-			dL_dzz
-		};
+		atomicAdd(&dL_dconics[primID * 6 + 0], dL_dxx);
+		atomicAdd(&dL_dconics[primID * 6 + 1], dL_dxy);
+		atomicAdd(&dL_dconics[primID * 6 + 2], dL_dxz);
+		atomicAdd(&dL_dconics[primID * 6 + 3], dL_dyy);
+		atomicAdd(&dL_dconics[primID * 6 + 4], dL_dyz);
+		atomicAdd(&dL_dconics[primID * 6 + 5], dL_dzz);
+
+		// float dL_dconic[6] = {
+		// 	dL_dxx,
+		// 	dL_dxy,
+		// 	dL_dxz,
+		// 	dL_dyy,
+		// 	dL_dyz,
+		// 	dL_dzz
+		// };
 		// // Compute dL_dcov as -conic * dL_dconic * conic
 		// // since conic is inverse of cov
 		// const float dL_dconic_conic[6] = {
@@ -600,7 +608,18 @@ void BACKWARD::render(
 			dL_dweights,
 			dL_dscale,
 			dL_drot,
+			dL_dconics,
 			count_intersections);
+		preprocessCUDA<<<(P + block.x - 1) / block.x, block.x>>>(
+			P,
+			(glm::vec3*)scales,
+			scale_modifier,
+			(glm::vec4*)rotations,
+			conics,
+			dL_dscale,
+			dL_drot,
+			dL_dconics
+		);
 	} else {
 		dim3 block(256);
 		dim3 grid((P * 32 + block.x - 1) / block.x); // 32 threads per Gaussian
