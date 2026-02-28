@@ -32,6 +32,7 @@ namespace BACKWARD
 		float* dL_dweights,
 		glm::vec3* dL_dscale,
 		glm::vec4* dL_drot,
+		float* dL_dconics,
 		int* count_intersections,
 		const bool use_gaussian_bvh
 	);

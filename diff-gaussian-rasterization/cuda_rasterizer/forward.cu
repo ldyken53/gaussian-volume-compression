@@ -256,24 +256,6 @@ __global__ void renderCUDA(const int P,
 	int count = 0;
 	cuBQL::fixedBoxQuery::forEachLeaf<float,3>(
 	[&](uint32_t* primIDs, int count2) {
-		// for (int i = 0; i < count2; i++) {
-		// 	uint primID = primIDs[i]; 
-		// 	float3 d = make_float3(
-		// 		samples[primID * 3] - position.x, 
-		// 		samples[primID * 3 + 1] - position.y, 
-		// 		samples[primID * 3 + 2] - position.z
-		// 	);
-		// 	float quad_form = (
-		// 		d.x * (conic[0] * d.x + conic[1] * d.y + conic[2] * d.z) +
-		// 		d.y * (conic[1] * d.x + conic[3] * d.y + conic[4] * d.z) +
-		// 		d.z * (conic[2] * d.x + conic[4] * d.y + conic[5] * d.z)
-		// 	);
-		// 	float power = -0.5 * quad_form;
-		// 	if (power < -14.0 || power > 0.0) continue;
-		// 	float weight = weights[idx] * exp(power);
-		// 	atomicAdd(&out_testw[primID], weight);
-		// 	atomicAdd(&out_test[primID], weight * values[idx]);
-		// }
 		// Distribute primitives across threads in the warp
 		for (int i = thread_in_warp; i < count2; i += THREADS_PER_GAUSSIAN) {
 			uint primID = primIDs[i]; 
@@ -288,7 +270,7 @@ __global__ void renderCUDA(const int P,
 				d.z * (conic[2] * d.x + conic[4] * d.y + conic[5] * d.z)
 			);
 			float power = -0.5 * quad_form;
-			if (power < -14.0 || power > 0.0) continue;
+			if (power < -14.0 || power > 0.0) {continue;};
 			float weight = weights[idx] * exp(power);
 			atomicAdd(&out_testw[primID], weight);
 			atomicAdd(&out_test[primID], weight * values[idx]);
@@ -306,7 +288,6 @@ __global__ void renderCUDA(const int P,
 	}
 }
 
-// Perform initial steps for each Gaussian prior to rasterization.
 __global__ void sampleRenderCUDA(const int S,
 	const float* means3D,
 	const float* values,
@@ -318,60 +299,94 @@ __global__ void sampleRenderCUDA(const int S,
 	float* out_testw,
 	int* count_intersections)
 {
-	const int THREADS_PER_SAMPLE = 32; // One warp per sample
+	const int THREADS_PER_SAMPLE = 32;
 	auto block = cg::this_thread_block();
 	auto warp = cg::tiled_partition<THREADS_PER_SAMPLE>(block);
 	int idx = blockIdx.x * (blockDim.x / THREADS_PER_SAMPLE) + (threadIdx.x / THREADS_PER_SAMPLE);
-	int thread_in_warp = warp.thread_rank();
-	// auto idx = cg::this_grid().thread_rank();
+	int lane = warp.thread_rank();
+
 	if (idx >= S)
 		return;
-	const float3 sample = { samples[3 * idx], samples[3 * idx + 1], samples[3 * idx + 2] };
-	float acc_weight = 0.0;
-	float acc_value = 0.0;
 
+	const float3 sample = { samples[3 * idx], samples[3 * idx + 1], samples[3 * idx + 2] };
+	float acc_weight = 0.f;
+	float acc_value = 0.f;
 	int count = 0;
-	cuBQL::fixedBoxQuery::forEachLeaf<float,3>(
-	[&](uint32_t* primIDs, int prim_count) {
-		for (int i = thread_in_warp; i < prim_count; i += THREADS_PER_SAMPLE) {
-			int primID = primIDs[i];
-			const float3 position = { means3D[3 * primID], means3D[3 * primID + 1], means3D[3 * primID + 2] };
-			const float conic[6] = {
-				conics[primID * 6 + 0],
-				conics[primID * 6 + 1],
-				conics[primID * 6 + 2],
-				conics[primID * 6 + 3],
-				conics[primID * 6 + 4],
-				conics[primID * 6 + 5]
-			};
-			float3 d = make_float3(
-				sample.x - position.x, 
-				sample.y - position.y, 
-				sample.z - position.z
-			);
-			float quad_form = (
-				d.x * (conic[0] * d.x + conic[1] * d.y + conic[2] * d.z) +
-				d.y * (conic[1] * d.x + conic[3] * d.y + conic[4] * d.z) +
-				d.z * (conic[2] * d.x + conic[4] * d.y + conic[5] * d.z)
-			);
-			float power = -0.5 * quad_form;
-			if (power < -14.0 || power > 0.0) continue;
-			float weight = weights[primID] * exp(power);
-			acc_weight += weight;
-			acc_value += weight * values[primID];
-			count++;
+
+	int stack[64];
+	int sp = 0;
+
+	if (lane == 0)
+		stack[sp++] = 0;
+
+	for (;;) {
+		if (warp.shfl(sp, 0) == 0) break;
+
+		int nodeIdx;
+		if (lane == 0) nodeIdx = stack[--sp];
+		nodeIdx = warp.shfl(nodeIdx, 0);
+
+		const auto& node = bvh.nodes[nodeIdx];
+
+		if (sample.x < node.bounds.lower.x || sample.x > node.bounds.upper.x ||
+		    sample.y < node.bounds.lower.y || sample.y > node.bounds.upper.y ||
+		    sample.z < node.bounds.lower.z || sample.z > node.bounds.upper.z)
+			continue;
+
+		if (node.admin.count == 0) {
+			if (lane == 0) {
+				int child = (int)node.admin.offset;
+				stack[sp++] = child;
+				stack[sp++] = child + 1;
+			}
+		} else {
+			int base = (int)node.admin.offset;
+			int nprims = (int)node.admin.count;
+
+			for (int i = lane; i < nprims; i += THREADS_PER_SAMPLE) {
+				uint32_t primID = bvh.primIDs[base + i];
+
+				const float3 position = {
+					means3D[3 * primID],
+					means3D[3 * primID + 1],
+					means3D[3 * primID + 2]
+				};
+				const float c0 = conics[primID * 6 + 0];
+				const float c1 = conics[primID * 6 + 1];
+				const float c2 = conics[primID * 6 + 2];
+				const float c3 = conics[primID * 6 + 3];
+				const float c4 = conics[primID * 6 + 4];
+				const float c5 = conics[primID * 6 + 5];
+
+				float3 d = make_float3(
+					sample.x - position.x,
+					sample.y - position.y,
+					sample.z - position.z
+				);
+				float quad_form =
+					d.x * (c0 * d.x + c1 * d.y + c2 * d.z) +
+					d.y * (c1 * d.x + c3 * d.y + c4 * d.z) +
+					d.z * (c2 * d.x + c4 * d.y + c5 * d.z);
+
+				float power = -0.5f * quad_form;
+				if (power >= -14.f && power <= 0.f) {
+					float w = weights[primID] * expf(power);
+					acc_weight += w;
+					acc_value += w * values[primID];
+					count++;
+				}
+			}
 		}
-		return 0;
-    },
-		bvh,
-		cuBQL::box3f(cuBQL::vec3f(sample.x, sample.y, sample.z))
-	);
+	}
+
 	acc_weight = cg::reduce(warp, acc_weight, cg::plus<float>());
-	acc_value = cg::reduce(warp, acc_value, cg::plus<float>());
-	if (thread_in_warp == 0) {
+	acc_value  = cg::reduce(warp, acc_value,  cg::plus<float>());
+	count      = cg::reduce(warp, count,      cg::plus<int>());
+
+	if (lane == 0) {
 		if (acc_weight <= WEIGHT_CUTOFF) {
-			out_test[idx] = -1.0;
-			out_testw[idx] = 0.0;
+			out_test[idx] = -1.f;
+			out_testw[idx] = 0.f;
 		} else {
 			out_test[idx] = acc_value / acc_weight;
 			out_testw[idx] = acc_weight;

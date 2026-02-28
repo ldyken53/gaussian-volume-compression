@@ -220,10 +220,12 @@ void CudaRasterizer::Rasterizer::backward(
 	}
 
 	int* d_count_intersections = nullptr;
+	float* dL_dconics = nullptr;
 	if (use_gaussian_bvh) {
 		CHECK_CUDA(cudaMalloc(&d_count_intersections, sizeof(int) * S), debug);
 	} else {
 		CHECK_CUDA(cudaMalloc(&d_count_intersections, sizeof(int) * P), debug);
+		CHECK_CUDA(cudaMalloc(&dL_dconics, sizeof(float) * P * 6), debug);
 	}
 
 	if (debug) cudaEventRecord(events[0]);
@@ -249,6 +251,7 @@ void CudaRasterizer::Rasterizer::backward(
 			dL_dweights,
 			(glm::vec3*)dL_dscale,
 			(glm::vec4*)dL_drot,
+			dL_dconics,
 			d_count_intersections,
 			true), debug);
 	} else {
@@ -272,6 +275,7 @@ void CudaRasterizer::Rasterizer::backward(
 			dL_dweights,
 			(glm::vec3*)dL_dscale,
 			(glm::vec4*)dL_drot,
+			dL_dconics,
 			d_count_intersections,
 			false), debug);
 	}
@@ -321,6 +325,7 @@ void CudaRasterizer::Rasterizer::backward(
 	}
 
 	CHECK_CUDA(cudaFree(d_count_intersections), debug);
+	CHECK_CUDA(cudaFree(dL_dconics), debug);
 
 	if (debug) {
 		cudaDeviceSynchronize(); // ensure all events are completed
