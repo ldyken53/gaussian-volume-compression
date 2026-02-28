@@ -25,40 +25,42 @@ __global__ void buildBoxes(
 }
 
 // Host entrypoint: alloc → kernel → build BVH → free temp buffer
-void BuildBVH(const torch::Tensor& samples, const bool debug) {
+void BuildBVH(const torch::Tensor& samples, const bool debug, const bool use_gaussian_bvh) {
     stored_samples = samples.contiguous();
-    cudaEvent_t gpuStart, gpuStop;
-    cudaEventCreate(&gpuStart);
-    cudaEventCreate(&gpuStop);
-    cudaEventRecord(gpuStart, 0);
-    int  N = stored_samples.size(0);
-    auto ptr = stored_samples.data_ptr<float>();
+    if (!use_gaussian_bvh) {
+        cudaEvent_t gpuStart, gpuStop;
+        cudaEventCreate(&gpuStart);
+        cudaEventCreate(&gpuStop);
+        cudaEventRecord(gpuStart, 0);
+        int  N = stored_samples.size(0);
+        auto ptr = stored_samples.data_ptr<float>();
 
-    cuBQL::cuda::free(samples_bvh);
-    samples_bvh.nodes    = nullptr;
-    samples_bvh.primIDs  = nullptr;
-    samples_bvh.numNodes = 0;
-    samples_bvh.numPrims = 0;
-    samples_bvh = cuBQL::bvh3f();
-    cuBQL::box3f* d_boxes;
-    cudaMalloc(&d_boxes, N * sizeof(cuBQL::box3f));
+        cuBQL::cuda::free(samples_bvh);
+        samples_bvh.nodes    = nullptr;
+        samples_bvh.primIDs  = nullptr;
+        samples_bvh.numNodes = 0;
+        samples_bvh.numPrims = 0;
+        samples_bvh = cuBQL::bvh3f();
+        cuBQL::box3f* d_boxes;
+        cudaMalloc(&d_boxes, N * sizeof(cuBQL::box3f));
 
-    const int threads = 256;
-    const int blocks  = (N + threads - 1) / threads;
-    buildBoxes<<<blocks, threads>>>(d_boxes, ptr, N);
-    cuBQL::BuildConfig cfg;
-    cfg.makeLeafThreshold = 257;
-    // cfg.maxAllowedLeafSize = 256;
-    cuBQL::cuda::radixBuilder(samples_bvh, d_boxes, N, cfg);
-    // cuBQL::gpuBuilder(samples_bvh, d_boxes, N, cfg);
-    cudaFree(d_boxes);
+        const int threads = 256;
+        const int blocks  = (N + threads - 1) / threads;
+        buildBoxes<<<blocks, threads>>>(d_boxes, ptr, N);
+        cuBQL::BuildConfig cfg;
+        cfg.makeLeafThreshold = 257;
+        // cfg.maxAllowedLeafSize = 256;
+        cuBQL::cuda::radixBuilder(samples_bvh, d_boxes, N, cfg);
+        // cuBQL::gpuBuilder(samples_bvh, d_boxes, N, cfg);
+        cudaFree(d_boxes);
 
-    cudaEventRecord(gpuStop, 0);
-    cudaEventSynchronize(gpuStop);  
-    float msBoxes = 0.f;
-    cudaEventElapsedTime(&msBoxes, gpuStart, gpuStop);
-    if (debug) {
-        std::cout << "Sample BVH time: " << msBoxes << " ms\n";
+        cudaEventRecord(gpuStop, 0);
+        cudaEventSynchronize(gpuStop);  
+        float msBoxes = 0.f;
+        cudaEventElapsedTime(&msBoxes, gpuStart, gpuStop);
+        if (debug) {
+            std::cout << "Sample BVH time: " << msBoxes << " ms\n";
+        }
     }
 }
 

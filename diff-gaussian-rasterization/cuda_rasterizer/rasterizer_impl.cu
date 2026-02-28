@@ -275,11 +275,11 @@ void CudaRasterizer::Rasterizer::backward(
 
 	int* d_count_intersections = nullptr;
 	float* dL_dconics = nullptr;
+	CHECK_CUDA(cudaMalloc(&dL_dconics, sizeof(float) * P * 6), debug);
 	if (use_gaussian_bvh) {
 		CHECK_CUDA(cudaMalloc(&d_count_intersections, sizeof(int) * S), debug);
 	} else {
 		CHECK_CUDA(cudaMalloc(&d_count_intersections, sizeof(int) * P), debug);
-		CHECK_CUDA(cudaMalloc(&dL_dconics, sizeof(float) * P * 6), debug);
 	}
 
 	if (debug) cudaEventRecord(events[0]);

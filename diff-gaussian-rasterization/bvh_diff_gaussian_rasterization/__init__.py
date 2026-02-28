@@ -155,12 +155,11 @@ class GaussianRasterizer(nn.Module):
         super().__init__()
         self.raster_settings = raster_settings
 
-    def build_bvh(self, samples, force_debug=False):
+    def build_bvh(self, samples, force_debug=False, use_gaussian_bvh=False):
         if force_debug:
-            _C.build_bvh(samples, True)
+            _C.build_bvh(samples, True, use_gaussian_bvh)
         else:
-            _C.build_bvh(samples, self.raster_settings.debug)
-
+            _C.build_bvh(samples, self.raster_settings.debug, use_gaussian_bvh)
     def forward(
         self,
         means3D,
