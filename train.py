@@ -13,7 +13,7 @@ from tqdm import tqdm
 import pyvista as pv
 
 from arguments import ModelParams, OptimizationParams, PipelineParams
-from gaussian_renderer import init_rasterizer, render, build_bvh, intersect
+from gaussian_renderer import init_rasterizer, render, build_bvh
 from gpu_mesh_sampling import gpu_sample, gpu_sampleu
 from scene import GaussianModel, Scene
 from utils.debug_utils import tensor_to_vtk, analyze_array
@@ -95,10 +95,10 @@ def training(
     save_cell = samples_tf.reshape(-1, 3)
     print("Save cell made")
     if precompute_samples:
-        big_gt = np.load("big_gt.npy")
+        big_gt = np.load("../../gaussian-volume/richtmyer_meshkov_big_gt.npy")
         num_batches = big_gt.shape[0]
         size = big_gt.shape[1]
-        big_samples = np.load("big_samples.npy")
+        big_samples = np.load("../../gaussian-volume/richtmyer_meshkov_big_samples.npy")
     else:
         # if struct:
         #     save_gt = gpu_sample(
@@ -128,6 +128,30 @@ def training(
             np.array(gaussians.mins), 
             np.array(gaussians.maxes)
         )
+        # # Sort spatially via Morton code (Z-order curve)
+        # def part1by2(n):
+        #     n = n.astype(np.uint64) & 0x1fffff
+        #     n = (n | (n << 32)) & 0x1f00000000ffff
+        #     n = (n | (n << 16)) & 0x1f0000ff0000ff
+        #     n = (n | (n << 8))  & 0x100f00f00f00f00f
+        #     n = (n | (n << 4))  & 0x10c30c30c30c30c3
+        #     n = (n | (n << 2))  & 0x1249249249249249
+        #     return n
+
+        # scale = (1 << 21) - 1
+        # big_samples = big_samples.reshape(num_batches, size, 3)
+
+        # norm = np.clip(big_samples, 0.0, 1.0)
+        # q = (norm * scale).astype(np.uint64)
+
+        # morton = (
+        #     part1by2(q[:, :, 0])
+        #     | (part1by2(q[:, :, 1]) << 1)
+        #     | (part1by2(q[:, :, 2]) << 2)
+        # )
+        # order = np.argsort(morton, axis=1)
+        # big_samples = np.take_along_axis(big_samples, order[:, :, None], axis=1)
+        # big_samples = big_samples.reshape(num_batches * size, 3)
         if struct:
             big_gt = gpu_sample(
                 gaussians.mesh.dimensions,
@@ -176,7 +200,7 @@ def training(
     gt = torch.tensor(gt_cells).cuda()
     if debug_from == 0:
         pipe.debug = True
-    use_gaussian_bvh = False
+    use_gaussian_bvh = True
     init_rasterizer(
         gaussians,
         pipe,
@@ -213,7 +237,7 @@ def training(
             loss_samples,
             big_samples[jit_idx][:(size - num_loss)]
         ])
-        build_bvh(torch.tensor(current_samples, dtype=torch.float, device="cuda"), deb)
+        build_bvh(torch.tensor(current_samples, dtype=torch.float, device="cuda"), deb, use_gaussian_bvh)
 
         gaussians.update_learning_rate(iteration)
 
@@ -263,7 +287,7 @@ def training(
             false_positive = (1 * (1 - torch.exp(-k * weights[mask]))).mean()
         else:
             false_positive = torch.tensor(0., device="cuda")
-        loss = l1_lv + false_positive + false_negative + overlap_loss
+        loss = l1_lv + false_negative
         loss.backward()
         iter_end.record()
 
@@ -349,20 +373,20 @@ def training(
                 progress_bar.close()
 
             # Save
-            if iteration in saving_iterations:
-                print("\n[ITER {}] Saving Gaussians".format(iteration))
-                scene.save(iteration)
-                cpu_cells = cells.cpu().numpy()
-                tensor_to_vtk(cpu_cells.reshape(cell_count, cell_count, cell_count), f"out_vtk/test_{iteration}.vtk", spacing)
-                tensor_to_vtk(torch.abs((cells - gt)).cpu().numpy().reshape(cell_count, cell_count, cell_count), f"out_vtk/test_{iteration}_loss.vtk", spacing)
-                vtk_files.append({
-                    "name": f"test_{iteration}.vtk",
-                    "time": float(saving_iterations.index(iteration))
-                })                
-                vtk_files_loss.append({
-                    "name": f"test_{iteration}_loss.vtk",
-                    "time": float(saving_iterations.index(iteration))
-                })
+            # if iteration in saving_iterations:
+            #     print("\n[ITER {}] Saving Gaussians".format(iteration))
+            #     scene.save(iteration)
+            #     cpu_cells = cells.cpu().numpy()
+            #     tensor_to_vtk(cpu_cells.reshape(cell_count, cell_count, cell_count), f"out_vtk/test_{iteration}.vtk", spacing)
+            #     tensor_to_vtk(torch.abs((cells - gt)).cpu().numpy().reshape(cell_count, cell_count, cell_count), f"out_vtk/test_{iteration}_loss.vtk", spacing)
+            #     vtk_files.append({
+            #         "name": f"test_{iteration}.vtk",
+            #         "time": float(saving_iterations.index(iteration))
+            #     })                
+            #     vtk_files_loss.append({
+            #         "name": f"test_{iteration}_loss.vtk",
+            #         "time": float(saving_iterations.index(iteration))
+            #     })
 
             # Densification
             if (iteration <= opt.densify_until_iter and
@@ -371,17 +395,15 @@ def training(
                  iteration not in saving_iterations and
                  iteration not in testing_iterations
             ):
-                # if densifies > 0 and densifies % 30 == 0 and error_thresh > 0.0125:
-                #     error_thresh *= 0.5
-                #     new_scale *= 0.5
-                #     print(f"New thresh {error_thresh}, new scale {new_scale}")
 
-                # cpu_cells = cells.cpu().numpy()
-                # print(f"False negative: {np.count_nonzero(np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1))}, false positive: {np.count_nonzero(np.logical_and(cpu_cells.ravel() != -1, gt_cells.ravel() == -1))}")
-                # mse = torch.mean((cells - gt) ** 2)
-                # psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
-                # mse2 = torch.mean((cells[torch.logical_and(cells != -1, gt != -1)] - gt[torch.logical_and(cells != -1, gt != -1)]) ** 2)
-                # psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
+
+                loss_idx = torch.topk(
+                    torch.abs(cells.ravel() - gt.ravel()),
+                    # (cells.ravel() - gt.ravel()) ** 2,
+                    # 20 * int((args.cap_max - gaussians.get_values.shape[0]) // (1 + (opt.iterations - iteration) / opt.densification_interval)),
+                    min(20000, args.cap_max - gaussians.get_values.shape[0] + torch.count_nonzero(gaussians.get_weight <= 0.005) + 1000)
+                ).indices.cpu().numpy()
+
                 gaussians.densify_and_prune(
                     opt.densify_grad_threshold,
                     min_weight,
@@ -393,12 +415,6 @@ def training(
                     gt_cells[loss_idx].reshape(-1, 1)
                 )
                 densifies += 1
-                # error_thresh -= 0.002
-
-                # if iteration % opt.weight_reset_interval == 0 or (
-                #     dataset.white_background and iteration == opt.densify_from_iter
-                # ):
-                #     gaussians.reset_weight()
 
             # Optimizer step
             if iteration < opt.iterations:
@@ -411,19 +427,19 @@ def training(
                     (gaussians.capture(), iteration),
                     os.path.join(scene.model_path, "/chkpnt{iteration}.pth"),
                 )
-    series = {
-        "file-series-version": "1.0",
-        "files": vtk_files
-    }
-    with open("out_vtk/test.vtk.series", "w") as jf:
-        json.dump(series, jf, indent=2)
+    # series = {
+    #     "file-series-version": "1.0",
+    #     "files": vtk_files
+    # }
+    # with open("out_vtk/test.vtk.series", "w") as jf:
+    #     json.dump(series, jf, indent=2)
 
-    series_loss = {
-        "file-series-version": "1.0",
-        "files": vtk_files_loss
-    }
-    with open("out_vtk/test_loss.vtk.series", "w") as jf:
-        json.dump(series_loss, jf, indent=2)
+    # series_loss = {
+    #     "file-series-version": "1.0",
+    #     "files": vtk_files_loss
+    # }
+    # with open("out_vtk/test_loss.vtk.series", "w") as jf:
+    #     json.dump(series_loss, jf, indent=2)
 
     if log_to_file:
         log_file_path = os.path.join(scene.model_path, 'training_log.json')
