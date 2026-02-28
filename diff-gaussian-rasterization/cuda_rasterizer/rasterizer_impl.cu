@@ -77,8 +77,8 @@ void CudaRasterizer::Rasterizer::forward(
 	if (debug) cudaEventRecord(events[2]);
 	if (use_gaussian_bvh) {
 		cuBQL::BuildConfig cfg;
-    	cfg.makeLeafThreshold = 33;
-		cfg.maxAllowedLeafSize = 32;
+    	// cfg.makeLeafThreshold = 33;
+		// cfg.maxAllowedLeafSize = 32;
     	cuBQL::cuda::radixBuilder(gaussian_bvh, aabbs, P, cfg);
 	}
 	if (debug) cudaEventRecord(events[3]);
@@ -115,13 +115,67 @@ void CudaRasterizer::Rasterizer::forward(
 			d_count_intersections,
 			use_gaussian_bvh
 		), debug)
-	}
-	if (debug) cudaEventRecord(events[5]);
+		}
+		if (debug) cudaEventRecord(events[5]);
 
-	if (debug) {
-		if (use_gaussian_bvh) {
-			std::vector<int> h_counts(S, 0);
-			CHECK_CUDA(cudaMemcpy(h_counts.data(), d_count_intersections, sizeof(int) * S, cudaMemcpyDeviceToHost), debug);
+		const int num_count_entries = use_gaussian_bvh ? S : P;
+		float inclusive_scan_time_ms = 0.0f;
+		int total_intersections = 0;
+		if (num_count_entries > 0) {
+			int* d_prefix_intersections = nullptr;
+			void* d_scan_temp_storage = nullptr;
+			size_t scan_temp_storage_bytes = 0;
+			CHECK_CUDA(cudaMalloc(&d_prefix_intersections, sizeof(int) * num_count_entries), debug);
+			CHECK_CUDA(cub::DeviceScan::InclusiveSum(
+				d_scan_temp_storage,
+				scan_temp_storage_bytes,
+				d_count_intersections,
+				d_prefix_intersections,
+				num_count_entries
+			), debug);
+			CHECK_CUDA(cudaMalloc(&d_scan_temp_storage, scan_temp_storage_bytes), debug);
+			if (debug) {
+				cudaEvent_t scan_start, scan_stop;
+				cudaEventCreate(&scan_start);
+				cudaEventCreate(&scan_stop);
+				cudaEventRecord(scan_start);
+				CHECK_CUDA(cub::DeviceScan::InclusiveSum(
+					d_scan_temp_storage,
+					scan_temp_storage_bytes,
+					d_count_intersections,
+					d_prefix_intersections,
+					num_count_entries
+				), debug);
+				cudaEventRecord(scan_stop);
+				cudaEventSynchronize(scan_stop);
+				cudaEventElapsedTime(&inclusive_scan_time_ms, scan_start, scan_stop);
+				cudaEventDestroy(scan_start);
+				cudaEventDestroy(scan_stop);
+			} else {
+				CHECK_CUDA(cub::DeviceScan::InclusiveSum(
+					d_scan_temp_storage,
+					scan_temp_storage_bytes,
+					d_count_intersections,
+					d_prefix_intersections,
+					num_count_entries
+				), debug);
+			}
+			CHECK_CUDA(cudaMemcpy(&total_intersections,
+				d_prefix_intersections + (num_count_entries - 1),
+				sizeof(int),
+				cudaMemcpyDeviceToHost), debug);
+			CHECK_CUDA(cudaFree(d_scan_temp_storage), debug);
+			CHECK_CUDA(cudaFree(d_prefix_intersections), debug);
+		}
+		if (debug) {
+			std::printf("Inclusive scan: %.3f ms, total intersections=%d\n",
+				inclusive_scan_time_ms, total_intersections);
+		}
+
+		if (debug) {
+			if (use_gaussian_bvh) {
+				std::vector<int> h_counts(S, 0);
+				CHECK_CUDA(cudaMemcpy(h_counts.data(), d_count_intersections, sizeof(int) * S, cudaMemcpyDeviceToHost), debug);
 
 			// Compute max and average
 			long long sum = 0;
@@ -278,13 +332,67 @@ void CudaRasterizer::Rasterizer::backward(
 			dL_dconics,
 			d_count_intersections,
 			false), debug);
-	}
-	if (debug) cudaEventRecord(events[1]);
+		}
+		if (debug) cudaEventRecord(events[1]);
 
-	if (debug) {
-		if (use_gaussian_bvh) {
-			std::vector<int> h_counts(S, 0);
-			CHECK_CUDA(cudaMemcpy(h_counts.data(), d_count_intersections, sizeof(int) * S, cudaMemcpyDeviceToHost), debug);
+		const int num_count_entries = use_gaussian_bvh ? S : P;
+		float inclusive_scan_time_ms = 0.0f;
+		int total_intersections = 0;
+		if (num_count_entries > 0) {
+			int* d_prefix_intersections = nullptr;
+			void* d_scan_temp_storage = nullptr;
+			size_t scan_temp_storage_bytes = 0;
+			CHECK_CUDA(cudaMalloc(&d_prefix_intersections, sizeof(int) * num_count_entries), debug);
+			CHECK_CUDA(cub::DeviceScan::InclusiveSum(
+				d_scan_temp_storage,
+				scan_temp_storage_bytes,
+				d_count_intersections,
+				d_prefix_intersections,
+				num_count_entries
+			), debug);
+			CHECK_CUDA(cudaMalloc(&d_scan_temp_storage, scan_temp_storage_bytes), debug);
+			if (debug) {
+				cudaEvent_t scan_start, scan_stop;
+				cudaEventCreate(&scan_start);
+				cudaEventCreate(&scan_stop);
+				cudaEventRecord(scan_start);
+				CHECK_CUDA(cub::DeviceScan::InclusiveSum(
+					d_scan_temp_storage,
+					scan_temp_storage_bytes,
+					d_count_intersections,
+					d_prefix_intersections,
+					num_count_entries
+				), debug);
+				cudaEventRecord(scan_stop);
+				cudaEventSynchronize(scan_stop);
+				cudaEventElapsedTime(&inclusive_scan_time_ms, scan_start, scan_stop);
+				cudaEventDestroy(scan_start);
+				cudaEventDestroy(scan_stop);
+			} else {
+				CHECK_CUDA(cub::DeviceScan::InclusiveSum(
+					d_scan_temp_storage,
+					scan_temp_storage_bytes,
+					d_count_intersections,
+					d_prefix_intersections,
+					num_count_entries
+				), debug);
+			}
+			CHECK_CUDA(cudaMemcpy(&total_intersections,
+				d_prefix_intersections + (num_count_entries - 1),
+				sizeof(int),
+				cudaMemcpyDeviceToHost), debug);
+			CHECK_CUDA(cudaFree(d_scan_temp_storage), debug);
+			CHECK_CUDA(cudaFree(d_prefix_intersections), debug);
+		}
+		if (debug) {
+			std::printf("Backward inclusive scan: %.3f ms, total intersections=%d\n",
+				inclusive_scan_time_ms, total_intersections);
+		}
+
+		if (debug) {
+			if (use_gaussian_bvh) {
+				std::vector<int> h_counts(S, 0);
+				CHECK_CUDA(cudaMemcpy(h_counts.data(), d_count_intersections, sizeof(int) * S, cudaMemcpyDeviceToHost), debug);
 
 			// Compute max and average
 			long long sum = 0;
@@ -326,149 +434,6 @@ void CudaRasterizer::Rasterizer::backward(
 
 	CHECK_CUDA(cudaFree(d_count_intersections), debug);
 	CHECK_CUDA(cudaFree(dL_dconics), debug);
-
-	if (debug) {
-		cudaDeviceSynchronize(); // ensure all events are completed
-		float elapsed_time;
-		const char* operation_names[] = { "Backward Render" };
-
-		for (int i = 0; i < 1; ++i) {
-			cudaEventElapsedTime(&elapsed_time, events[i * 2], events[i * 2 + 1]);
-			std::cout << operation_names[i] << " time: " << elapsed_time << " ms" << std::endl;
-		}
-
-		for (int i = 0; i < 2; ++i) {
-			cudaEventDestroy(events[i]);
-		}
-	}
-}
-
-// Forward procedure for intersecting Gaussians
-void CudaRasterizer::Rasterizer::intersect_forward(
-	const int P,
-	const float* means3D,
-	const float* scales,
-	const float scale_modifier,
-	const float* rotations,
-	const float3 volume_mins,
-	const float3 volume_maxes,
-	cuBQL::bvh3f& gaussian_bvh,
-	float* conics,
-	float* intersections,
-	float* intersection_weights,
-	bool debug)
-{
-	// Create CUDA events for timing (only when debug is enabled)
-	cudaEvent_t events[6]; // 8 pairs of start/stop events
-	if (debug) {
-		for (int i = 0; i < 6; i++) {
-			cudaEventCreate(&events[i]);
-		}
-	}
-	
-	cuBQL::box3f* aabbs = nullptr;
-	CHECK_CUDA(cudaMalloc(&aabbs, sizeof(cuBQL::box3f) * P), debug);
-
-	// Preprocessing
-	if (debug) cudaEventRecord(events[0]);
-	CHECK_CUDA(FORWARD::intersect_preprocess(
-		P,
-		means3D,
-		(glm::vec3*)scales,
-		scale_modifier,
-		(glm::vec4*)rotations,
-		conics,
-		aabbs
-	), debug)
-	if (debug) cudaEventRecord(events[1]);
-
-	if (debug) cudaEventRecord(events[2]);
-	cuBQL::BuildConfig cfg;
-	cfg.makeLeafThreshold = 33;
-	cfg.maxAllowedLeafSize = 32;
-	cuBQL::cuda::radixBuilder(gaussian_bvh, aabbs, P, cfg);
-	if (debug) cudaEventRecord(events[3]);
-
-	// Rendering
-	if (debug) cudaEventRecord(events[4]);
-	CHECK_CUDA(FORWARD::intersect(
-		P,
-		means3D,
-		conics,
-		aabbs,
-		gaussian_bvh,
-		intersections,
-		intersection_weights
-	), debug);
-	if (debug) cudaEventRecord(events[5]);
-
-	CHECK_CUDA(cudaFree(aabbs), debug);
-
-	// Calculate and print timing (only when debug is enabled)
-	if (debug) {
-		cudaDeviceSynchronize();
-		
-		float elapsed_time;
-		const char* operation_names[] = {
-			"Preprocess", "BVH", "Render"
-		};
-		
-		for (int i = 0; i < 3; i++) {
-			cudaEventElapsedTime(&elapsed_time, events[i*2], events[i*2+1]);
-			std::cout << operation_names[i] << " time: " << elapsed_time << " ms" << std::endl;
-		}
-		
-		// Clean up events
-		for (int i = 0; i < 6; i++) {
-			cudaEventDestroy(events[i]);
-		}
-	}
-}
-
-// Produce gradients from intersecting Gaussians
-void CudaRasterizer::Rasterizer::intersect_backward(
-	const int P,
-	const float* means3D,
-	const float* scales,
-	const float scale_modifier,
-	const float3 volume_mins, const float3 volume_maxes,
-	const float* rotations,
-	const float* conics,
-	const cuBQL::bvh3f& gaussian_bvh,
-	const float* intersections,
-	const float* intersection_weights,
-	const float* dL_dintersections,
-	const float* dL_dintersection_weights,
-	float* dL_dmean3D,
-	float* dL_dscale,
-	float* dL_drot,
-	bool debug)
-{
-	// Create CUDA events for timing (only when debug is enabled)
-	cudaEvent_t events[2]; // 2 pairs of start/stop events
-	if (debug) {
-		for (int i = 0; i < 2; i++) {
-			cudaEventCreate(&events[i]);
-		}
-	}
-
-	if (debug) cudaEventRecord(events[0]);
-	CHECK_CUDA(BACKWARD::intersect(P,
-		means3D,
-		(glm::vec3*)scales,
-		scale_modifier,
-		(glm::vec4*)rotations,
-		conics,
-		volume_mins, volume_maxes,
-		gaussian_bvh,
-		intersections,
-		intersection_weights,
-		dL_dintersections,
-		dL_dintersection_weights,
-		dL_dmean3D,
-		(glm::vec3*)dL_dscale,
-		(glm::vec4*)dL_drot), debug);
-	if (debug) cudaEventRecord(events[1]);
 
 	if (debug) {
 		cudaDeviceSynchronize(); // ensure all events are completed

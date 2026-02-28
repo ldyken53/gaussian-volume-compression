@@ -36,25 +36,6 @@ namespace BACKWARD
 		int* count_intersections,
 		const bool use_gaussian_bvh
 	);
-
-	void intersect(
-		const int P,
-		const float* means3D,
-		const glm::vec3* scales,
-		const float scale_modifier,
-		const glm::vec4* rotations,
-		const float* conics,
-		const float3 volume_mins,
-		const float3 volume_maxes,
-		const cuBQL::bvh3f& bvh,
-		const float* intersections,
-		const float* intersection_weights,
-		const float* dL_dintersections,
-		const float* dL_dintersection_weights,
-		float* dL_dmean3D,
-		glm::vec3* dL_dscale,
-		glm::vec4* dL_drot
-	);
 }
 
 #endif

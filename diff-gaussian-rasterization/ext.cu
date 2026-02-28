@@ -144,76 +144,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
     );
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
-IntersectGaussiansCUDAWrapper(
-	const torch::Tensor& means3D,
-	const torch::Tensor& scales,
-	const torch::Tensor& rotations,
-	const float scale_modifier,
-	const float min_x, const float min_y, const float min_z, 
-	const float max_x, const float max_y, const float max_z,
-	const float background,
-	const bool debug
-) {
-    cuBQL::cuda::free(gaussian_bvh);
-    gaussian_bvh.nodes    = nullptr;
-    gaussian_bvh.primIDs  = nullptr;
-    gaussian_bvh.numNodes = 0;
-    gaussian_bvh.numPrims = 0;
-    gaussian_bvh = cuBQL::bvh3f();
-
-    return IntersectGaussiansCUDA(
-        means3D,
-        scales,
-        rotations,
-        scale_modifier,
-        min_x, min_y, min_z,
-        max_x, max_y, max_z,
-        background,
-        debug,
-        gaussian_bvh
-    );
-
-}
-
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
-IntersectGaussiansBackwardCUDAWrapper(
-	const torch::Tensor& means3D,
-	const torch::Tensor& scales,
-    const torch::Tensor& rotations,
-	const torch::Tensor& conics,
-	const torch::Tensor& intersections,
-	const torch::Tensor& intersection_weight,
-	const float scale_modifier,
-	const float min_x, const float min_y, const float min_z, 
-	const float max_x, const float max_y, const float max_z,
-	const float background,
-	const torch::Tensor& dL_dintersections,
-	const torch::Tensor& dL_dintersection_weight,
-	const bool debug
-) {
-    return IntersectGaussiansBackwardCUDA(
-        means3D,
-        scales,
-        rotations,
-        conics,
-        intersections,
-        intersection_weight,
-        scale_modifier,
-        min_x, min_y, min_z, 
-        max_x, max_y, max_z,
-        background,
-        dL_dintersections,
-        dL_dintersection_weight,
-        debug,
-        gaussian_bvh
-    );
-}
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("build_bvh", &BuildBVH, "Build BVH from samples");
     m.def("rasterize_gaussians", &RasterizeGaussiansCUDAWrapper, "Forward pass");
     m.def("rasterize_gaussians_backward", &RasterizeGaussiansBackwardCUDAWrapper, "Backward pass");
-    m.def("intersect_gaussians", &IntersectGaussiansCUDAWrapper, "Intersect forward pass");
-    m.def("intersect_gaussians_backward", &IntersectGaussiansBackwardCUDAWrapper, "Intersect backward pass");
 }

@@ -46,34 +46,3 @@ RasterizeGaussiansBackwardCUDA(
 	const cuBQL::bvh3f& bvh,
 	const cuBQL::bvh3f& gaussian_bvh
 );
-
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
-IntersectGaussiansCUDA(
-	const torch::Tensor& means3D,
-	const torch::Tensor& scales,
-	const torch::Tensor& rotations,
-	const float scale_modifier,
-	const float min_x, const float min_y, const float min_z, 
-	const float max_x, const float max_y, const float max_z,
-	const float background,
-	const bool debug,
-	cuBQL::bvh3f& gaussian_bvh
-);
-
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
-IntersectGaussiansBackwardCUDA(
-	const torch::Tensor& means3D,
-	const torch::Tensor& scales,
-	const torch::Tensor& rotations,
-	const torch::Tensor& conics,
-	const torch::Tensor& intersections,
-	const torch::Tensor& intersection_weights,
-	const float scale_modifier,
-	const float min_x, const float min_y, const float min_z, 
-	const float max_x, const float max_y, const float max_z,
-	const float background,
-	const torch::Tensor& dL_dintersections,
-	const torch::Tensor& dL_dintersection_weights,
-	const bool debug,
-	const cuBQL::bvh3f& gaussian_bvh
-);

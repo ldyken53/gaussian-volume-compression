@@ -56,40 +56,6 @@ namespace CudaRasterizer
 			const bool use_gaussian_bvh,
 			bool debug
 		);
-
-		static void intersect_forward(
-			const int P,
-			const float* means3D,
-			const float* scales,
-			const float scale_modifier,
-			const float* rotations,
-			const float3 volume_mins,
-			const float3 volume_maxes,
-			cuBQL::bvh3f& gaussian_bvh,
-			float* conics,
-			float* intersections,
-			float* intersection_weights,
-			bool debug = false
-		);
-
-		static void intersect_backward(
-			const int P,
-			const float* means3D,
-			const float* scales,
-			const float scale_modifier,
-			const float3 volume_mins, const float3 volume_maxes,
-			const float* rotations,
-			const float* conics,
-			const cuBQL::bvh3f& gaussian_bvh,
-			const float* intersections,
-			const float* intersection_weights,
-			const float* dL_dintersections,
-			const float* dL_dintersection_weights,
-			float* dL_dmean3D,
-			float* dL_dscale,
-			float* dL_drot,
-			bool debug
-		);
 	};
 };
 

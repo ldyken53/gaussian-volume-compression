@@ -34,24 +34,6 @@ namespace FORWARD
 		float* out_testw,
 		int* count_intersections,
 		const bool use_gaussian_bvh);
-
-	void intersect_preprocess(
-		const int P,
-		const float* means3D,
-		const glm::vec3* scales,
-		const float scale_modifier,
-		const glm::vec4* rotations,
-		float* conics,
-		cuBQL::box3f* aabbs);
-
-	void intersect(
-		const int P,
-		const float* means3D,
-		const float* conics,
-		const cuBQL::box3f* aabbs,
-		const cuBQL::bvh3f& bvh,
-		float* intersections,
-		float* intersection_weights);
 }
 
 
