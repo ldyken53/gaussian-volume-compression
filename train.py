@@ -17,7 +17,7 @@ from gaussian_renderer import init_rasterizer, render, build_bvh
 from gpu_mesh_sampling import gpu_sample, gpu_sampleu
 from scene import GaussianModel, Scene
 from utils.debug_utils import tensor_to_vtk, analyze_array
-from utils.general_utils import get_expon_lr_func, safe_state
+from utils.general_utils import get_expon_lr_func, safe_state, build_scaling_rotation
 from utils.image_utils import psnr
 from utils.loss_utils import bounding_box_regularization, create_window, l1_loss, l2_loss
 
@@ -117,85 +117,137 @@ def training(
         #         gaussians.mesh.point_data[gaussians.mesh.array_names[0]],
         #         save_cell
         #     )
-        num_batches = 100
-        size = cell_count ** 3
-        big_samples = np.tile(save_cell, (num_batches, 1))
-        big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
-        big_jitter *= np.array(spacing)[None, :]
-        big_jitter[: cell_count**3, :] = 0
-        big_samples = np.clip(
-            big_samples + big_jitter, 
-            np.array(gaussians.mins), 
-            np.array(gaussians.maxes)
-        )
-        # # Sort spatially via Morton code (Z-order curve)
-        # def part1by2(n):
-        #     n = n.astype(np.uint64) & 0x1fffff
-        #     n = (n | (n << 32)) & 0x1f00000000ffff
-        #     n = (n | (n << 16)) & 0x1f0000ff0000ff
-        #     n = (n | (n << 8))  & 0x100f00f00f00f00f
-        #     n = (n | (n << 4))  & 0x10c30c30c30c30c3
-        #     n = (n | (n << 2))  & 0x1249249249249249
-        #     return n
-
-        # scale = (1 << 21) - 1
-        # big_samples = big_samples.reshape(num_batches, size, 3)
-
-        # norm = np.clip(big_samples, 0.0, 1.0)
-        # q = (norm * scale).astype(np.uint64)
-
-        # morton = (
-        #     part1by2(q[:, :, 0])
-        #     | (part1by2(q[:, :, 1]) << 1)
-        #     | (part1by2(q[:, :, 2]) << 2)
+        # num_batches = 100
+        # size = cell_count ** 3
+        # big_samples = np.tile(save_cell, (num_batches, 1))
+        # big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
+        # big_jitter *= np.array(spacing)[None, :]
+        # big_jitter[: cell_count**3, :] = 0
+        # big_samples = np.clip(
+        #     big_samples + big_jitter, 
+        #     np.array(gaussians.mins), 
+        #     np.array(gaussians.maxes)
         # )
-        # order = np.argsort(morton, axis=1)
-        # big_samples = np.take_along_axis(big_samples, order[:, :, None], axis=1)
-        # big_samples = big_samples.reshape(num_batches * size, 3)
-        if struct:
-            big_gt = gpu_sample(
-                gaussians.mesh.dimensions,
-                gaussians.mesh.origin,
-                gaussians.mesh.spacing,
-                gaussians.mesh.point_data['value'],
-                big_samples
-            )
-        else:
-            big_gt = gpu_sampleu(
-                gaussians.mesh.points, 
-                gaussians.mesh.cell_connectivity.astype(np.int64),
-                gaussians.mesh.celltypes.astype(np.int64),
-                gaussians.mesh.offset.astype(np.int64),
-                gaussians.mesh.point_data[gaussians.mesh.array_names[0]],
-                big_samples
-            )
-        big_gt = big_gt.reshape(num_batches, cell_count**3)
-        big_samples = big_samples.reshape(num_batches, cell_count**3, 3)
-        end = time.time()
+        # # # Sort spatially via Morton code (Z-order curve)
+        # # def part1by2(n):
+        # #     n = n.astype(np.uint64) & 0x1fffff
+        # #     n = (n | (n << 32)) & 0x1f00000000ffff
+        # #     n = (n | (n << 16)) & 0x1f0000ff0000ff
+        # #     n = (n | (n << 8))  & 0x100f00f00f00f00f
+        # #     n = (n | (n << 4))  & 0x10c30c30c30c30c3
+        # #     n = (n | (n << 2))  & 0x1249249249249249
+        # #     return n
 
-    # size = cell_count ** 3
-    # start = time.time()
-    # num_batches = 100
-    # idx = torch.randint(gaussians.mesh.n_points, (num_batches, size))
-    # nx, ny, nz = gaussians.mesh.dimensions
-    # ox, oy, oz = gaussians.mesh.origin
-    # sx, sy, sz = gaussians.mesh.spacing
-    # nxny = nx * ny
-    # k, r = np.divmod(idx, nxny)
-    # j, i = np.divmod(r, nx)
-    # x = ox + i * sx
-    # y = oy + j * sy
-    # z = oz + k * sz
-    # mesh_samples = np.stack((x, y, z), axis=-1)
-    # # mesh_samples = gaussians.mesh.points[idx]
-    # mesh_vals = gaussians.mesh.point_data[gaussians.mesh.array_names[0]][idx]
-    # big_gt = mesh_vals.reshape(num_batches, size)
-    # big_samples = mesh_samples.reshape(num_batches, size, 3)
-    # end = time.time()
-    # print(f"Time to sample gt: {end - start}")
+        # # scale = (1 << 21) - 1
+        # # big_samples = big_samples.reshape(num_batches, size, 3)
+
+        # # norm = np.clip(big_samples, 0.0, 1.0)
+        # # q = (norm * scale).astype(np.uint64)
+
+        # # morton = (
+        # #     part1by2(q[:, :, 0])
+        # #     | (part1by2(q[:, :, 1]) << 1)
+        # #     | (part1by2(q[:, :, 2]) << 2)
+        # # )
+        # # order = np.argsort(morton, axis=1)
+        # # big_samples = np.take_along_axis(big_samples, order[:, :, None], axis=1)
+        # # big_samples = big_samples.reshape(num_batches * size, 3)
+        # if struct:
+        #     big_gt = gpu_sample(
+        #         gaussians.mesh.dimensions,
+        #         gaussians.mesh.origin,
+        #         gaussians.mesh.spacing,
+        #         gaussians.mesh.point_data['value'],
+        #         big_samples
+        #     )
+        # else:
+        #     big_gt = gpu_sampleu(
+        #         gaussians.mesh.points, 
+        #         gaussians.mesh.cell_connectivity.astype(np.int64),
+        #         gaussians.mesh.celltypes.astype(np.int64),
+        #         gaussians.mesh.offset.astype(np.int64),
+        #         gaussians.mesh.point_data[gaussians.mesh.array_names[0]],
+        #         big_samples
+        #     )
+        # big_gt = big_gt.reshape(num_batches, cell_count**3)
+        # big_samples = big_samples.reshape(num_batches, cell_count**3, 3)
+        # end = time.time()
+
+        size = cell_count ** 3
+        # start = time.time()
+        num_batches = 100
+        idx = torch.randint(gaussians.mesh.n_points, (num_batches, size))
+        # idx = torch.arange(num_batches * size) % gaussians.mesh.n_points
+        # idx = idx.view(num_batches, size)
+        # nx, ny, nz = gaussians.mesh.dimensions
+        # ox, oy, oz = gaussians.mesh.origin
+        # sx, sy, sz = gaussians.mesh.spacing
+        # nxny = nx * ny
+        # k, r = np.divmod(idx, nxny)
+        # j, i = np.divmod(r, nx)
+        # x = ox + i * sx
+        # y = oy + j * sy
+        # z = oz + k * sz
+        # mesh_samples = np.stack((x, y, z), axis=-1)
+        big_samples = gaussians.mesh.points[idx]
+        # big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
+        # big_jitter *= np.array(spacing)[None, :]
+        # # big_jitter[:size, :] = 0
+        # big_samples = np.clip(
+        #     big_samples + big_jitter, 
+        #     np.array(gaussians.mins), 
+        #     np.array(gaussians.maxes)
+        # )
+        # # # big_samples = mesh_samples + big_jitter
+        # big_samples = big_samples.reshape(num_batches * size, 3)
+        # big_gt = gpu_sampleu(
+        #     gaussians.mesh.points, 
+        #     gaussians.mesh.cell_connectivity.astype(np.int64),
+        #     gaussians.mesh.celltypes.astype(np.int64),
+        #     gaussians.mesh.offset.astype(np.int64),
+        #     gaussians.mesh.point_data[gaussians.mesh.array_names[0]],
+        #     big_samples
+        # )
+        big_gt = gaussians.mesh.point_data[gaussians.mesh.array_names[0]][idx]
+
+        big_gt = big_gt.reshape(num_batches, size)
+        big_samples = big_samples.reshape(num_batches, size, 3)
+
+        big_gt_cuda = torch.tensor(big_gt, dtype=torch.float, device="cuda")
+        big_samples_cuda = torch.tensor(big_samples, dtype=torch.float, device="cuda")
+
+        # Sort spatially via Morton code (Z-order curve)
+        def part1by2_torch(n: torch.Tensor) -> torch.Tensor:
+            # n: int64
+            n = n & 0x1fffff
+            n = (n | (n << 32)) & 0x1f00000000ffff
+            n = (n | (n << 16)) & 0x1f0000ff0000ff
+            n = (n | (n << 8))  & 0x100f00f00f00f00f
+            n = (n | (n << 4))  & 0x10c30c30c30c30c3
+            n = (n | (n << 2))  & 0x1249249249249249
+            return n
+
+        scale = (1 << 21) - 1
+
+        norm = torch.clamp(big_samples_cuda, 0.0, 1.0)
+        q = (norm * scale).to(torch.int64)
+
+        morton = (
+            part1by2_torch(q[:, :, 0])
+            | (part1by2_torch(q[:, :, 1]) << 1)
+            | (part1by2_torch(q[:, :, 2]) << 2)
+        )
+        order = morton.argsort(dim=1)
+        idx3 = order.unsqueeze(-1).expand(-1, -1, 3)  # [B, S, 3]
+        big_samples_cuda = big_samples_cuda.gather(1, idx3)
+        big_gt_cuda = big_gt_cuda.gather(1, order)
+        # big_samples = np.take_along_axis(big_samples, order[:, :, None], axis=1)
+        # big_gt = np.take_along_axis(big_gt, order, axis=1)
+        # end = time.time()
+        # print(f"Time to sample gt: {end - start}")
     
-    big_gt_cuda = torch.tensor(big_gt, dtype=torch.float, device="cuda")
-    big_samples_cuda = torch.tensor(big_samples, dtype=torch.float, device="cuda")
+    # big_gt_cuda = torch.tensor(big_gt, dtype=torch.float, device="cuda")
+    # big_samples_cuda = torch.tensor(big_samples, dtype=torch.float, device="cuda")
     gt = big_gt_cuda[0]
     print(f"Number of invalid samples: {torch.count_nonzero(gt == -1)}")
     # tensor_to_vtk(save_gt.reshape(cell_count, cell_count, cell_count), "test_gt.vtk", spacing)
@@ -215,6 +267,7 @@ def training(
     # loss_samples = big_samples_cuda[0][loss_idx]
     # loss_gt = gt[loss_idx]
 
+    n = False
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
@@ -241,7 +294,7 @@ def training(
         current_samples = big_samples_cuda[jit_idx]
         iter_start.record()
         build_bvh(current_samples, deb, use_gaussian_bvh)
-        gaussians.update_learning_rate(iteration)
+        xyz_lr = gaussians.update_learning_rate(iteration)
 
         # Render
         render_pkg = render(
@@ -263,18 +316,24 @@ def training(
         overlap_loss = torch.tensor(0, device="cuda")
         # overlap_loss = torch.mean(torch.pow(10, 100 * intersection_weights) - 1)
         # overlap_loss = torch.mean(intersection_weights)
-        # recon_mask = torch.logical_and(gt != -1, cells != -1)
+        recon_mask = torch.logical_and(gt != -1, cells != -1)
         # l1_lv = l1_loss(cells[recon_mask], gt[recon_mask])
-        l1_lv = torch.abs(cells - gt).mean()
+        # l1_lv = torch.abs(cells - gt).mean()
         l1_lv = ((cells - gt) ** 2).mean()
         # TODO: FIX FP AND FN FOR CHANGING CELL COUNTS
         k = 600  # Adjust this to control decay rate
         # fn_mask = torch.logical_and(gt != -1, weights < 0.03)
         # false_negative = torch.exp(-k * weights[fn_mask])
         # false_negative = false_negative[false_negative > 0].mean()
-        fn_mask = torch.logical_and(gt != -1, weights > 0.0)
-        fn_vals = torch.clamp(0.011 - weights, min=0)
-        false_negative = args.fn_reg * fn_vals.sum() / ((fn_vals > 0).sum().float() + 1e-8)  
+        fn_mask = torch.logical_and(torch.logical_and(gt != -1, weights > 0.0), weights < 0.011)
+        fn_vals = torch.clamp(0.011 - weights[fn_mask], min=0)
+        # false_negative = args.fn_reg * fn_vals.sum() / ((fn_vals > 0).sum().float() + 1e-8)  
+        false_negative = args.fn_reg * fn_vals.mean()
+
+        fp_mask = torch.logical_and(gt == -1, weights > 0.0)
+        fp_vals = weights[fp_mask]        
+        # false_positive = args.fp_reg * fp_vals.sum() / ((fp_vals > 0).sum().float() + 1e-8)
+        false_positive = args.fp_reg * fp_vals.mean()
 
         # t = 0.01
         # delta = 0.002 
@@ -298,6 +357,12 @@ def training(
         # else:
         #     false_positive = torch.tensor(0., device="cuda")
         loss = l1_lv + false_negative
+        if gaussians.get_values.shape[0] > args.cap_max:
+            n = True
+        if True:
+            loss = loss + args.weight_reg * torch.abs(gaussians.get_weight).mean()
+            loss = loss + args.scale_reg * torch.abs(gaussians.get_scaling).mean()
+
         loss.backward()
         iter_end.record()
 
@@ -356,16 +421,16 @@ def training(
                 mse2 = torch.mean((cells[torch.logical_and(cells != -1, gt != -1)] - gt[torch.logical_and(cells != -1, gt != -1)]) ** 2)
                 psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
                 ema_lv_for_log = 0.1 * l1_lv + 0.9 * ema_lv_for_log
-                # ema_lfp_for_log = 0.1 * false_positive + 0.9 * ema_lfp_for_log
+                ema_lfp_for_log = 0.1 * false_positive + 0.9 * ema_lfp_for_log
                 ema_lfn_for_log = 0.1 * false_negative + 0.9 * ema_lfn_for_log
                 ema_lpsnr_for_log = 0.1 * psnr + 0.9 * ema_lpsnr_for_log
                 progress_bar.set_postfix(
                     {
                         "Loss": f"{ema_loss_for_log:.{5}f}",
                         "L_v": f"{ema_lv_for_log:.{5}f}",
-                        # "L_fp": f"{ema_lfp_for_log:.{5}f}",
+                        "L_fp": f"{ema_lfp_for_log:.{5}f}",
                         "L_fn": f"{ema_lfn_for_log:.{5}f}",
-                        "PSNR": f"{ema_lpsnr_for_log:.{5}f}"
+                        # "PSNR": f"{ema_lpsnr_for_log:.{5}f}"
                     }
                 )
                 progress_bar.update(250)
@@ -373,7 +438,8 @@ def training(
                 # print(f"0 cells: {torch.count_nonzero(cells == 0).cpu().numpy()}, -1: {torch.count_nonzero(cells == -1).cpu().numpy()}")
                 print(f"False negative: {torch.count_nonzero(torch.logical_and(cells== -1, gt != -1))}, false positive: {torch.count_nonzero(torch.logical_and(cells != -1, gt == -1))}")
                 print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr2: {psnr2}, weight: {torch.mean(weights)}")
-                # print(f"False negative mask: {fn_mask.sum()}")
+                print(f"False negative mask: {torch.count_nonzero((fn_vals > 0))}, false positive mask: {fp_mask.sum()}, false negative {false_negative.item()}, false positive {false_positive.item()}")
+                print(f"Weight loss: {args.weight_reg * torch.abs(gaussians.get_weight).mean()}")
                 # print(f"loss_samples.shape: {loss_samples.shape[0]}")
                 # print(f"Overlap loss: {overlap_loss} mean {torch.mean(intersection_weights)} max: {torch.max(intersection_weights)} median: {torch.median(intersection_weights)} intersections: {torch.mean(intersections)}, max: {torch.max(intersections)}")
                 # top5 = torch.topk(intersection_weights, 5)
@@ -407,31 +473,57 @@ def training(
                  iteration not in saving_iterations and
                  iteration not in testing_iterations
             ):
+                dead_mask = (gaussians.get_weight <= 0.005).squeeze(-1)
+                gaussians.relocate_gs(dead_mask=dead_mask, cells=cells, gt=gt)
+                gaussians.add_new_gs(cap_max=args.cap_max)
 
 
-                loss_idx = torch.topk(
-                    torch.abs(cells.ravel() - gt.ravel()),
-                    # (cells.ravel() - gt.ravel()) ** 2,
-                    # 20 * int((args.cap_max - gaussians.get_values.shape[0]) // (1 + (opt.iterations - iteration) / opt.densification_interval)),
-                    min(200000, args.cap_max - gaussians.get_values.shape[0] + torch.count_nonzero(gaussians.get_weight <= 0.005) + 1000)
-                ).indices
+                # cells_flat = cells.ravel()
+                # gt_flat = gt.ravel()
+                # mask = gt_flat != -1
 
-                gaussians.densify_and_prune(
-                    opt.densify_grad_threshold,
-                    min_weight,
-                    # new_scale,
-                    torch.mean(gaussians.get_scaling) / 6.0,
-                    # current_samples[np.logical_and(current_samples == -1, gt != -1)],
-                    # gt_cells.ravel()[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)].reshape(-1, 1)
-                    current_samples[loss_idx],
-                    gt[loss_idx].reshape(-1, 1)
-                )
+                # diff = torch.abs(cells_flat[mask] - gt_flat[mask])
+
+                # k = min(
+                #     200000,
+                #     args.cap_max - gaussians.get_values.shape[0]
+                #     + torch.count_nonzero(gaussians.get_weight <= 0.005)
+                #     + 1000,
+                # )
+
+                # k = min(k, diff.numel())  # ensure k is valid
+
+                # topk_idx_masked = torch.topk(diff, k).indices
+                # loss_idx = torch.nonzero(mask, as_tuple=False).squeeze(1)[topk_idx_masked]
+
+                # gaussians.densify_and_prune(
+                #     opt.densify_grad_threshold,
+                #     min_weight,
+                #     # new_scale,
+                #     torch.mean(gaussians.get_scaling) / 6.0,
+                #     # current_samples[np.logical_and(current_samples == -1, gt != -1)],
+                #     # gt_cells.ravel()[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)].reshape(-1, 1)
+                #     current_samples[loss_idx],
+                #     gt[loss_idx].reshape(-1, 1)
+                # )
                 densifies += 1
 
             # Optimizer step
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none=True)
+
+                # if True:
+                #     L = build_scaling_rotation(gaussians.get_scaling, gaussians.get_rotation)
+                #     actual_covariance = L @ L.transpose(1, 2)
+
+                #     def op_sigmoid(x, k=100, x0=0.995):
+                #         return 1 / (1 + torch.exp(-k * (x - x0)))
+                    
+                #     noise = torch.randn_like(gaussians._xyz) * (op_sigmoid(1- gaussians.get_weight)) * args.noise_lr * xyz_lr
+                #     noise = torch.bmm(actual_covariance, noise.unsqueeze(-1)).squeeze(-1)
+                #     gaussians._xyz.add_(noise)
+
 
             if iteration in checkpoint_iterations:
                 print(f"\n[ITER {iteration}] Saving Checkpoint")

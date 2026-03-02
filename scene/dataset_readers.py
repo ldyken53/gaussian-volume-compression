@@ -106,10 +106,10 @@ def readData(path, fraction, normalized=False):
 def readDatau(path, fraction, normalized=False):
     mesh = pv.read(path)
     mesh = mesh.cell_data_to_point_data()
+    values = mesh.get_array(mesh.array_names[0]).reshape(-1, 1)
 
     if not normalized:
         # Rescale the values to the range [0, 1]
-        values = mesh.get_array(mesh.array_names[0]).reshape(-1, 1)
         values_min = values.min()
         values_max = values.max()
         values = (values - values_min) / (values_max - values_min)

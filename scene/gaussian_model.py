@@ -181,7 +181,7 @@ class GaussianModel:
         rots[:, 0] = 1
 
         weights = self.inverse_weight_activation(
-            (0.01)
+            (0.1)
             * torch.ones(
                 (fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"
             )
@@ -408,6 +408,119 @@ class GaussianModel:
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
 
+    def replace_tensors_to_optimizer(self, inds=None):
+        tensors_dict = {
+            "xyz": self._xyz,
+            "scaling" : self._scaling,
+            "rotation" : self._rotation,
+            "weight": self._weight,
+            "value": self._values
+            }
+
+        optimizable_tensors = {}
+        for group in self.optimizer.param_groups:
+            assert len(group["params"]) == 1
+            tensor = tensors_dict[group["name"]]
+            stored_state = self.optimizer.state.get(group['params'][0], None)
+            
+            if inds is not None:
+                stored_state["exp_avg"][inds] = 0
+                stored_state["exp_avg_sq"][inds] = 0
+            else:
+                stored_state["exp_avg"] = torch.zeros_like(tensor)
+                stored_state["exp_avg_sq"] = torch.zeros_like(tensor)
+
+            del self.optimizer.state[group['params'][0]]
+            group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
+            self.optimizer.state[group['params'][0]] = stored_state
+
+            optimizable_tensors[group["name"]] = group["params"][0]
+
+        self._xyz = optimizable_tensors["xyz"]
+        self._weight = optimizable_tensors["weight"]
+        self._scaling = optimizable_tensors["scaling"]
+        self._rotation = optimizable_tensors["rotation"]
+        self._values = optimizable_tensors["value"] 
+
+    def _update_params(self, idxs, ratio):
+        N = (ratio[idxs, 0] + 1).float()
+        new_weight = self.get_weight[idxs, 0] / N
+        new_weight = torch.clamp(new_weight.unsqueeze(-1), max=1.0 - torch.finfo(torch.float32).eps, min=0.005)
+        new_weight = self.inverse_weight_activation(new_weight)
+        new_scaling = self._scaling[idxs]  # unchanged in internal space
+
+        scaling = self.get_scaling[idxs]                          # (M, 3)
+        rotation = build_rotation(self._rotation[idxs])           # (M, 3, 3)
+        noise = torch.randn_like(scaling) * scaling * 0.5         # scale-proportional noise
+        perturbed_xyz = self._xyz[idxs] + torch.bmm(rotation, noise.unsqueeze(-1)).squeeze(-1)
+
+        return perturbed_xyz, new_weight, new_scaling, self._rotation[idxs], self._values[idxs]
+    
+    def _sample_alives(self, probs, num, alive_indices=None):
+        probs = probs / (probs.sum() + torch.finfo(torch.float32).eps)
+        sampled_idxs = torch.multinomial(probs, num, replacement=True)
+        if alive_indices is not None:
+            sampled_idxs = alive_indices[sampled_idxs]
+        ratio = torch.bincount(sampled_idxs).unsqueeze(-1)
+        return sampled_idxs, ratio
+
+    def relocate_gs(self, dead_mask=None, cells=None, gt=None):
+
+        if dead_mask.sum() == 0:
+            return
+
+        alive_mask = ~dead_mask 
+        dead_indices = dead_mask.nonzero(as_tuple=True)[0]
+        alive_indices = alive_mask.nonzero(as_tuple=True)[0]
+
+        if alive_indices.shape[0] <= 0:
+            return
+
+        # sample from alive ones based on weight
+        probs = (self.get_weight[alive_indices, 0]) 
+        reinit_idx, ratio = self._sample_alives(alive_indices=alive_indices, probs=probs, num=dead_indices.shape[0])
+
+        (
+            self._xyz[dead_indices], 
+            self._weight[dead_indices],
+            self._scaling[dead_indices],
+            self._rotation[dead_indices],
+            self._values[dead_indices] 
+        ) = self._update_params(reinit_idx, ratio=ratio)
+        
+        self._weight[reinit_idx] = self._weight[dead_indices]
+        self._scaling[reinit_idx] = self._scaling[dead_indices]
+
+        self.replace_tensors_to_optimizer(inds=reinit_idx) 
+
+    def add_new_gs(self, cap_max):
+        current_num_points = self._weight.shape[0]
+        target_num = min(cap_max, int(1.5 * current_num_points))
+        num_gs = max(0, target_num - current_num_points)
+
+        if num_gs <= 0:
+            return 0
+
+        probs = self.get_weight.squeeze(-1) 
+        add_idx, ratio = self._sample_alives(probs=probs, num=num_gs)
+
+        (
+            new_xyz, 
+            new_weight,
+            new_scaling,
+            new_rotation,
+            new_values
+        ) = self._update_params(add_idx, ratio=ratio)
+
+        self._weight[add_idx] = new_weight
+        self._scaling[add_idx] = new_scaling
+
+        self.densification_postfix(new_xyz, new_weight, new_scaling, new_rotation, new_values)
+        self.replace_tensors_to_optimizer(inds=add_idx)
+
+        return num_gs
+
+
     def _prune_optimizer(self, mask):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
@@ -439,15 +552,6 @@ class GaussianModel:
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
         self._values = optimizable_tensors["value"]
-
-        self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
-        self.denom = self.denom[valid_points_mask]
-        self.max_radii2D = self.max_radii2D[valid_points_mask]
-
-        self.last_interpolated_xyz = self.last_interpolated_xyz[valid_points_mask]
-        self.interpolation_mask = self.interpolation_mask[
-            valid_points_mask.detach().cpu().numpy()
-        ]
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -501,58 +605,11 @@ class GaussianModel:
 
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
 
-        # The sizes may not be the same, which necessitates extending the arrays
-        # used for interpolation
-        new_size = optimizable_tensors["xyz"].shape[0]
-        old_size = self._xyz.shape[0]
-
-        # We always want the interpolation mask to be the same size as the incoming xyz tensor
-        interpolation_mask = np.full(new_size, False)
-
-        if new_size > old_size:
-            # Always interpolate the new points
-            interpolation_mask[old_size:] = True
-
-            # Extend these tensors to avoid size mismatches during interpolation
-            self.last_interpolated_xyz = torch.cat(
-                (self.last_interpolated_xyz, optimizable_tensors["xyz"][old_size:]),
-                dim=0,
-            )
-            self._values = torch.cat(
-                (
-                    self._values,
-                    self.inverse_value_activation(torch.tensor(
-                        np.zeros((new_size - old_size, 1)),
-                        dtype=torch.float,
-                        device="cuda",
-                    )),
-                ),
-                dim=0,
-            )
-
-        # Compute the distances between the new points and the last interpolated points
-        new_xyz = optimizable_tensors["xyz"][:old_size]
-        diff = new_xyz - self.last_interpolated_xyz[:old_size]
-        distances = torch.norm(diff, dim=1)
-
-        # If a Gaussian's position has moved more than the threshold, re-interpolate its value
-        interpolation_mask[:old_size] = (
-            (distances > self.interpolation_threshold).detach().cpu().numpy()
-        )
-
-        self.interpolation_mask = interpolation_mask
-        # Only bother interpolating if there are any points that need updating
-        self.should_interpolate = np.any(interpolation_mask)
-
         self._xyz = optimizable_tensors["xyz"]
         self._weight = optimizable_tensors["weight"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
         self._values = optimizable_tensors["value"]
-
-        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
@@ -678,40 +735,6 @@ class GaussianModel:
         self.prune_points(prune_mask)
 
         torch.cuda.empty_cache()
-
-    def add_densification_stats(self, viewspace_point_tensor, update_filter):
-        self.xyz_gradient_accum[update_filter] += torch.norm(
-            viewspace_point_tensor.grad[update_filter, :2], dim=-1, keepdim=True
-        )
-        self.denom[update_filter] += 1
-
-    def interpolate_new_values(self):
-        # Return early if there are no new points to interpolate
-        if not self.should_interpolate:
-            return
-
-        # Filter out the positions that need to be interpolated
-        gaussian_positions = self._xyz.detach().cpu().numpy()
-        gaussian_positions = gaussian_positions[self.interpolation_mask]
-
-        interpolated_values = self.get_values.detach().cpu().numpy()
-        interpolated_values[self.interpolation_mask] = self.interpolator(
-            gaussian_positions
-        )
-        interpolated_values = np.nan_to_num(interpolated_values, nan=0.0)
-
-        new_values = self.inverse_value_activation(torch.tensor(
-            interpolated_values, dtype=torch.float, device="cuda"
-        ).reshape(-1, 1))
-
-        self._values = nn.Parameter(new_values.requires_grad_(False))
-
-        # Update the last interpolated positions, and reset the interpolation mask
-        self.last_interpolated_xyz[self.interpolation_mask] = self._xyz[
-            self.interpolation_mask
-        ]
-        self.interpolation_mask = np.full(self._xyz.shape[0], False)
-        self.should_interpolate = False
 
     def convert_ply_to_ascii(self, binary_ply_file_path):
         ascii_ply_file_path = binary_ply_file_path.replace(".ply", "_ascii.ply")
