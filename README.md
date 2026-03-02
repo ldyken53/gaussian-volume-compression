@@ -64,10 +64,10 @@ python train.py -s <path to unstructured or structured volume dataset>
 ```
 
 ## Fixes
-- *It breaks when trying to install diff-gaussian-rasterization or submodules/simple-knn during the creation from environment.yml. How do I proceed?* Just try again essentially, like so;
+- *It breaks when trying to install bvh-diff-gaussian-rasterization or submodules/simple-knn during the creation from environment.yml. How do I proceed?* Just try again essentially, like so;
 ```
 conda activate gaussian_splatting
 cd <dir_to_repo>/gaussian-splatting
-pip install diff-gaussian-rasterization
+pip install bvh-diff-gaussian-rasterization
 pip install submodules\simple-knn
 ```

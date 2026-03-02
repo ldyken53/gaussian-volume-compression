@@ -8,7 +8,7 @@ from tqdm import tqdm
 import pyvista as pv
 
 from arguments import ModelParams, OptimizationParams, PipelineParams
-from gaussian_renderer import init_rasterizer, render, build_bvh, intersect
+from gaussian_renderer import init_rasterizer, render, build_bvh
 from scene import GaussianModel, Scene
 from gpu_mesh_sampling import gpu_sample, gpu_sampleu
 from utils.debug_utils import tensor_to_vtk
@@ -140,7 +140,7 @@ def training(
     # bsums = compute_bhattacharyya_sums(gaussians.get_xyz, gaussians.get_covariance(scaling_modifier=1, stripped=False))
     # print(bsums.mean())
     if not test_mesh:
-        cell_count = 200
+        cell_count = 128
         spacing = [
             (gaussians.maxes[0] - gaussians.mins[0]) / (cell_count - 1),
             (gaussians.maxes[1] - gaussians.mins[1]) / (cell_count - 1),
@@ -158,11 +158,11 @@ def training(
         samples_tf_flat = samples_tf.reshape(-1, 3)
         jitter = np.random.uniform(-0.5, 0.5, samples_tf_flat.shape)
         jitter *= np.array(spacing)[None, :]
-        # samples_tf_flat = np.clip(
-        #     samples_tf_flat + jitter,
-        #     np.array(gaussians.mins)[None, :], 
-        #     np.array(gaussians.maxes)[None, :]
-        # )
+        samples_tf_flat = np.clip(
+            samples_tf_flat + jitter,
+            np.array(gaussians.mins)[None, :], 
+            np.array(gaussians.maxes)[None, :]
+        )
         if struct:
             gt_cells = gpu_sample(
                 gaussians.mesh.dimensions,
@@ -180,12 +180,26 @@ def training(
                 gaussians.mesh.point_data[gaussians.mesh.array_names[0]],
                 samples_tf_flat
             )
-        tensor_to_vtk(gt_cells.reshape(cell_count, cell_count, cell_count), "test_gt.vtk", spacing)
+        # tensor_to_vtk(gt_cells.reshape(cell_count, cell_count, cell_count), "test_gt.vtk", spacing)
         build_bvh(
             torch.tensor(samples_tf_flat, dtype=torch.float, device="cuda")
         )
     else:
-        idx = np.random.choice(gaussians.mesh.n_points, size=(100000), replace=True)
+        # idx = np.random.choice(gaussians.mesh.n_points, size=(1000000), replace=True)
+        # start = np.random.randint(0, gaussians.mesh.n_points - 1000000 + 1)
+        # idx = np.arange(start, start + 1000000)
+        # if struct:
+        #     nx, ny, nz = gaussians.mesh.dimensions
+        #     ox, oy, oz = gaussians.mesh.origin
+        #     sx, sy, sz = gaussians.mesh.spacing
+        #     nxny = nx * ny
+        #     k, r = np.divmod(idx, nxny)
+        #     j, i = np.divmod(r, nx)
+        #     x = ox + i * sx
+        #     y = oy + j * sy
+        #     z = oz + k * sz
+        #     mesh_samples = np.stack((x, y, z), axis=-1)
+        idx = np.random.choice(gaussians.mesh.n_points, size=(1000000), replace=True)
         if struct:
             nx, ny, nz = gaussians.mesh.dimensions
             ox, oy, oz = gaussians.mesh.origin
@@ -193,6 +207,26 @@ def training(
             nxny = nx * ny
             k, r = np.divmod(idx, nxny)
             j, i = np.divmod(r, nx)
+
+            # Sort spatially via Morton code (Z-order curve)
+            def part1by2(n):
+                n = n.astype(np.uint64) & 0x1fffff
+                n = (n | (n << 32)) & 0x1f00000000ffff
+                n = (n | (n << 16)) & 0x1f0000ff0000ff
+                n = (n | (n << 8))  & 0x100f00f00f00f00f
+                n = (n | (n << 4))  & 0x10c30c30c30c30c3
+                n = (n | (n << 2))  & 0x1249249249249249
+                return n
+
+            scale = (1 << 21) - 1
+            order = np.argsort(
+                part1by2((i * scale) // (nx - 1))
+                | (part1by2((j * scale) // (ny - 1)) << 1)
+                | (part1by2((k * scale) // (nz - 1)) << 2)
+            )
+            idx = idx[order]
+            i, j, k = i[order], j[order], k[order]
+
             x = ox + i * sx
             y = oy + j * sy
             z = oz + k * sz
@@ -203,7 +237,6 @@ def training(
         build_bvh(
             torch.tensor(mesh_samples, dtype=torch.float, device="cuda")
         )
-    gt = torch.tensor(gt_cells).cuda()
     render_pkg = render(
         gaussians,
     )
@@ -211,6 +244,7 @@ def training(
         render_pkg["cells"],
         render_pkg["weights"]
     )
+    gt = torch.tensor(gt_cells).cuda()
     # intersect_pkg = intersect(
     #     gaussians,
     # )
@@ -223,6 +257,7 @@ def training(
 
 
     l1_l = l1_loss(cells, gt)
+    # l1_l.backward()
     mse = torch.mean((cells - gt) ** 2)
     psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
     mse2 = torch.mean((cells[torch.logical_and(gt != -1, cells != -1)] - gt[torch.logical_and(gt != -1, cells != -1)]) ** 2)
@@ -240,10 +275,9 @@ def training(
         print(f"false positive percent: {torch.count_nonzero(torch.logical_and(cells != -1, gt == -1)) / cell_count ** 3}")
         tensor_to_vtk(cells.detach().cpu().numpy().reshape(cell_count, cell_count, cell_count), f"test.vtk", spacing)
     else:
-        print(f"Invalid samples: {np.count_nonzero(gt_cells == -1) / 100000}")
         print(f"False negative: {torch.count_nonzero(torch.logical_and(cells == -1, gt != -1))}")
         print(f"false positive: {torch.count_nonzero(torch.logical_and(cells != -1, gt == -1))}")
-    gaussians.save_ply_activated('apoint_cloud.ply')
+    # gaussians.save_ply_activated('apoint_cloud.ply')
 
 if __name__ == "__main__":
     window = create_window()

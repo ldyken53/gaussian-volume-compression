@@ -17,5 +17,5 @@ dependencies:
     - piq
     - matplotlib
     - scipy
-    - diff-gaussian-rasterization
+    - bvh-diff-gaussian-rasterization
     - submodules/simple-knn
