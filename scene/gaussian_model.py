@@ -403,16 +403,18 @@ class GaussianModel:
         return optimizable_tensors
 
     def _update_params(self, idxs, ratio):
-        new_weight, new_scaling = compute_relocation_cuda(
-            opacity_old=self.get_weight[idxs, 0],
-            scale_old=self.get_scaling[idxs],
-            N=ratio[idxs, 0] + 1
-        )
+        N = (ratio[idxs, 0] + 1).float()
+        new_weight = self.get_weight[idxs, 0] / N
         new_weight = torch.clamp(new_weight.unsqueeze(-1), max=1.0 - torch.finfo(torch.float32).eps, min=0.005)
         new_weight = self.inverse_weight_activation(new_weight)
-        new_scaling = self.inverse_scaling_activation(new_scaling.reshape(-1, 3))
+        new_scaling = self._scaling[idxs]  # unchanged in internal space
 
-        return self._xyz[idxs], new_weight, new_scaling, self._rotation[idxs], self._values[idxs]
+        scaling = self.get_scaling[idxs]                          # (M, 3)
+        rotation = build_rotation(self._rotation[idxs])           # (M, 3, 3)
+        noise = torch.randn_like(scaling) * scaling * 0.5         # scale-proportional noise
+        perturbed_xyz = self._xyz[idxs] + torch.bmm(rotation, noise.unsqueeze(-1)).squeeze(-1)
+
+        return perturbed_xyz, new_weight, new_scaling, self._rotation[idxs], self._values[idxs]
 
     def _sample_alives(self, probs, num, alive_indices=None):
         probs = probs / (probs.sum() + torch.finfo(torch.float32).eps)
