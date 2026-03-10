@@ -56,10 +56,8 @@ class ModelParams(ParamGroup):
     def __init__(self, parser, sentinel=False):
         self._source_path = ""
         self._model_path = ""
-        self._images = "images"
         self._depths = ""
         self._resolution = -1
-        self._white_background = False
         self.train_test_exp = False
         self.data_device = "cuda"
         self.eval = False
@@ -81,7 +79,7 @@ class PipelineParams(ParamGroup):
 
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
-        self.iterations = 12_000
+        self.iterations = 2_000
         self.position_lr_init = 0.00016
         self.position_lr_final = 0.0000016
         self.position_lr_delay_mult = 0.01
@@ -90,26 +88,18 @@ class OptimizationParams(ParamGroup):
         self.weight_lr = 0.025
         self.scaling_lr = 0.001
         self.rotation_lr = 0.0001
-        self.exposure_lr_init = 0.01
-        self.exposure_lr_final = 0.001
-        self.exposure_lr_delay_steps = 0
-        self.exposure_lr_delay_mult = 0.0
         self.percent_dense = 0.01
-        self.lambda_dssim = 0.2
-        self.lambda_scaling = 0.00001
         self.densification_interval = 100
         self.weight_reset_interval = 3000
         self.densify_from_iter = 500
         self.densify_until_iter = 12_000
         self.prune_until_iter = 11_000
         self.densify_grad_threshold = 0.0002
-        self.depth_l1_weight_init = 1.0
-        self.depth_l1_weight_final = 0.01
-        self.random_background = False
         self.noise_lr = 5e5
         self.scale_reg = 0.01
         self.weight_reg = 0.01
-        self.fn_reg = 0.05
+        self.fn_reg = 0.5
+        self.fn_reg2 = 0.005
         super().__init__(parser, "Optimization Parameters")
 
 
