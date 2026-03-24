@@ -583,25 +583,48 @@ class GaussianModel:
         self._rotation = optimizable_tensors["rotation"]
         self._values = optimizable_tensors["value"]
 
-    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
-        n_init_points = self.get_xyz.shape[0]
-        # Extract points that satisfy the gradient condition
-        padded_grad = torch.zeros((n_init_points), device="cuda")
-        padded_grad[: grads.shape[0]] = grads.squeeze()
-        selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
+    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2, max_new_points=None):
+        n_points = self.get_xyz.shape[0]
+
+        grad_mag = torch.zeros(n_points, device=self.get_xyz.device)
+        grad_mag[:grads.shape[0]] = torch.linalg.norm(grads, dim=-1)
+
+        selected_pts_mask = grad_mag >= grad_threshold
         selected_pts_mask = torch.logical_and(
             selected_pts_mask,
             torch.max(self.get_scaling, dim=1).values
             > self.percent_dense * scene_extent,
         )
 
+        selected_idx = selected_pts_mask.nonzero(as_tuple=True)[0]
+
+        if max_new_points is not None:
+            max_new_points = int(max_new_points)
+            max_parents = max_new_points // N   # use (N - 1) here if you mean net growth instead
+            if max_parents <= 0 or selected_idx.numel() == 0:
+                return 0
+            if selected_idx.numel() > max_parents:
+                keep = torch.topk(
+                    grad_mag[selected_idx], k=max_parents, sorted=False
+                ).indices
+                selected_idx = selected_idx[keep]
+
+            selected_pts_mask = torch.zeros_like(selected_pts_mask)
+            selected_pts_mask[selected_idx] = True
+
+        num_added = N * selected_pts_mask.sum().item()
+        if num_added == 0:
+            return 0
+
         stds = self.get_scaling[selected_pts_mask].repeat(N, 1)
-        means = torch.zeros((stds.size(0), 3), device="cuda")
+        means = torch.zeros((stds.size(0), 3), device=self.get_xyz.device)
         samples = torch.normal(mean=means, std=stds)
         rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N, 1, 1)
-        new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[
-            selected_pts_mask
-        ].repeat(N, 1)
+
+        new_xyz = (
+            torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1)
+            + self.get_xyz[selected_pts_mask].repeat(N, 1)
+        )
         new_scaling = self.inverse_scaling_activation(
             self.get_scaling[selected_pts_mask].repeat(N, 1) / (0.8 * N)
         )
@@ -614,27 +637,49 @@ class GaussianModel:
             new_weight,
             new_scaling,
             new_rotation,
-            new_values
+            new_values,
         )
 
         prune_filter = torch.cat(
             (
                 selected_pts_mask,
-                torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool),
+                torch.zeros(N * selected_pts_mask.sum(), device=self.get_xyz.device, dtype=torch.bool),
             )
         )
         self.prune_points(prune_filter)
+        return num_added
 
-    def densify_and_clone(self, grads, grad_threshold, scene_extent):
-        # Extract points that satisfy the gradient condition
-        selected_pts_mask = torch.where(
-            torch.norm(grads, dim=-1) >= grad_threshold, True, False
-        )
+    def densify_and_clone(self, grads, grad_threshold, scene_extent, max_new_points=None):
+        n_points = self.get_xyz.shape[0]
+
+        grad_mag = torch.zeros(n_points, device=self.get_xyz.device)
+        grad_mag[:grads.shape[0]] = torch.linalg.norm(grads, dim=-1)
+
+        selected_pts_mask = grad_mag >= grad_threshold
         selected_pts_mask = torch.logical_and(
             selected_pts_mask,
             torch.max(self.get_scaling, dim=1).values
             <= self.percent_dense * scene_extent,
         )
+
+        selected_idx = selected_pts_mask.nonzero(as_tuple=True)[0]
+
+        if max_new_points is not None:
+            max_new_points = int(max_new_points)
+            if max_new_points <= 0 or selected_idx.numel() == 0:
+                return 0
+            if selected_idx.numel() > max_new_points:
+                keep = torch.topk(
+                    grad_mag[selected_idx], k=max_new_points, sorted=False
+                ).indices
+                selected_idx = selected_idx[keep]
+
+            selected_pts_mask = torch.zeros_like(selected_pts_mask)
+            selected_pts_mask[selected_idx] = True
+
+        num_added = selected_pts_mask.sum().item()
+        if num_added == 0:
+            return 0
 
         new_xyz = self._xyz[selected_pts_mask]
         new_weights = self._weight[selected_pts_mask]
@@ -649,6 +694,7 @@ class GaussianModel:
             new_rotation,
             new_values,
         )
+        return num_added
 
     def densify_in_empty(self, empty_points, empty_values, new_scale, new_weight):
         # Concatenate existing and new points for distance computation
@@ -687,9 +733,27 @@ class GaussianModel:
             new_values,
         )
 
-    def densify_and_prune(self, max_grad, min_weight, new_scale, new_weight, empty_points, empty_values, prune_only=False):
-        # self.densify_and_clone(grads, max_grad, extent)
-        # self.densify_and_split(grads, max_grad, extent)
+    def densify_and_prune(self, max_grad, min_weight, new_scale, new_weight, empty_points, empty_values, prune_only=False, num_densify=None):
+        # xyz_grads = None
+        # if self._xyz.grad is not None:
+        #     xyz_grads = self._xyz.grad.detach().clone()   # (N, 3)
+
+        # if not prune_only and xyz_grads is not None:
+        #     remaining = num_densify
+
+        #     added = self.densify_and_clone(
+        #         xyz_grads, max_grad, 1.0, max_new_points=remaining
+        #     )
+        #     if remaining is not None:
+        #         remaining -= added
+
+        #     if remaining is None or remaining > 0:
+        #         added = self.densify_and_split(
+        #             xyz_grads, max_grad, 1.0, max_new_points=remaining
+        #         )
+        #         if remaining is not None:
+        #             remaining -= added
+
         if not prune_only:
             self.densify_in_empty(empty_points, empty_values, new_scale, new_weight)
 
