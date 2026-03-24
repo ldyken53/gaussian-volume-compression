@@ -57,7 +57,7 @@ def training(
     scene = Scene(
         dataset, 
         gaussians, 
-        load_iteration=0 if args.precomputed_samples else None, 
+        load_iteration=0 if args.model_path else None, 
         normalized=is_scaled, 
         fraction=fraction)
     gaussians.training_setup(opt)
@@ -141,7 +141,7 @@ def training(
     big_samples_cuda = torch.tensor(big_samples, dtype=torch.float, device="cuda")
     gt = big_gt_cuda[0].reshape(cell_count, cell_count, cell_count)
     print(f"Number of invalid samples: {torch.count_nonzero(gt == -1)}")
-    # tensor_to_vtk(gt_cells, "test_gt.vtk", spacing)
+    # tensor_to_vtk(gt.cpu().numpy(), "test_gt.vtk", spacing)
     # gt_weights = big_gt_weights[0].reshape(cell_count, cell_count, cell_count)
     # gt_weights = torch.tensor(gt_weights).cuda()
     jitter_cuda = big_jitter_cuda[0].ravel()
@@ -187,7 +187,16 @@ def training(
             render_pkg["radii"],
         )
         # l1_lv = l1_loss(cells, gt)
-        l1_lv = torch.mean((cells - gt) ** 2)
+        l1_lv = torch.abs(cells - gt).mean()
+        # l1_lv = torch.mean((cells - gt) ** 2)
+        # delta = 1.0
+        # residual = cells - gt
+        # loss = torch.where(
+        #     residual.abs() <= delta,
+        #     0.5 * residual ** 2,
+        #     delta * (residual.abs() - 0.5 * delta)
+        # )
+        # l1_lv = loss.mean()
         # TODO: FIX FP AND FN FOR CHANGING CELL COUNTS
         k = 600  # Adjust this to control decay rate
         # fn_mask = torch.logical_and(gt != -1, weights < 0.02)
@@ -202,7 +211,9 @@ def training(
             # overlap_loss = (torch.exp(weights[overlap_mask] - 1) - 1).mean()
         # else:
         #     overlap_loss = torch.tensor(0., device="cuda")
-        # mask = torch.logical_and(gt < 0, weights > 0)
+        # fp_mask = torch.logical_and(gt == -1, weights > 0.0)
+        # fp_vals = weights[fp_mask]        
+        # false_positive = args.fp_reg * fp_vals.sum() / ((fp_vals > 0).sum().float() + 1e-8)
         # if mask.any():
         #     false_positive = (2 * (1 - torch.exp(-k * weights[mask]))).mean()
         # else:
@@ -217,7 +228,7 @@ def training(
         loss = l1_lv + false_negative
         if gaussians.get_values.shape[0] > args.cap_max:
             n = True
-        if n:
+        if use_mcmc:
             loss = loss + args.weight_reg * torch.abs(gaussians.get_weight).mean()
             loss = loss + args.scale_reg * torch.abs(gaussians.get_scaling).mean()
         loss.backward()
@@ -267,7 +278,7 @@ def training(
                 progress_bar.update(500)
                 print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr2: {psnr2}, l_v: {l1_lv.item()}")
                 # print(f"Num Gaussians: {gaussians.get_values.shape[0]}")
-                print(f"w= {(torch.clamp(l1_lv, max=args.weight_reg) * torch.abs(gaussians.get_weight).mean()).item()}, {(args.scale_reg * torch.abs(gaussians.get_scaling).mean()).item()}, fn: {false_negative}")
+                print(f"w= {(args.weight_reg * torch.abs(gaussians.get_weight).mean()).item()}, {(args.scale_reg * torch.abs(gaussians.get_scaling).mean()).item()}, fn: {false_negative}")
                 print(f"Gaussian weight: {torch.mean(gaussians.get_weight)}, gaussian scale: {torch.mean(gaussians.get_scaling)}, scale var: {torch.std(gaussians.get_scaling)}")
                 print(f"False negative: {torch.count_nonzero(torch.logical_and(cells == -1, gt != -1))}, fn_reg: {args.fn_reg}")
                 # print(f"Overlaps: {torch.count_nonzero(torch.logical_and(gt != -1, weights > 1.0))}")
@@ -285,22 +296,6 @@ def training(
             if iteration == opt.iterations:
                 progress_bar.close()
 
-            # Save
-            if iteration in saving_iterations or done == 1:
-                print("\n[ITER {}] Saving Gaussians".format(iteration))
-                scene.save(iteration)
-                cpu_cells = cells.cpu().numpy()
-                tensor_to_vtk(cpu_cells, f"out_vtk/test_{iteration}.vtk", spacing)
-                tensor_to_vtk(torch.abs((cells - gt)).cpu().numpy(), f"out_vtk/test_{iteration}_loss.vtk", spacing)
-                vtk_files.append({
-                    "name": f"test_{iteration}.vtk",
-                    "time": float(iteration)
-                })                
-                vtk_files_loss.append({
-                    "name": f"test_{iteration}_loss.vtk",
-                    "time": float(iteration)
-                })
-
             # Densification
             if (iteration <= opt.prune_until_iter and
                 iteration >= opt.densify_from_iter and
@@ -308,19 +303,19 @@ def training(
                 iteration not in testing_iterations
             ):
                 # if gaussians.get_values.shape[0] > args.cap_max:
-                if n:
+                if use_mcmc:
                     # pass
                     dead_mask = (gaussians.get_weight <= 0.005).squeeze(-1)
                     gaussians.relocate_gs(dead_mask=dead_mask, cells=cells, gt=gt)
                     gaussians.add_new_gs(cap_max=args.cap_max)
                 else:
-                    loss_idx = torch.topk(
-                        torch.abs(cells.ravel() - gt.ravel()),
-                        # (cells.ravel() - gt.ravel()) ** 2,
-                        # 20 * int((args.cap_max - gaussians.get_values.shape[0]) // (1 + (opt.iterations - iteration) / opt.densification_interval)),
-                        min(100000, args.cap_max - gaussians.get_values.shape[0] + torch.count_nonzero(gaussians.get_weight <= 0.005) + 1000)
-                    ).indices
-                    # loss_idx = (torch.abs(cells.ravel() - gt.ravel()) > error_thresh)
+                    # loss_idx = torch.topk(
+                    #     torch.abs(cells.ravel() - gt.ravel()),
+                    #     # (cells.ravel() - gt.ravel()) ** 2,
+                    #     # 20 * int((args.cap_max - gaussians.get_values.shape[0]) // (1 + (opt.iterations - iteration) / opt.densification_interval)),
+                    #     min(80000, args.cap_max - gaussians.get_values.shape[0] + torch.count_nonzero(gaussians.get_weight <= min_weight) + 1000)
+                    # ).indices
+                    loss_idx = (torch.abs(cells.ravel() - gt.ravel()) > 0.01)
                     gaussians.densify_and_prune(
                         opt.densify_grad_threshold,
                         min_weight,
@@ -330,7 +325,8 @@ def training(
                         samples_cuda[loss_idx],
                         # np.clip(new_vals.cpu().ravel()[loss_idx].reshape(-1, 1), 0.01, 0.99),
                         gt.ravel()[loss_idx].reshape(-1, 1),
-                        iteration > opt.densify_until_iter
+                        iteration > opt.densify_until_iter,
+                        min(80000, args.cap_max - gaussians.get_values.shape[0] + torch.count_nonzero(gaussians.get_weight <= min_weight) + 1000)
                     )
 
             # Optimizer step
@@ -349,6 +345,22 @@ def training(
                     noise = torch.randn_like(gaussians._xyz) * (op_sigmoid(1- gaussians.get_weight)) * args.noise_lr * xyz_lr
                     noise = torch.bmm(actual_covariance, noise.unsqueeze(-1)).squeeze(-1)
                     gaussians._xyz.add_(noise)
+
+            # Save
+            if iteration in saving_iterations or done == 1:
+                print("\n[ITER {}] Saving Gaussians".format(iteration))
+                scene.save(iteration)
+                cpu_cells = cells.cpu().numpy()
+                # tensor_to_vtk(cpu_cells, f"out_vtk/test_{iteration}.vtk", spacing)
+                # tensor_to_vtk(torch.abs((cells - gt)).cpu().numpy(), f"out_vtk/test_{iteration}_loss.vtk", spacing)
+                vtk_files.append({
+                    "name": f"test_{iteration}.vtk",
+                    "time": float(iteration)
+                })                
+                vtk_files_loss.append({
+                    "name": f"test_{iteration}_loss.vtk",
+                    "time": float(iteration)
+                })
 
             if iteration in checkpoint_iterations:
                 print(f"\n[ITER {iteration}] Saving Checkpoint")

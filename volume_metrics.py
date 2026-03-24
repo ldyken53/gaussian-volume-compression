@@ -31,12 +31,12 @@ def training(
     dataset,
     opt,
     pipe,
+    is_scaled
 ):
-    
     gaussians = GaussianModel()
-    scene = Scene(dataset, gaussians, load_iteration=-1, normalized=True)
+    scene = Scene(dataset, gaussians, load_iteration=-1, normalized=is_scaled)
     # Make ground truth
-    cell_count = 512
+    cell_count = 128
     spacing = [
         (gaussians.maxes[0] - gaussians.mins[0]) / (cell_count - 1),
         (gaussians.maxes[1] - gaussians.mins[1]) / (cell_count - 1),
@@ -69,18 +69,8 @@ def training(
         gaussians.mesh.point_data[gaussians.mesh.point_data.keys()[0]],
         samples_tf_flat
     )
-    # gt_cells = gpu_sample(
-    #     gaussians.mesh.points, 
-    #     gaussians.mesh.dimensions,
-    #     gaussians.mesh.point_data['value'],
-    #     samples_tf_flat
-    # )
     gt_cells = gt_cells.reshape(cell_count, cell_count, cell_count)
-    gt_weights = gt_cells.copy()
     gt = torch.tensor(gt_cells).cuda()
-    gt_weights[gt_weights != -1] = 1
-    gt_weights[gt_weights == -1] = 0
-    gt_weights = torch.tensor(gt_weights).cuda()
     # tensor_to_vtk(gt_cells, "test_gt.vtk", spacing)
     # tensor_to_vtk(gt_weights, "test_gt_weight.vtk", spacing)
 
@@ -99,7 +89,9 @@ def training(
         render_pkg["radii"],
     )
     cells[cells == -1.0] = 0.0
-    l1_l = l1_loss(cells, gt)
+    # print(gt.mean())
+    l1_l = l1_loss(cells, torch.zeros_like(cells))
+    # l1_l.backward()
     mse = torch.mean((cells - gt) ** 2)
     psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
     print(f"Percent invalid samples: {np.count_nonzero(gt_cells == -1) / cell_count ** 3}")
@@ -109,7 +101,6 @@ def training(
     psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
     mse3 = torch.mean((gt) ** 2)
     psnr3 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse3 + 1e-8)
-    print(f"L1 loss: {l1_l.item()}")
     print(f"L2 loss: {mse}")
     print(f"PSNR: {psnr}")
     print(f"PSNR without false positives/negatives: {psnr2}")
@@ -123,7 +114,8 @@ def training(
     #     sigma=(1.5, 1.5, 1.5)
     # )
     # print(f"SSIM: {ssim}")
-    tensor_to_vtk(cells.detach().cpu().numpy(), f"test.vtk", spacing)
+    tensor_to_vtk(torch.abs((cells - gt)).detach().cpu().numpy(), f"3dgschame_loss.vtk", spacing)
+    tensor_to_vtk(cells.detach().cpu().numpy(), f"3dgschame.vtk", spacing)
 
 if __name__ == "__main__":
     window = create_window()
@@ -132,11 +124,12 @@ if __name__ == "__main__":
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
+    parser.add_argument("--is_scaled", action="store_true")
     args = parser.parse_args(sys.argv[1:])
-    print(args.model_path)
 
     training(
         lp.extract(args),
         op.extract(args),
         pp.extract(args),
+        args.is_scaled
     )
