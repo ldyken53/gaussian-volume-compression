@@ -1,5 +1,5 @@
 # 3D Gaussian Splatting for Volume Reconstruction
-This repository contains an implementation of training a mixed Gaussian model from volumetric data. The codebase borrows heavily from the paper "3D Gaussian Splatting for Real-Time Radiance Field Rendering", which can be found [here](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/).
+This repository contains an implementation of training a mixed Gaussian model from volumetric data.
 
 ## Cloning the Repository
 
