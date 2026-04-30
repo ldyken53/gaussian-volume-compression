@@ -817,3 +817,70 @@ class GaussianModel:
             for element in ply_data.elements:
                 for row in element.data:
                     f.write(" ".join(str(val) for val in row) + "\n")
+
+    def cull_exterior_gaussians(self, tolerance=1e-1, inplace=True):
+        """
+        Remove all gaussians whose centers do not probe to a valid mesh location.
+
+        Args:
+            tolerance (float): Unused here, kept for API compatibility.
+            inplace (bool): If True, update this model in-place and return the keep mask.
+                            If False, only return the keep mask.
+
+        Returns:
+            torch.BoolTensor: Mask of gaussians to keep (True = valid sampled position).
+
+        Notes:
+            - Uses PyVista sampling against self.mesh instead of enclosed-point checks.
+            - A point is kept only if vtkValidPointMask is True and sampled cell data exists.
+        """
+        if self.mesh is None:
+            raise ValueError("self.mesh is None. Load or assign a mesh before culling gaussians.")
+
+        if self._xyz.numel() == 0:
+            return torch.zeros((0,), dtype=torch.bool, device=self._xyz.device)
+
+        # PyVista sampling is CPU-side
+        mesh_samples = self._xyz.detach().cpu().numpy()
+
+        # Clean mesh before probing
+        mesh = self.mesh
+
+        probe_mesh = pv.PolyData(mesh_samples)
+        probed = probe_mesh.sample(mesh)
+
+        if not mesh.array_names:
+            raise ValueError(
+                "self.mesh has no data arrays to sample. Attach at least one point/cell array before probing."
+            )
+
+        gt_cells = probed[mesh.array_names[0]]
+        valid_mask_np = probed["vtkValidPointMask"].astype(bool)
+
+        # Require both a valid probe hit and non-null sampled data
+        if gt_cells.ndim == 1:
+            sampled_ok = np.isfinite(gt_cells)
+        else:
+            sampled_ok = np.all(np.isfinite(gt_cells), axis=1)
+
+        keep_np = valid_mask_np & sampled_ok
+        keep_mask = torch.from_numpy(keep_np).to(device=self._xyz.device, dtype=torch.bool)
+
+        if not inplace:
+            return keep_mask
+
+        # prune_points expects a mask of points to REMOVE
+        prune_mask = ~keep_mask
+
+        if torch.any(prune_mask):
+            if self.optimizer is not None:
+                self.prune_points(prune_mask)
+            else:
+                self._xyz = nn.Parameter(self._xyz[keep_mask].detach().requires_grad_(True))
+                self._scaling = nn.Parameter(self._scaling[keep_mask].detach().requires_grad_(True))
+                self._rotation = nn.Parameter(self._rotation[keep_mask].detach().requires_grad_(True))
+                self._weight = nn.Parameter(self._weight[keep_mask].detach().requires_grad_(True))
+                self._values = nn.Parameter(self._values[keep_mask].detach().requires_grad_(True))
+
+        print(f"Culled {int(prune_mask.sum().item())} exterior gaussians, kept {self._xyz.shape[0]}.")
+        return keep_mask
