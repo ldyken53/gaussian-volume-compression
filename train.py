@@ -3,6 +3,7 @@ import sys
 import uuid
 import json
 import time
+import math
 from argparse import ArgumentParser, Namespace
 from random import randint
 import numpy as np
@@ -30,6 +31,67 @@ except ImportError:
 
 DEBUG = True
 
+def sample_mesh_points(mesh, num_batches, batch_size, device="cuda"):
+    points = torch.tensor(mesh.points, dtype=torch.float32, device=device)
+    tet_mesh = mesh.triangulate()
+
+    # Extract cell connectivity — assumes tets (4 verts per cell)
+    cells = torch.tensor(
+        tet_mesh.cells.reshape(-1, 5)[:, 1:], dtype=torch.long, device=device
+    )  # (C, 4)
+
+    total = num_batches * batch_size
+
+    # Pick random cells (uniform = denser where cells are smaller = where points are denser)
+    cell_idx = torch.randint(0, cells.shape[0], (total,), device=device)
+    verts = points[cells[cell_idx]]  # (total, 4, 3)
+
+    # Random barycentric coordinates inside a tetrahedron
+    # Uniformly sample a tet: take 3 random values, sort, then differences give bary coords
+    u = torch.rand(total, 3, device=device).sort(dim=1).values
+    bary = torch.zeros(total, 4, device=device)
+    bary[:, 0] = u[:, 0]
+    bary[:, 1] = u[:, 1] - u[:, 0]
+    bary[:, 2] = u[:, 2] - u[:, 1]
+    bary[:, 3] = 1.0 - u[:, 2]
+
+    # Interpolate: (total, 4, 1) * (total, 4, 3) summed over verts
+    samples = (bary.unsqueeze(2) * verts).sum(dim=1)
+
+    return samples.reshape(num_batches, batch_size, 3)
+
+def sample_exterior_points(mesh, num_batches, batch_size, offset=0.01, device="cuda"):
+    """Sample points just outside the mesh surface using properly oriented normals."""
+    surf = mesh.extract_surface().triangulate().compute_normals(cell_normals=True, point_normals=False)
+    print(surf.faces.shape)
+
+    face_normals = torch.tensor(surf.cell_data["Normals"], dtype=torch.float32, device=device)
+    points = torch.tensor(surf.points, dtype=torch.float32, device=device)
+    faces = torch.tensor(
+        surf.faces.reshape(-1, 4)[:, 1:], dtype=torch.long, device=device
+    )
+
+    total = num_batches * batch_size
+
+    face_idx = torch.randint(0, faces.shape[0], (total,), device=device)
+    v = points[faces[face_idx]]
+
+    # Uniform barycentric coords on triangle
+    u = torch.rand(total, 2, device=device)
+    sqrt_u0 = u[:, 0].sqrt()
+    bary = torch.stack([1 - sqrt_u0, sqrt_u0 * (1 - u[:, 1]), sqrt_u0 * u[:, 1]], dim=1)
+
+    surf_pts = (bary.unsqueeze(2) * v).sum(dim=1)
+
+    # Use PyVista's properly oriented outward normals
+    normals = face_normals[face_idx]
+
+    dist = torch.rand(total, 1, device=device) * offset
+    samples = surf_pts + normals * dist
+
+    return samples.reshape(num_batches, batch_size, 3)
+
+
 def training(
     dataset,
     opt,
@@ -43,8 +105,10 @@ def training(
     fraction,
     min_weight,
     is_scaled,
-    precompute_samples
+    precompute_samples,
+    encode_surface
 ):
+    use_mcmc = False
     vtk_files = []
     vtk_files_loss = []
     log_data = []
@@ -95,10 +159,10 @@ def training(
     save_cell = samples_tf.reshape(-1, 3)
     print("Save cell made")
     if precompute_samples:
-        big_gt = np.load("../../gaussian-volume/richtmyer_meshkov_big_gt.npy")
+        big_gt = np.load("impactbig_gt.npy")
         num_batches = big_gt.shape[0]
         size = big_gt.shape[1]
-        big_samples = np.load("../../gaussian-volume/richtmyer_meshkov_big_samples.npy")
+        big_samples = np.load("impactbig_samples.npy")
     else:
         # if struct:
         #     save_gt = gpu_sample(
@@ -172,11 +236,11 @@ def training(
         # big_gt = big_gt.reshape(num_batches, cell_count**3)
         # big_samples = big_samples.reshape(num_batches, cell_count**3, 3)
         # end = time.time()
-
+ 
         size = cell_count ** 3
         # start = time.time()
         num_batches = 100
-        idx = torch.randint(gaussians.mesh.n_points, (num_batches, size))
+        # idx = torch.randint(gaussians.mesh.n_points, (num_batches, size))
         # idx = torch.arange(num_batches * size) % gaussians.mesh.n_points
         # idx = idx.view(num_batches, size)
         # nx, ny, nz = gaussians.mesh.dimensions
@@ -189,7 +253,16 @@ def training(
         # y = oy + j * sy
         # z = oz + k * sz
         # mesh_samples = np.stack((x, y, z), axis=-1)
-        big_samples = gaussians.mesh.points[idx]
+        if encode_surface:
+            size1 = int(math.ceil(size * 0.8))
+            size2 = int(math.floor(size * 0.2))
+            big_samples = sample_mesh_points(gaussians.mesh, 100, size1).cpu().numpy()
+            big_samples2 = sample_exterior_points(gaussians.mesh, 100, size2).cpu().numpy()
+            big_samples = np.concatenate([big_samples, big_samples2], axis=1)
+        else:
+            big_samples = sample_mesh_points(gaussians.mesh, 100, size).cpu().numpy()
+        print(big_samples.shape)
+        # big_samples = gaussians.mesh.points[idx]
         # big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
         # big_jitter *= np.array(spacing)[None, :]
         # # big_jitter[:size, :] = 0
@@ -198,56 +271,53 @@ def training(
         #     np.array(gaussians.mins), 
         #     np.array(gaussians.maxes)
         # )
-        # # # big_samples = mesh_samples + big_jitter
-        # big_samples = big_samples.reshape(num_batches * size, 3)
-        # big_gt = gpu_sampleu(
-        #     gaussians.mesh.points, 
-        #     gaussians.mesh.cell_connectivity.astype(np.int64),
-        #     gaussians.mesh.celltypes.astype(np.int64),
-        #     gaussians.mesh.offset.astype(np.int64),
-        #     gaussians.mesh.point_data[gaussians.mesh.array_names[0]],
-        #     big_samples
-        # )
-        big_gt = gaussians.mesh.point_data[gaussians.mesh.array_names[0]][idx]
+        big_samples = big_samples.reshape(num_batches * size, 3)
+        big_gt = gpu_sampleu(
+            gaussians.mesh.points, 
+            gaussians.mesh.cell_connectivity.astype(np.int64),
+            gaussians.mesh.celltypes.astype(np.int64),
+            gaussians.mesh.offset.astype(np.int64),
+            gaussians.mesh.point_data[gaussians.mesh.array_names[0]],
+            big_samples
+        )
+        # big_gt = gaussians.mesh.point_data[gaussians.mesh.array_names[0]][idx]
 
         big_gt = big_gt.reshape(num_batches, size)
         big_samples = big_samples.reshape(num_batches, size, 3)
 
-        big_gt_cuda = torch.tensor(big_gt, dtype=torch.float, device="cuda")
-        big_samples_cuda = torch.tensor(big_samples, dtype=torch.float, device="cuda")
+    big_gt_cuda = torch.tensor(big_gt, dtype=torch.float, device="cuda")
+    big_samples_cuda = torch.tensor(big_samples, dtype=torch.float, device="cuda")
 
-        # Sort spatially via Morton code (Z-order curve)
-        def part1by2_torch(n: torch.Tensor) -> torch.Tensor:
-            # n: int64
-            n = n & 0x1fffff
-            n = (n | (n << 32)) & 0x1f00000000ffff
-            n = (n | (n << 16)) & 0x1f0000ff0000ff
-            n = (n | (n << 8))  & 0x100f00f00f00f00f
-            n = (n | (n << 4))  & 0x10c30c30c30c30c3
-            n = (n | (n << 2))  & 0x1249249249249249
-            return n
+    # Sort spatially via Morton code (Z-order curve)
+    def part1by2_torch(n: torch.Tensor) -> torch.Tensor:
+        # n: int64
+        n = n & 0x1fffff
+        n = (n | (n << 32)) & 0x1f00000000ffff
+        n = (n | (n << 16)) & 0x1f0000ff0000ff
+        n = (n | (n << 8))  & 0x100f00f00f00f00f
+        n = (n | (n << 4))  & 0x10c30c30c30c30c3
+        n = (n | (n << 2))  & 0x1249249249249249
+        return n
 
-        scale = (1 << 21) - 1
+    scale = (1 << 21) - 1
 
-        norm = torch.clamp(big_samples_cuda, 0.0, 1.0)
-        q = (norm * scale).to(torch.int64)
+    norm = torch.clamp(big_samples_cuda, 0.0, 1.0)
+    q = (norm * scale).to(torch.int64)
 
-        morton = (
-            part1by2_torch(q[:, :, 0])
-            | (part1by2_torch(q[:, :, 1]) << 1)
-            | (part1by2_torch(q[:, :, 2]) << 2)
-        )
-        order = morton.argsort(dim=1)
-        idx3 = order.unsqueeze(-1).expand(-1, -1, 3)  # [B, S, 3]
-        big_samples_cuda = big_samples_cuda.gather(1, idx3)
-        big_gt_cuda = big_gt_cuda.gather(1, order)
+    morton = (
+        part1by2_torch(q[:, :, 0])
+        | (part1by2_torch(q[:, :, 1]) << 1)
+        | (part1by2_torch(q[:, :, 2]) << 2)
+    )
+    order = morton.argsort(dim=1)
+    idx3 = order.unsqueeze(-1).expand(-1, -1, 3)  # [B, S, 3]
+    big_samples_cuda = big_samples_cuda.gather(1, idx3)
+    big_gt_cuda = big_gt_cuda.gather(1, order)
         # big_samples = np.take_along_axis(big_samples, order[:, :, None], axis=1)
         # big_gt = np.take_along_axis(big_gt, order, axis=1)
         # end = time.time()
         # print(f"Time to sample gt: {end - start}")
     
-    # big_gt_cuda = torch.tensor(big_gt, dtype=torch.float, device="cuda")
-    # big_samples_cuda = torch.tensor(big_samples, dtype=torch.float, device="cuda")
     gt = big_gt_cuda[0]
     print(f"Number of invalid samples: {torch.count_nonzero(gt == -1)}")
     # tensor_to_vtk(save_gt.reshape(cell_count, cell_count, cell_count), "test_gt.vtk", spacing)
@@ -318,22 +388,28 @@ def training(
         # overlap_loss = torch.mean(intersection_weights)
         recon_mask = torch.logical_and(gt != -1, cells != -1)
         # l1_lv = l1_loss(cells[recon_mask], gt[recon_mask])
-        # l1_lv = torch.abs(cells - gt).mean()
-        l1_lv = ((cells - gt) ** 2).mean()
+        if encode_surface:
+            l1_lv = torch.abs(cells - gt).mean()
+        else:
+            l1_lv = l1_loss(cells[recon_mask], gt[recon_mask])
+        # l1_lv = ((cells[recon_mask] - gt[recon_mask]) ** 2).mean()
         # TODO: FIX FP AND FN FOR CHANGING CELL COUNTS
         k = 600  # Adjust this to control decay rate
         # fn_mask = torch.logical_and(gt != -1, weights < 0.03)
         # false_negative = torch.exp(-k * weights[fn_mask])
         # false_negative = false_negative[false_negative > 0].mean()
-        fn_mask = torch.logical_and(torch.logical_and(gt != -1, weights > 0.0), weights < 0.011)
+        if encode_surface:
+            fn_mask = torch.logical_and(torch.logical_and(gt != -1, weights > 0.0), weights < 0.0105)
+        else:
+            fn_mask = torch.logical_and(torch.logical_and(gt != -1, weights > 0.0), weights < 0.011)
         fn_vals = torch.clamp(0.011 - weights[fn_mask], min=0)
-        # false_negative = args.fn_reg * fn_vals.sum() / ((fn_vals > 0).sum().float() + 1e-8)  
-        false_negative = args.fn_reg * fn_vals.mean()
+        false_negative = args.fn_reg * fn_vals.sum() / ((fn_vals > 0).sum().float() + 1e-8)  
+        # false_negative = args.fn_reg * fn_vals.mean()
 
         fp_mask = torch.logical_and(gt == -1, weights > 0.0)
         fp_vals = weights[fp_mask]        
-        # false_positive = args.fp_reg * fp_vals.sum() / ((fp_vals > 0).sum().float() + 1e-8)
-        false_positive = args.fp_reg * fp_vals.mean()
+        false_positive = args.fp_reg * fp_vals.sum() / ((fp_vals > 0).sum().float() + 1e-8)
+        # false_positive = args.fp_reg * fp_vals.mean()
 
         # t = 0.01
         # delta = 0.002 
@@ -356,10 +432,13 @@ def training(
         #     false_positive = (1 * (1 - torch.exp(-k * weights[mask]))).mean()
         # else:
         #     false_positive = torch.tensor(0., device="cuda")
-        loss = l1_lv + false_negative
+        if encode_surface:
+            loss = l1_lv + false_negative + false_positive
+        else:
+            loss = l1_lv + false_negative
         if gaussians.get_values.shape[0] > args.cap_max:
             n = True
-        if True:
+        if use_mcmc:
             loss = loss + args.weight_reg * torch.abs(gaussians.get_weight).mean()
             loss = loss + args.scale_reg * torch.abs(gaussians.get_scaling).mean()
 
@@ -367,6 +446,8 @@ def training(
         iter_end.record()
 
         with torch.no_grad():
+            if iteration > opt.densify_from_iter:
+                args.fn_reg = args.fn_reg2
             # Compute the lossy samples where new Gaussians are needed
             recon_mask = torch.logical_and(cells != -1, gt != -1)
             # recon_mask = (gt != -1)
@@ -451,9 +532,9 @@ def training(
                 progress_bar.close()
 
             # Save
-            # if iteration in saving_iterations:
-            #     print("\n[ITER {}] Saving Gaussians".format(iteration))
-            #     scene.save(iteration)
+            if iteration in saving_iterations:
+                print("\n[ITER {}] Saving Gaussians".format(iteration))
+                scene.save(iteration)
             #     cpu_cells = cells.cpu().numpy()
             #     tensor_to_vtk(cpu_cells.reshape(cell_count, cell_count, cell_count), f"out_vtk/test_{iteration}.vtk", spacing)
             #     tensor_to_vtk(torch.abs((cells - gt)).cpu().numpy().reshape(cell_count, cell_count, cell_count), f"out_vtk/test_{iteration}_loss.vtk", spacing)
@@ -473,39 +554,41 @@ def training(
                  iteration not in saving_iterations and
                  iteration not in testing_iterations
             ):
-                dead_mask = (gaussians.get_weight <= 0.005).squeeze(-1)
-                gaussians.relocate_gs(dead_mask=dead_mask, cells=cells, gt=gt)
-                gaussians.add_new_gs(cap_max=args.cap_max)
+                if use_mcmc:
+                    dead_mask = (gaussians.get_weight <= 0.005).squeeze(-1)
+                    gaussians.relocate_gs(dead_mask=dead_mask, cells=cells, gt=gt)
+                    gaussians.add_new_gs(cap_max=args.cap_max)
 
+                else:
+                    cells_flat = cells.ravel()
+                    gt_flat = gt.ravel()
+                    mask = gt_flat != -1
 
-                # cells_flat = cells.ravel()
-                # gt_flat = gt.ravel()
-                # mask = gt_flat != -1
+                    diff = torch.abs(cells_flat[mask] - gt_flat[mask])
 
-                # diff = torch.abs(cells_flat[mask] - gt_flat[mask])
+                    k = min(
+                        500000,
+                        args.cap_max - gaussians.get_values.shape[0]
+                        + torch.count_nonzero(gaussians.get_weight <= 0.005)
+                        + 1000,
+                    )
 
-                # k = min(
-                #     200000,
-                #     args.cap_max - gaussians.get_values.shape[0]
-                #     + torch.count_nonzero(gaussians.get_weight <= 0.005)
-                #     + 1000,
-                # )
+                    k = min(k, diff.numel())  # ensure k is valid
 
-                # k = min(k, diff.numel())  # ensure k is valid
+                    topk_idx_masked = torch.topk(diff, k).indices
+                    loss_idx = torch.nonzero(mask, as_tuple=False).squeeze(1)[topk_idx_masked]
 
-                # topk_idx_masked = torch.topk(diff, k).indices
-                # loss_idx = torch.nonzero(mask, as_tuple=False).squeeze(1)[topk_idx_masked]
-
-                # gaussians.densify_and_prune(
-                #     opt.densify_grad_threshold,
-                #     min_weight,
-                #     # new_scale,
-                #     torch.mean(gaussians.get_scaling) / 6.0,
-                #     # current_samples[np.logical_and(current_samples == -1, gt != -1)],
-                #     # gt_cells.ravel()[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)].reshape(-1, 1)
-                #     current_samples[loss_idx],
-                #     gt[loss_idx].reshape(-1, 1)
-                # )
+                    gaussians.densify_and_prune(
+                        opt.densify_grad_threshold,
+                        min_weight,
+                        # new_scale,
+                        torch.mean(gaussians.get_scaling) / 6.0,
+                        # current_samples[np.logical_and(current_samples == -1, gt != -1)],
+                        # gt_cells.ravel()[np.logical_and(cpu_cells.ravel() == -1, gt_cells.ravel() != -1)].reshape(-1, 1)
+                        current_samples[loss_idx],
+                        gt[loss_idx].reshape(-1, 1),
+                        k
+                    )
                 densifies += 1
 
             # Optimizer step
@@ -513,16 +596,16 @@ def training(
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none=True)
 
-                # if True:
-                #     L = build_scaling_rotation(gaussians.get_scaling, gaussians.get_rotation)
-                #     actual_covariance = L @ L.transpose(1, 2)
+                if use_mcmc:
+                    L = build_scaling_rotation(gaussians.get_scaling, gaussians.get_rotation)
+                    actual_covariance = L @ L.transpose(1, 2)
 
-                #     def op_sigmoid(x, k=100, x0=0.995):
-                #         return 1 / (1 + torch.exp(-k * (x - x0)))
+                    def op_sigmoid(x, k=100, x0=0.995):
+                        return 1 / (1 + torch.exp(-k * (x - x0)))
                     
-                #     noise = torch.randn_like(gaussians._xyz) * (op_sigmoid(1- gaussians.get_weight)) * args.noise_lr * xyz_lr
-                #     noise = torch.bmm(actual_covariance, noise.unsqueeze(-1)).squeeze(-1)
-                #     gaussians._xyz.add_(noise)
+                    noise = torch.randn_like(gaussians._xyz) * (op_sigmoid(1- gaussians.get_weight)) * args.noise_lr * xyz_lr
+                    noise = torch.bmm(actual_covariance, noise.unsqueeze(-1)).squeeze(-1)
+                    gaussians._xyz.add_(noise)
 
 
             if iteration in checkpoint_iterations:
@@ -592,7 +675,8 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--log_to_file", action="store_true")
     parser.add_argument("--is_scaled", action="store_true")
-    parser.add_argument("--precompute_samples", action="store_true")
+    parser.add_argument("--precomputed_samples", action="store_true")
+    parser.add_argument("--encode_surface", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default=None)
     args = parser.parse_args(sys.argv[1:])
@@ -617,7 +701,8 @@ if __name__ == "__main__":
         args.fraction,
         args.min_weight,
         args.is_scaled,
-        args.precompute_samples
+        args.precomputed_samples,
+        args.encode_surface
     )
 
     # All done
