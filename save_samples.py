@@ -1,176 +1,173 @@
-#!/usr/bin/env python3
 """
-Read a raw volume file and generate big_gt (sampled ground truth values)
-and big_samples (sample positions with jitter) for training data.
+Sample random points from a VTU mesh and interpolate field values using gpu_sampleu.
+
+Outputs:
+  - big_samples.npy: (num_batches, size, 3) sample coordinates
+  - big_gt.npy: (num_batches, size) interpolated field values
+
+Usage:
+  python sample_vtu.py <path.vtu> --num_batches 100 --size 2097152
 """
 
+import argparse
+import math
 import numpy as np
-from gpu_mesh_sampling import gpu_sample
-import os
+import torch
+import pyvista as pv
+
+from gpu_mesh_sampling import gpu_sample, gpu_sampleu
 
 
-def read_raw_volume(filename, shape, dtype=np.uint8, order='C'):
-    """
-    Reads a raw binary file into a NumPy array.
-    """
-    count = np.prod(shape)
-    data = np.fromfile(filename, dtype=dtype, count=count)
-    if data.size != count:
-        raise IOError(f"Expected {count} elements, got {data.size}")
-    return data.reshape(shape, order=order)
-
-
-def generate_samples(cell_count, num_batches, mins, maxes):
-    """
-    Generate sample positions with jittered batches within given bounds.
-    
-    Args:
-        cell_count: number of cells per dimension
-        num_batches: number of batches to generate
-        mins: tuple/array of (min_x, min_y, min_z)
-        maxes: tuple/array of (max_x, max_y, max_z)
-    
-    Returns:
-        big_samples: array of shape (num_batches, cell_count**3, 3)
-        spacing: tuple of spacing values per dimension
-    """
-    mins = np.array(mins)
-    maxes = np.array(maxes)
-    
-    spacing = [
-        (maxes[0] - mins[0]) / (cell_count - 1),
-        (maxes[1] - mins[1]) / (cell_count - 1),
-        (maxes[2] - mins[2]) / (cell_count - 1)
-    ]
-    
-    # Create base grid
-    x = np.linspace(mins[0], maxes[0], cell_count)
-    y = np.linspace(mins[1], maxes[1], cell_count)
-    z = np.linspace(mins[2], maxes[2], cell_count)
-    x, y, z = np.meshgrid(x, y, z, indexing='ij')
-    
-    samples = np.vstack([x.ravel(), y.ravel(), z.ravel()]).T
-    samples_3d = samples.reshape(cell_count, cell_count, cell_count, 3)
-    
-    # Apply transformations (rot90 and flip)
-    rot = np.rot90(samples_3d, k=1, axes=(2, 0))
-    samples_tf = np.flip(rot, axis=2)
-    save_cell = samples_tf.reshape(-1, 3)
-    
-    # Create batches with jitter
-    size = cell_count ** 3
-    big_samples = np.tile(save_cell, (num_batches, 1))
-    
-    big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
-    big_jitter *= np.array(spacing)[None, :]
-    big_jitter[:size, :] = 0  # First batch has no jitter
-    
-    big_samples = np.clip(
-        big_samples + big_jitter,
-        mins,
-        maxes
+def sample_mesh_points(mesh, num_batches, batch_size, device="cuda"):
+    """Sample random points uniformly inside the tetrahedra of a mesh."""
+    points = torch.tensor(mesh.points, dtype=torch.float32, device=device)
+    # tet_mesh = mesh.triangulate()
+    # tet_mesh.save("impacttet.vtu")
+    tet_mesh = pv.read("impacttet.vtu")
+    cells = torch.tensor(
+        tet_mesh.cells.reshape(-1, 5)[:, 1:], dtype=torch.long, device=device
     )
-    
-    return big_samples.reshape(num_batches, size, 3), spacing
 
+    all_samples = np.empty((num_batches, batch_size, 3), dtype=np.float32)
 
-def compute_mesh_params(shape):
-    """
-    Compute mesh parameters (dimensions, origin, spacing) for gpu_sample,
-    with aspect-preserving normalization centered in [0,1]^3.
-    
-    Args:
-        shape: tuple of (nx, ny, nz) volume dimensions
-    
-    Returns:
-        dimensions: tuple of volume dimensions
-        origin: tuple of origin per axis (centered)
-        spacing: tuple of uniform spacing per axis
-        maxes: tuple of max bounds per axis
-    """
-    nx, ny, nz = shape
-    max_dim = max(nx, ny, nz)
-    
-    # Uniform spacing based on largest dimension
-    spacing_val = 1.0 / np.float32(max_dim)
-    spacing = (np.float32(spacing_val), np.float32(spacing_val), np.float32(spacing_val))
-    
-    # Calculate extent for each axis
-    extent_x = (nx - 1) * spacing_val
-    extent_y = (ny - 1) * spacing_val
-    extent_z = (nz - 1) * spacing_val
-    origin  = (0.0, 0.0, 0.0)
-    maxes = (
-        np.float32(origin[0] + extent_x - 1e-6),
-        np.float32(origin[1] + extent_y - 1e-6),
-        np.float32(origin[2] + extent_z - 1e-6)    
+    for i in range(num_batches):
+        cell_idx = torch.randint(0, cells.shape[0], (batch_size,), device=device)
+        verts = points[cells[cell_idx]]
+
+        u = torch.rand(batch_size, 3, device=device).sort(dim=1).values
+        bary = torch.zeros(batch_size, 4, device=device)
+        bary[:, 0] = u[:, 0]
+        bary[:, 1] = u[:, 1] - u[:, 0]
+        bary[:, 2] = u[:, 2] - u[:, 1]
+        bary[:, 3] = 1.0 - u[:, 2]
+
+        samples = (bary.unsqueeze(2) * verts).sum(dim=1)
+        all_samples[i] = samples.cpu().numpy()
+
+    return all_samples
+
+def sample_exterior_points(mesh, num_batches, batch_size, offset=0.01, device="cuda"):
+    """Sample points just outside the mesh surface using properly oriented normals."""
+    # tet_mesh = pv.read("impacttet.vtu")
+    s = mesh.extract_surface().triangulate()
+    print("Manifold", s.is_manifold)
+    print("Open edges", s.n_open_edges)
+    print("Faces", s.n_cells)
+    surf = s.compute_normals(
+        cell_normals=True, 
+        point_normals=False,
+        consistent_normals=True,
+        auto_orient_normals=False,
     )
-    
-    return shape, origin, spacing, maxes
+
+    face_normals = torch.tensor(surf.cell_data["Normals"], dtype=torch.float32, device=device)
+    points = torch.tensor(surf.points, dtype=torch.float32, device=device)
+    faces = torch.tensor(
+        surf.faces.reshape(-1, 4)[:, 1:], dtype=torch.long, device=device
+    )
+
+    total = num_batches * batch_size
+
+    face_idx = torch.randint(0, faces.shape[0], (total,), device=device)
+    v = points[faces[face_idx]]
+
+    # Uniform barycentric coords on triangle
+    u = torch.rand(total, 2, device=device)
+    sqrt_u0 = u[:, 0].sqrt()
+    bary = torch.stack([1 - sqrt_u0, sqrt_u0 * (1 - u[:, 1]), sqrt_u0 * u[:, 1]], dim=1)
+
+    surf_pts = (bary.unsqueeze(2) * v).sum(dim=1)
+
+    # Use PyVista's properly oriented outward normals
+    normals = face_normals[face_idx]
+
+    dist = torch.rand(total, 1, device=device) * offset
+    samples = surf_pts + normals * dist
+
+    return samples.reshape(num_batches, batch_size, 3).cpu().numpy()
 
 
 def main():
-    # --- Configuration: Update these to match your data ---
-    raw_file = 'vtk/richtmyer_meshkov_2048x2048x1920_uint8.raw'
-    output_samples = 'big_samples.npy'
-    output_gt = 'big_gt.npy'
-    
-    # Volume parameters
-    shape = (2048, 2048, 1920)  # X, Y, Z dimensions
-    dtype = np.uint8        # Data type of raw file
-    order = 'C'              # 'C' for row-major, 'F' for column-major
-    
-    # Sampling parameters
-    cell_count = 128
-    num_batches = 100
-    
-    # --- Processing ---
-    if not os.path.isfile(raw_file):
-        raise FileNotFoundError(f"Could not locate raw file: {raw_file}")
-    
-    print(f"1) Reading raw volume ({dtype.__name__})...")
-    volume = read_raw_volume(raw_file, shape, dtype=dtype, order=order)
-    print(f"   Shape: {volume.shape}, dtype: {volume.dtype}")
-    vol_min, vol_max = volume.min(), volume.max()
-    print(f"   Value range: [{vol_min}, {vol_max}]")
-    
-    print("2) Computing mesh parameters (aspect-preserving, centered)...")
-    dimensions, origin, spacing, maxes = compute_mesh_params(shape)
-    print(f"   Dimensions: {dimensions}")
-    print(f"   Origin: {origin}")
-    print(f"   Spacing: {spacing}")
-    print(f"   Bounds: {origin} to {maxes}")
-    
-    print(f"3) Generating {num_batches} batches of {cell_count}^3 samples...")
-    big_samples, sample_spacing = generate_samples(cell_count, num_batches, origin, maxes)
-    print(f"   big_samples shape: {big_samples.shape}")
-    print(f"   Sample spacing: {sample_spacing}")
-    
-    print("4) Sampling volume at all positions using gpu_sample...")
-    flat_samples = big_samples.reshape(-1, 3)
-    big_gt = gpu_sample(
-        dimensions,
-        origin,
-        spacing,
-        volume.ravel(order='C'),
-        flat_samples
-    )
-    big_gt = big_gt.reshape(num_batches, cell_count**3)
-    print(f"   big_gt shape: {big_gt.shape}")
-    print(f"   big_gt value range: [{big_gt.min():.4f}, {big_gt.max():.4f}]")
-    
-    print("5) Normalizing big_gt to [0,1] and casting to float32...")
-    big_gt = ((big_gt.astype(np.float32) - vol_min) / (vol_max - vol_min))
-    print(f"   big_gt normalized range: [{big_gt.min():.4f}, {big_gt.max():.4f}]")
-    print(f"   big_gt dtype: {big_gt.dtype}")
-    
-    print(f"6) Saving outputs...")
-    np.save(output_samples, big_samples)
-    np.save(output_gt, big_gt)
-    print(f"   Saved: {output_samples}")
-    print(f"   Saved: {output_gt}")
-    
-    print("Done!")
+    parser = argparse.ArgumentParser(description="Sample a VTU mesh and save numpy arrays.")
+    parser.add_argument("vtu", help="Path to .vtu file")
+    parser.add_argument("--num_batches", type=int, default=100, help="Number of batches")
+    parser.add_argument("--size", type=int, default=128**3, help="Samples per batch")
+    parser.add_argument("--array_name", type=str, default=None,
+                        help="Point data array to interpolate (default: first array)")
+    parser.add_argument("--device", type=str, default="cuda",
+                        help="Torch device for sampling (cuda or cpu)")
+    parser.add_argument("--output_prefix", type=str, default="",
+                        help="Prefix for output filenames")
+    args = parser.parse_args()
+
+    print(f"Loading mesh: {args.vtu}")
+    mesh = pv.read(args.vtu)
+    print(f"  Points: {mesh.n_points}, Cells: {mesh.n_cells}")
+    print(f"  Arrays: {mesh.array_names}")
+
+    mesh = mesh.cell_data_to_point_data()
+    values = mesh.get_array(mesh.array_names[0]).reshape(-1, 1)
+
+    # Rescale the values to the range [0, 1]
+    values_min = values.min()
+    values_max = values.max()
+    values = (values - values_min) / (values_max - values_min)
+    mesh.get_array(mesh.array_names[0])[:] = values.ravel()
+
+    # Scale mesh to the unit cube
+    global_min = mesh.points.min()
+    global_max = mesh.points.max()
+    mesh.translate(np.array([-global_min, -global_min, -global_min]), inplace=True)
+    mesh.scale(1/(global_max - global_min), inplace=True)
+
+    prefix = args.output_prefix
+    # mesh.save(f"{prefix}norm.vtu")
+
+    array_name = args.array_name or mesh.array_names[0]
+    print(f"  Using array: '{array_name}'")
+
+    device = args.device if torch.cuda.is_available() else "cpu"
+    if device != args.device:
+        print("  CUDA not available, falling back to CPU")
+
+    print(f"Sampling {args.num_batches} batches x {args.size} points...")
+    # big_samples = sample_mesh_points(mesh, args.num_batches, args.size, device=device)
+    size1 = int(math.ceil(args.size * 0.5))
+    size2 = int(math.floor(args.size * 0.5))
+    big_samples = sample_mesh_points(mesh, args.num_batches, size1)
+    big_samples2 = sample_exterior_points(mesh, args.num_batches, size2)
+    # print(big_samples.shape, big_samples2.shape)
+    big_samples = np.concatenate([big_samples, big_samples2], axis=1).reshape(args.num_batches * args.size, 3)
+
+    print("Interpolating field values with mesh...")
+    probe_mesh = pv.PolyData(big_samples)
+    probed = probe_mesh.sample(mesh)
+    # big_samples = probed.points
+    big_gt = probed[mesh.array_names[0]]
+    valid_mask = probed['vtkValidPointMask'].astype(bool)
+    big_gt[~valid_mask] = -1
+
+    print("Interpolating field values with gpu_sampleu...")
+    # big_gt = gpu_sampleu(
+    #     mesh.points,
+    #     mesh.cell_connectivity.astype(np.int64),
+    #     mesh.celltypes.astype(np.int64),
+    #     mesh.offset.astype(np.int64),
+    #     mesh.point_data[array_name],
+    #     big_samples,
+    # )
+
+    big_gt = big_gt.reshape(args.num_batches, args.size)
+    big_samples = big_samples.reshape(args.num_batches, args.size, 3)
+    print(f"Number of invalid samples: {np.count_nonzero(big_gt[0] == -1)}")
+
+    samples_path = f"{prefix}big_samples.npy"
+    gt_path = f"{prefix}big_gt.npy"
+
+    np.save(samples_path, big_samples)
+    np.save(gt_path, big_gt)
+    print(f"Saved: {samples_path}  shape={big_samples.shape}")
+    print(f"Saved: {gt_path}  shape={big_gt.shape}")
 
 
 if __name__ == "__main__":
