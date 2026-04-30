@@ -121,6 +121,68 @@ def compute_bhattacharyya_sums(means: torch.Tensor,
     return overlap_sums
 
 
+def sample_mesh_points(mesh, num_batches, batch_size, device="cuda"):
+    points = torch.tensor(mesh.points, dtype=torch.float32, device=device)
+    # tet_mesh = mesh.triangulate()
+    tet_mesh = pv.read("impacttet.vtu")
+
+    # Extract cell connectivity — assumes tets (4 verts per cell)
+    cells = torch.tensor(
+        tet_mesh.cells.reshape(-1, 5)[:, 1:], dtype=torch.long, device=device
+    )  # (C, 4)
+
+    total = num_batches * batch_size
+
+    # Pick random cells (uniform = denser where cells are smaller = where points are denser)
+    cell_idx = torch.randint(0, cells.shape[0], (total,), device=device)
+    verts = points[cells[cell_idx]]  # (total, 4, 3)
+
+    # Random barycentric coordinates inside a tetrahedron
+    # Uniformly sample a tet: take 3 random values, sort, then differences give bary coords
+    u = torch.rand(total, 3, device=device).sort(dim=1).values
+    bary = torch.zeros(total, 4, device=device)
+    bary[:, 0] = u[:, 0]
+    bary[:, 1] = u[:, 1] - u[:, 0]
+    bary[:, 2] = u[:, 2] - u[:, 1]
+    bary[:, 3] = 1.0 - u[:, 2]
+
+    # Interpolate: (total, 4, 1) * (total, 4, 3) summed over verts
+    samples = (bary.unsqueeze(2) * verts).sum(dim=1)
+
+    return samples.reshape(num_batches, batch_size, 3)
+
+
+def sample_exterior_points(mesh, num_batches, batch_size, offset=0.01, device="cuda"):
+    """Sample points just outside the mesh surface using properly oriented normals."""
+    surf = mesh.extract_surface().triangulate().compute_normals(cell_normals=True, point_normals=False)
+
+    face_normals = torch.tensor(surf.cell_data["Normals"], dtype=torch.float32, device=device)
+    points = torch.tensor(surf.points, dtype=torch.float32, device=device)
+    faces = torch.tensor(
+        surf.faces.reshape(-1, 4)[:, 1:], dtype=torch.long, device=device
+    )
+
+    total = num_batches * batch_size
+
+    face_idx = torch.randint(0, faces.shape[0], (total,), device=device)
+    v = points[faces[face_idx]]
+
+    # Uniform barycentric coords on triangle
+    u = torch.rand(total, 2, device=device)
+    sqrt_u0 = u[:, 0].sqrt()
+    bary = torch.stack([1 - sqrt_u0, sqrt_u0 * (1 - u[:, 1]), sqrt_u0 * u[:, 1]], dim=1)
+
+    surf_pts = (bary.unsqueeze(2) * v).sum(dim=1)
+
+    # Use PyVista's properly oriented outward normals
+    normals = face_normals[face_idx]
+
+    dist = torch.rand(total, 1, device=device) * offset
+    samples = surf_pts + normals * dist
+
+    return samples.reshape(num_batches, batch_size, 3)
+
+
 def training(
     dataset,
     opt,
@@ -131,6 +193,8 @@ def training(
     
     gaussians = GaussianModel()
     scene = Scene(dataset, gaussians, load_iteration=-1, normalized=is_scaled, fraction=-1)
+    # gaussians.cull_exterior_gaussians()
+    # gaussians.save_ply("./test.ply")
     struct = dataset.source_path.lower().endswith('.vtk')
     pipe.debug = True
     init_rasterizer(
@@ -199,41 +263,59 @@ def training(
         #     y = oy + j * sy
         #     z = oz + k * sz
         #     mesh_samples = np.stack((x, y, z), axis=-1)
-        idx = np.random.choice(gaussians.mesh.n_points, size=(1000000), replace=True)
-        if struct:
-            nx, ny, nz = gaussians.mesh.dimensions
-            ox, oy, oz = gaussians.mesh.origin
-            sx, sy, sz = gaussians.mesh.spacing
-            nxny = nx * ny
-            k, r = np.divmod(idx, nxny)
-            j, i = np.divmod(r, nx)
+        # idx = np.random.choice(gaussians.mesh.n_points, size=(1000000), replace=True)
+        # if struct:
+        #     nx, ny, nz = gaussians.mesh.dimensions
+        #     ox, oy, oz = gaussians.mesh.origin
+        #     sx, sy, sz = gaussians.mesh.spacing
+        #     nxny = nx * ny
+        #     k, r = np.divmod(idx, nxny)
+        #     j, i = np.divmod(r, nx)
 
-            # Sort spatially via Morton code (Z-order curve)
-            def part1by2(n):
-                n = n.astype(np.uint64) & 0x1fffff
-                n = (n | (n << 32)) & 0x1f00000000ffff
-                n = (n | (n << 16)) & 0x1f0000ff0000ff
-                n = (n | (n << 8))  & 0x100f00f00f00f00f
-                n = (n | (n << 4))  & 0x10c30c30c30c30c3
-                n = (n | (n << 2))  & 0x1249249249249249
-                return n
+        #     # Sort spatially via Morton code (Z-order curve)
+        #     def part1by2(n):
+        #         n = n.astype(np.uint64) & 0x1fffff
+        #         n = (n | (n << 32)) & 0x1f00000000ffff
+        #         n = (n | (n << 16)) & 0x1f0000ff0000ff
+        #         n = (n | (n << 8))  & 0x100f00f00f00f00f
+        #         n = (n | (n << 4))  & 0x10c30c30c30c30c3
+        #         n = (n | (n << 2))  & 0x1249249249249249
+        #         return n
 
-            scale = (1 << 21) - 1
-            order = np.argsort(
-                part1by2((i * scale) // (nx - 1))
-                | (part1by2((j * scale) // (ny - 1)) << 1)
-                | (part1by2((k * scale) // (nz - 1)) << 2)
-            )
-            idx = idx[order]
-            i, j, k = i[order], j[order], k[order]
+        #     scale = (1 << 21) - 1
+        #     order = np.argsort(
+        #         part1by2((i * scale) // (nx - 1))
+        #         | (part1by2((j * scale) // (ny - 1)) << 1)
+        #         | (part1by2((k * scale) // (nz - 1)) << 2)
+        #     )
+        #     idx = idx[order]
+        #     i, j, k = i[order], j[order], k[order]
 
-            x = ox + i * sx
-            y = oy + j * sy
-            z = oz + k * sz
-            mesh_samples = np.stack((x, y, z), axis=-1)
-        else:
-            mesh_samples = gaussians.mesh.points[idx]
-        gt_cells = gaussians.mesh.point_data[gaussians.mesh.array_names[0]][idx]
+        #     x = ox + i * sx
+        #     y = oy + j * sy
+        #     z = oz + k * sz
+        #     mesh_samples = np.stack((x, y, z), axis=-1)
+        # else:
+        #     mesh_samples = gaussians.mesh.points[idx]
+
+        # gt_cells = gaussians.mesh.point_data[gaussians.mesh.array_names[0]][idx]
+        # mesh_samples = sample_exterior_points(gaussians.mesh, 1, 1000000).reshape(1000000, 3).cpu().numpy()
+        mesh_samples = sample_mesh_points(gaussians.mesh, 1, 1000000).reshape(1000000, 3).cpu().numpy()
+        probe_mesh = pv.PolyData(mesh_samples)
+        probed = probe_mesh.sample(gaussians.mesh)
+        gt_cells = probed[gaussians.mesh.array_names[0]]
+        valid_mask = probed['vtkValidPointMask'].astype(bool)
+        gt_cells[~valid_mask] = -1
+        # gt_cells = gpu_sampleu(
+        #     gaussians.mesh.points, 
+        #     gaussians.mesh.cell_connectivity.astype(np.int64),
+        #     gaussians.mesh.celltypes.astype(np.int64),
+        #     gaussians.mesh.offset.astype(np.int64),
+        #     gaussians.mesh.point_data[gaussians.mesh.array_names[0]],
+        #     mesh_samples.reshape(1000000, 3)
+        # )
+        gt_cells = gt_cells.reshape(1000000)
+        mesh_samples = mesh_samples.reshape(1000000, 3)
         build_bvh(
             torch.tensor(mesh_samples, dtype=torch.float, device="cuda")
         )
@@ -255,20 +337,28 @@ def training(
     # print(torch.mean(intersections))
     # print(torch.mean(intersection_weights))
 
-
+    cells2 = cells.clone()
+    cells2[cells2 == -1] = 0
     l1_l = l1_loss(cells, gt)
     # l1_l.backward()
+    
     mse = torch.mean((cells - gt) ** 2)
     psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
     mse2 = torch.mean((cells[torch.logical_and(gt != -1, cells != -1)] - gt[torch.logical_and(gt != -1, cells != -1)]) ** 2)
     psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
     mse3 = torch.mean((gt) ** 2)
     psnr3 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse3 + 1e-8)
+    mse4 = torch.mean((cells2 - gt) ** 2)
+    psnr4 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse4 + 1e-8)
+    mse5 = torch.mean((cells2[gt != -1] - gt[gt != -1]) ** 2)
+    psnr5 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse5 + 1e-8)
     print(f"L1 loss: {l1_l.item()}")
     print(f"L2 loss: {mse}")
     print(f"PSNR: {psnr}")
     print(f"PSNR without false positives/negatives: {psnr2}")
     print(f"PSNR of original: {psnr3}")
+    print(f"PSNR with 0s for fn: {psnr4}")
+    print(f"PSNR with 0s for fn and no fp: {psnr5}")
     if not test_mesh:
         print(f"Percent invalid samples: {np.count_nonzero(gt_cells == -1) / cell_count ** 3}")
         print(f"False negative percent: {torch.count_nonzero(torch.logical_and(cells == -1, gt != -1)) / cell_count ** 3}")
@@ -277,6 +367,7 @@ def training(
     else:
         print(f"False negative: {torch.count_nonzero(torch.logical_and(cells == -1, gt != -1))}")
         print(f"false positive: {torch.count_nonzero(torch.logical_and(cells != -1, gt == -1))}")
+        print(f"false positive percent: {torch.count_nonzero(torch.logical_and(cells != -1, gt == -1)) / torch.count_nonzero(gt == -1)}")
     # gaussians.save_ply_activated('apoint_cloud.ply')
 
 if __name__ == "__main__":
