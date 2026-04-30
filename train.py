@@ -309,13 +309,13 @@ def training(
                     gaussians.relocate_gs(dead_mask=dead_mask, cells=cells, gt=gt)
                     gaussians.add_new_gs(cap_max=args.cap_max)
                 else:
-                    # loss_idx = torch.topk(
-                    #     torch.abs(cells.ravel() - gt.ravel()),
-                    #     # (cells.ravel() - gt.ravel()) ** 2,
-                    #     # 20 * int((args.cap_max - gaussians.get_values.shape[0]) // (1 + (opt.iterations - iteration) / opt.densification_interval)),
-                    #     min(80000, args.cap_max - gaussians.get_values.shape[0] + torch.count_nonzero(gaussians.get_weight <= min_weight) + 1000)
-                    # ).indices
-                    loss_idx = (torch.abs(cells.ravel() - gt.ravel()) > 0.01)
+                    loss_idx = torch.topk(
+                        torch.abs(cells.ravel() - gt.ravel()),
+                        # (cells.ravel() - gt.ravel()) ** 2,
+                        # 20 * int((args.cap_max - gaussians.get_values.shape[0]) // (1 + (opt.iterations - iteration) / opt.densification_interval)),
+                        min(500000, args.cap_max - gaussians.get_values.shape[0] + torch.count_nonzero(gaussians.get_weight <= min_weight) + 1000)
+                    ).indices
+                    # loss_idx = (torch.abs(cells.ravel() - gt.ravel()) > 0.01)
                     gaussians.densify_and_prune(
                         opt.densify_grad_threshold,
                         min_weight,
@@ -426,7 +426,7 @@ if __name__ == "__main__":
     #     "--save_iterations", nargs="+", type=int, default=[1, 16, 32, 64, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
     # )
     parser.add_argument(
-        "--save_iterations", nargs="+", type=int, default=[16000]
+        "--save_iterations", nargs="+", type=int, default=[]
     )
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--log_to_file", action="store_true")

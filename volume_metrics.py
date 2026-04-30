@@ -88,8 +88,8 @@ def training(
         render_pkg["visibility_filter"],
         render_pkg["radii"],
     )
-    cells[cells == -1.0] = 0.0
-    # print(gt.mean())
+    # cells[cells == -1.0] = 0.0
+    print(gt.mean())
     l1_l = l1_loss(cells, torch.zeros_like(cells))
     # l1_l.backward()
     mse = torch.mean((cells - gt) ** 2)
@@ -114,8 +114,8 @@ def training(
     #     sigma=(1.5, 1.5, 1.5)
     # )
     # print(f"SSIM: {ssim}")
-    tensor_to_vtk(torch.abs((cells - gt)).detach().cpu().numpy(), f"3dgschame_loss.vtk", spacing)
-    tensor_to_vtk(cells.detach().cpu().numpy(), f"3dgschame.vtk", spacing)
+    tensor_to_vtk(torch.abs((cells - gt)).detach().cpu().numpy(), f"test_loss.vtk", spacing)
+    tensor_to_vtk(cells.detach().cpu().numpy(), f"test.vtk", spacing)
 
 if __name__ == "__main__":
     window = create_window()
