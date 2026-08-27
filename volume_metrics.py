@@ -4,7 +4,7 @@ from random import randint
 import numpy as np
 
 import torch
-from torchmetrics.functional.image import structural_similarity_index_measure
+# from torchmetrics.functional.image import structural_similarity_index_measure
 from tqdm import tqdm
 import pyvista as pv
 
@@ -36,7 +36,7 @@ def training(
     gaussians = GaussianModel()
     scene = Scene(dataset, gaussians, load_iteration=-1, normalized=is_scaled)
     # Make ground truth
-    cell_count = 128
+    cell_count = 512
     spacing = [
         (gaussians.maxes[0] - gaussians.mins[0]) / (cell_count - 1),
         (gaussians.maxes[1] - gaussians.mins[1]) / (cell_count - 1),
@@ -62,13 +62,16 @@ def training(
         np.array(gaussians.mins),
         np.array(gaussians.maxes)
     )
-    gt_cells = gpu_sample(
-        gaussians.mesh.dimensions,
-        gaussians.mesh.origin,
-        gaussians.mesh.spacing,
-        gaussians.mesh.point_data[gaussians.mesh.point_data.keys()[0]],
-        samples_tf_flat
-    )
+    probe = pv.PolyData(samples_tf_flat)
+    sampled = probe.sample(gaussians.mesh)
+    gt_cells = sampled.point_data['value']
+    # gt_cells = gpu_sample(
+    #     gaussians.mesh.dimensions,
+    #     gaussians.mesh.origin,
+    #     gaussians.mesh.spacing,
+    #     gaussians.mesh.point_data[gaussians.mesh.point_data.keys()[0]],
+    #     samples_tf_flat
+    # )
     gt_cells = gt_cells.reshape(cell_count, cell_count, cell_count)
     gt = torch.tensor(gt_cells).cuda()
     # tensor_to_vtk(gt_cells, "test_gt.vtk", spacing)

@@ -98,8 +98,8 @@ class OptimizationParams(ParamGroup):
         self.noise_lr = 5e5
         self.scale_reg = 0.01
         self.weight_reg = 0.01
-        self.fn_reg = 0.5
-        self.fn_reg2 = 0.005
+        self.fn_reg = 0.06
+        self.fn_reg2 = 0.06
         super().__init__(parser, "Optimization Parameters")
 
 

@@ -112,16 +112,16 @@ def training(
             np.array(gaussians.mins),
             np.array(gaussians.maxes)
         )
-        # probe = pv.PolyData(big_samples)
-        # sampled = probe.sample(gaussians.mesh)
-        # big_gt = sampled.point_data['value']
-        big_gt = gpu_sample(
-            gaussians.mesh.dimensions,
-            gaussians.mesh.origin,
-            gaussians.mesh.spacing,
-            gaussians.mesh.point_data['value'],
-            big_samples
-        )
+        probe = pv.PolyData(big_samples)
+        sampled = probe.sample(gaussians.mesh)
+        big_gt = sampled.point_data['value']
+        # big_gt = gpu_sample(
+        #     gaussians.mesh.dimensions,
+        #     gaussians.mesh.origin,
+        #     gaussians.mesh.spacing,
+        #     gaussians.mesh.point_data['value'],
+        #     big_samples
+        # )
         # big_gt = gpu_sampleu(
         #     gaussians.mesh.points, 
         #     gaussians.mesh.cell_connectivity.astype(np.int64),
@@ -313,7 +313,7 @@ def training(
                         torch.abs(cells.ravel() - gt.ravel()),
                         # (cells.ravel() - gt.ravel()) ** 2,
                         # 20 * int((args.cap_max - gaussians.get_values.shape[0]) // (1 + (opt.iterations - iteration) / opt.densification_interval)),
-                        min(500000, args.cap_max - gaussians.get_values.shape[0] + torch.count_nonzero(gaussians.get_weight <= min_weight) + 1000)
+                        min(80000, args.cap_max - gaussians.get_values.shape[0] + torch.count_nonzero(gaussians.get_weight <= min_weight) + 1000)
                     ).indices
                     # loss_idx = (torch.abs(cells.ravel() - gt.ravel()) > 0.01)
                     gaussians.densify_and_prune(
@@ -369,19 +369,19 @@ def training(
                     os.path.join(scene.model_path, "/chkpnt{iteration}.pth"),
                 )
 
-    series = {
-        "file-series-version": "1.0",
-        "files": vtk_files
-    }
-    with open("out_vtk/test.vtk.series", "w") as jf:
-        json.dump(series, jf, indent=2)
+    # series = {
+    #     "file-series-version": "1.0",
+    #     "files": vtk_files
+    # }
+    # with open("out_vtk/test.vtk.series", "w") as jf:
+    #     json.dump(series, jf, indent=2)
 
-    series_loss = {
-        "file-series-version": "1.0",
-        "files": vtk_files_loss
-    }
-    with open("out_vtk/test_loss.vtk.series", "w") as jf:
-        json.dump(series_loss, jf, indent=2)
+    # series_loss = {
+    #     "file-series-version": "1.0",
+    #     "files": vtk_files_loss
+    # }
+    # with open("out_vtk/test_loss.vtk.series", "w") as jf:
+    #     json.dump(series_loss, jf, indent=2)
 
     if log_to_file:
         log_file_path = os.path.join(scene.model_path, 'training_log.json')
