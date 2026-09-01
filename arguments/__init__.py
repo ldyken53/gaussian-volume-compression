@@ -87,7 +87,7 @@ class OptimizationParams(ParamGroup):
         self.values_lr = 0.0025
         self.weight_lr = 0.025
         self.scaling_lr = 0.001
-        self.rotation_lr = 0.0001
+        self.rotation_lr = 0.001
         self.percent_dense = 0.01
         self.densification_interval = 100
         self.weight_reset_interval = 3000
@@ -98,7 +98,7 @@ class OptimizationParams(ParamGroup):
         self.noise_lr = 5e5
         self.scale_reg = 0.01
         self.weight_reg = 0.01
-        self.fn_reg = 0.5
+        self.fn_reg = 0.02
         super().__init__(parser, "Optimization Parameters")
 
 

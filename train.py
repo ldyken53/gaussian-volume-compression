@@ -188,7 +188,11 @@ def training(
             render_pkg["radii"],
         )
         # l1_lv = l1_loss(cells, gt)
-        l1_lv = torch.abs(cells - gt).mean()
+        # PSNR is MSE-based, so L2 optimises the reported metric directly.
+        if args.loss == "l2":
+            l1_lv = torch.mean((cells - gt) ** 2)
+        else:
+            l1_lv = torch.abs(cells - gt).mean()
         # l1_lv = torch.mean((cells - gt) ** 2)
         # delta = 1.0
         # residual = cells - gt
@@ -450,6 +454,7 @@ if __name__ == "__main__":
     parser.add_argument("--densify_batch", type=int, default=80000)
     parser.add_argument("--max_scale", type=float, default=0.02)
     parser.add_argument("--densify_events", type=int, default=3)
+    parser.add_argument("--loss", type=str, default="l2", choices=["l1","l2"])
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
