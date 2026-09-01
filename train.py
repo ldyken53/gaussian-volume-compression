@@ -54,6 +54,7 @@ def training(
     first_iter = 0
     prepare_output(dataset)
     gaussians = GaussianModel()
+    gaussians.max_scale = args.max_scale
     scene = Scene(
         dataset, 
         gaussians, 
@@ -203,9 +204,14 @@ def training(
         # false_negative = torch.exp(-k * weights[fn_mask])
         # false_negative = false_negative[false_negative > 0].mean()
             # false_negative = torch.exp(-k * torch.clamp(weights[fn_mask] - 0.01, 0.0))
+        # False-negative loss. A cell whose accumulated weight drops under the
+        # rasterizer cutoff (1e-2) is undefined, so penalise cells approaching it.
+        # Cells already at W == 0 are excluded: the rasterizer zeroes their weight
+        # and skips them in the backward pass, so they carry no gradient and would
+        # only dilute the mean, weakening the push on the cells still recoverable.
         fn_mask = torch.logical_and(gt != -1, weights > 0.0)
-        fn_vals = torch.clamp(0.011 - weights, min=0)
-        false_negative = args.fn_reg * fn_vals.sum() / ((fn_vals > 0).sum().float() + 1e-8)    
+        fn_vals = torch.clamp(0.011 - weights, min=0) * fn_mask
+        false_negative = args.fn_reg * fn_vals.sum() / ((fn_vals > 0).sum().float() + 1e-8)
         # overlap_mask = torch.logical_and(gt != -1, weights > 1.0)
         # if overlap_mask.any():
             # overlap_loss = (torch.exp(weights[overlap_mask] - 1) - 1).mean()
@@ -236,8 +242,6 @@ def training(
         iter_end.record()
 
         with torch.no_grad():
-            if iteration > opt.densify_from_iter:
-                args.fn_reg = args.fn_reg2
             # Logging
             if log_to_file and iteration % 100 == 0:
                 mse = torch.mean((cells - gt) ** 2)
@@ -309,25 +313,34 @@ def training(
                     gaussians.relocate_gs(dead_mask=dead_mask, cells=cells, gt=gt)
                     gaussians.add_new_gs(cap_max=args.cap_max)
                 else:
-                    loss_idx = torch.topk(
-                        torch.abs(cells.ravel() - gt.ravel()),
-                        # (cells.ravel() - gt.ravel()) ** 2,
-                        # 20 * int((args.cap_max - gaussians.get_values.shape[0]) // (1 + (opt.iterations - iteration) / opt.densification_interval)),
-                        min(80000, args.cap_max - gaussians.get_values.shape[0] + torch.count_nonzero(gaussians.get_weight <= min_weight) + 1000)
-                    ).indices
-                    # loss_idx = (torch.abs(cells.ravel() - gt.ravel()) > 0.01)
-                    gaussians.densify_and_prune(
-                        opt.densify_grad_threshold,
-                        min_weight,
-                        torch.mean(gaussians.get_scaling) / 6.0,
-                        0.01,
-                        # torch.mean(gaussians.get_weight),
-                        samples_cuda[loss_idx],
-                        # np.clip(new_vals.cpu().ravel()[loss_idx].reshape(-1, 1), 0.01, 0.99),
-                        gt.ravel()[loss_idx].reshape(-1, 1),
-                        iteration > opt.densify_until_iter,
-                        min(80000, args.cap_max - gaussians.get_values.shape[0] + torch.count_nonzero(gaussians.get_weight <= min_weight) + 1000)
-                    )
+                    err_flat = torch.abs(cells.ravel() - gt.ravel())
+                    budget = int(args.cap_max - gaussians.get_values.shape[0]
+                                 + torch.count_nonzero(gaussians.get_weight <= min_weight) + 1000)
+                    if args.densify_batch > 0:
+                        k = min(args.densify_batch, budget)
+                    else:
+                        # Auto: spread the remaining budget over a fixed number of
+                        # densification events. The optimum sits at ~3 events on every
+                        # dataset/ratio tested, and unlike a fixed Gaussian count this
+                        # scales automatically with cap_max, init size and iterations
+                        # (a fixed count silently becomes all-at-once at high
+                        # compression, which is the worst regime).
+                        remaining = max(1, args.densify_events - densifies)
+                        k = min(-(-budget // remaining), budget)
+                    densifies += 1
+                    k = max(0, min(k, err_flat.numel()))
+                    if k > 0:
+                        loss_idx = torch.topk(err_flat, k).indices
+                        gaussians.densify_and_prune(
+                            opt.densify_grad_threshold,
+                            min_weight,
+                            torch.mean(gaussians.get_scaling) / 6.0,
+                            0.01,
+                            samples_cuda[loss_idx],
+                            gt.ravel()[loss_idx].reshape(-1, 1),
+                            iteration > opt.densify_until_iter,
+                            k
+                        )
 
             # Optimizer step
             if iteration < opt.iterations:
@@ -434,6 +447,9 @@ if __name__ == "__main__":
     parser.add_argument("--start_checkpoint", type=str, default=None)
     parser.add_argument("--precomputed_samples", action="store_true")
     parser.add_argument("--use_mcmc", action="store_true")
+    parser.add_argument("--densify_batch", type=int, default=80000)
+    parser.add_argument("--max_scale", type=float, default=0.02)
+    parser.add_argument("--densify_events", type=int, default=3)
 
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
