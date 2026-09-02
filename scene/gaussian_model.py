@@ -18,6 +18,9 @@ from simple_knn._C import distCUDA2
 from torch import nn
 
 
+VALUE_EPS = 1e-6
+
+
 class GaussianModel:
 
     def setup_functions(self):
@@ -171,8 +174,14 @@ class GaussianModel:
             )
         )
 
+        # Clamp away from the sigmoid's asymptotes before inverting. Data with exact
+        # 0.0 (or 1.0) values maps to a logit of -inf (+inf), where sigmoid' == 0, so
+        # those Gaussians would be frozen at that value with zero gradient forever.
         values = self.inverse_value_activation(
-            torch.tensor(values, dtype=torch.float, device="cuda")
+            torch.clamp(
+                torch.tensor(values, dtype=torch.float, device="cuda"),
+                VALUE_EPS, 1.0 - VALUE_EPS,
+            )
         )
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
