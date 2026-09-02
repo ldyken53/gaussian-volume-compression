@@ -451,7 +451,11 @@ class GaussianModel:
         self._weight[reinit_idx] = self._weight[dead_indices]
         self._scaling[reinit_idx] = self._scaling[dead_indices]
 
-        self.replace_tensors_to_optimizer(inds=reinit_idx) 
+        # Reset Adam moments for BOTH the split sources and the relocated
+        # destinations. The destinations get brand-new parameters, so keeping the
+        # dying Gaussian's stale exp_avg/exp_avg_sq drags them straight back down.
+        self.replace_tensors_to_optimizer(
+            inds=torch.cat([reinit_idx, dead_indices]).unique()) 
 
     def add_new_gs(self, cap_max):
         current_num_points = self._weight.shape[0]
