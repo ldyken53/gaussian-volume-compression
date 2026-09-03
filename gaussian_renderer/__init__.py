@@ -68,7 +68,10 @@ def render(
     out = {
         "cells": out_cells,
         "weights": out_weights,
-        "visibility_filter": (radii > 0).nonzero(),
+        # Boolean mask, not .nonzero(): nonzero() must read the result count back to
+        # the host to size its output, forcing a device sync every iteration. No caller
+        # uses this as indices -- train.py and volume_metrics.py only unpack it.
+        "visibility_filter": radii > 0,
         "radii": radii,
     }
 

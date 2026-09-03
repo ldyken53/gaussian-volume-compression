@@ -224,7 +224,12 @@ class GaussianModel:
             },
         ]
 
-        self.optimizer = torch.optim.Adam(optimizer_params, lr=0.0, eps=1e-15)
+        # fused=True: the 5 param groups hold one tensor each, so the default foreach
+        # path launches ~35 tiny multi_tensor_apply kernels per step (Adam was 24% of
+        # all CUDA time). The fused kernel does each group in one launch. Densification
+        # only ever rewrites exp_avg/exp_avg_sq, never state["step"], so the CUDA step
+        # tensor fused mode keeps carries through prune/split untouched.
+        self.optimizer = torch.optim.Adam(optimizer_params, lr=0.0, eps=1e-15, fused=True)
 
         self.xyz_scheduler_args = get_expon_lr_func(
             lr_init=training_args.position_lr_init,
