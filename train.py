@@ -31,6 +31,69 @@ except ImportError:
 DEBUG = True
 
 
+class NodeSampler:
+    """Ground truth read straight off the native grid, on an integer-strided subgrid.
+
+    Default since Sep 2026; --probe_gt restores what came before, `probe.sample` on a
+    continuous cell_count^3 lattice offset by one of 100 precomputed jitters. That target
+    is defensible -- a renderer samples the trilinear interpolant too -- but the offset set
+    is fixed, and at low compression the model has the capacity to fit it: miranda 64x read
+    55.2 dB on a training offset and 53.5 dB on a fresh one.
+
+    Here the subgrid is s_d = (n_d - 1) // (cell_count - 1) native nodes apart per axis,
+    with a fresh integer offset drawn every iteration. GT is raw node values: no
+    interpolation, no probe (so no startup cost), and s_x*s_y*s_z distinct offsets -- 512
+    for a 1024^3 volume against the old 100 -- which between them cover every node, so
+    there is nothing left to overfit. Measured over all nine dataset/ratio configs it is
+    -0.04 to +1.9 dB against the raw voxel array and +0.15 to -1.5 dB at continuous
+    positions; both extremes are miranda 64x, the only config with the capacity for it to
+    matter.
+    """
+
+    def __init__(self, mesh, cell_count):
+        nx, ny, nz = mesh.dimensions
+        lo = np.array(mesh.bounds[0::2])
+        hi = np.array(mesh.bounds[1::2])
+        self.n = np.array([nx, ny, nz])
+        self.lo = lo
+        self.d = (hi - lo) / (self.n - 1)
+        self.cc = cell_count
+        self.stride = (self.n - 1) // (cell_count - 1)
+        self.span = (cell_count - 1) * self.stride
+        self.noff = self.n - self.span
+        # The rasterizer's own cell order is [z,y,x], which is also how a structured-points
+        # volume is stored, so the raw array needs no permutation.
+        vals = mesh.point_data[mesh.point_data.keys()[0]]
+        self.vol = torch.tensor(
+            np.ascontiguousarray(vals.reshape(nz, ny, nx), dtype=np.float32), device="cuda")
+        self.off = np.zeros(3, dtype=np.int64)
+        print(f"Node sampling: stride {self.stride.tolist()}, "
+              f"{int(np.prod(self.noff))} offsets, {self.vol.numel() * 4 / 1e9:.1f} GB resident")
+
+    def draw(self, random_offset):
+        self.off = (np.array([np.random.randint(m) for m in self.noff], dtype=np.int64)
+                    if random_offset else np.zeros(3, dtype=np.int64))
+        ox, oy, oz = self.off
+        sx, sy, sz = self.stride
+        return self.vol[oz:oz + self.span[2] + 1:sz,
+                        oy:oy + self.span[1] + 1:sy,
+                        ox:ox + self.span[0] + 1:sx].contiguous()
+
+    def bounds(self):
+        mins = self.lo + self.off * self.d
+        return list(mins), list(mins + self.span * self.d)
+
+    def __getitem__(self, idx):
+        """Positions of flat cell ids, for densification. cell_id = a*cc^2 + b*cc + c with
+        a = z, b = y, c = x, matching the rasterizer's indexing."""
+        a = torch.div(idx, self.cc * self.cc, rounding_mode="floor")
+        b = torch.div(idx % (self.cc * self.cc), self.cc, rounding_mode="floor")
+        c = idx % self.cc
+        node = torch.stack([c, b, a], dim=1).float()
+        t = lambda v: torch.tensor(v, dtype=torch.float, device=idx.device)
+        return t(self.lo) + (t(self.off) + node * t(self.stride)) * t(self.d)
+
+
 def training(
     dataset,
     opt,
@@ -86,23 +149,31 @@ def training(
         (gaussians.maxes[1] - gaussians.mins[1]) / (cell_count - 1),
         (gaussians.maxes[2] - gaussians.mins[2]) / (cell_count - 1)
     ]
-    x = np.linspace(gaussians.mins[0], gaussians.maxes[0], cell_count)
-    y = np.linspace(gaussians.mins[1], gaussians.maxes[1], cell_count)
-    z = np.linspace(gaussians.mins[2], gaussians.maxes[2], cell_count)
-    x, y, z = np.meshgrid(x, y, z, indexing='ij')
-    samples = np.vstack([x.ravel(), y.ravel(), z.ravel()]).T
-    samples_3d = samples.reshape(cell_count, cell_count, cell_count, 3)
-    rot = np.rot90(samples_3d, k=1, axes=(2,0))
-    samples_tf = np.flip(rot, axis=2)
-    samples_tf_flat = samples_tf.reshape(-1, 3)
     start = time.time()
-    if precomputed_samples:
+    # Node sampling is the default; --probe_gt restores the continuous jittered lattice,
+    # and --precomputed_samples implies it since those .npy files are lattice samples.
+    node_sampler = (None if args.probe_gt or precomputed_samples
+                    else NodeSampler(gaussians.mesh, cell_count))
+    if node_sampler is not None:
+        gt = node_sampler.draw(False)
+        jitter_cuda = torch.zeros(3 * cell_count ** 3, dtype=torch.float, device="cuda")
+        samples_cuda = node_sampler
+    elif precomputed_samples:
         big_gt = np.load("richtmyer_meshkov_big_gt.npy")
         num_jitters = big_gt.shape[0]
         size = big_gt.shape[1]
         big_samples = np.load("richtmyer_meshkov_big_samples.npy")
         big_jitter = np.load("richtmyer_meshkov_big_jitter.npy")
     else:
+        x = np.linspace(gaussians.mins[0], gaussians.maxes[0], cell_count)
+        y = np.linspace(gaussians.mins[1], gaussians.maxes[1], cell_count)
+        z = np.linspace(gaussians.mins[2], gaussians.maxes[2], cell_count)
+        x, y, z = np.meshgrid(x, y, z, indexing='ij')
+        samples = np.vstack([x.ravel(), y.ravel(), z.ravel()]).T
+        samples_3d = samples.reshape(cell_count, cell_count, cell_count, 3)
+        rot = np.rot90(samples_3d, k=1, axes=(2,0))
+        samples_tf = np.flip(rot, axis=2)
+        samples_tf_flat = samples_tf.reshape(-1, 3)
         num_jitters = 100
         big_samples = np.tile(samples_tf_flat, (num_jitters, 1))
         big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
@@ -137,15 +208,16 @@ def training(
         big_jitter = big_jitter.reshape(num_jitters, cell_count**3, 3)
         end = time.time()
         print(f"Time to sample gt: {end - start}")
-    big_jitter_cuda = torch.tensor(big_jitter, dtype=torch.float, device="cuda")
-    big_gt_cuda = torch.tensor(big_gt, dtype=torch.float, device="cuda")
-    big_samples_cuda = torch.tensor(big_samples, dtype=torch.float, device="cuda")
-    gt = big_gt_cuda[0].reshape(cell_count, cell_count, cell_count)
-    print(f"Number of invalid samples: {torch.count_nonzero(gt == -1)}")
-    # tensor_to_vtk(gt.cpu().numpy(), "test_gt.vtk", spacing)
-    # gt_weights = big_gt_weights[0].reshape(cell_count, cell_count, cell_count)
-    # gt_weights = torch.tensor(gt_weights).cuda()
-    jitter_cuda = big_jitter_cuda[0].ravel()
+    if node_sampler is None:
+        big_jitter_cuda = torch.tensor(big_jitter, dtype=torch.float, device="cuda")
+        big_gt_cuda = torch.tensor(big_gt, dtype=torch.float, device="cuda")
+        big_samples_cuda = torch.tensor(big_samples, dtype=torch.float, device="cuda")
+        gt = big_gt_cuda[0].reshape(cell_count, cell_count, cell_count)
+        print(f"Number of invalid samples: {torch.count_nonzero(gt == -1)}")
+        # tensor_to_vtk(gt.cpu().numpy(), "test_gt.vtk", spacing)
+        # gt_weights = big_gt_weights[0].reshape(cell_count, cell_count, cell_count)
+        # gt_weights = torch.tensor(gt_weights).cuda()
+        jitter_cuda = big_jitter_cuda[0].ravel()
     loss_samples = np.empty((0, 3))
     loss_vals = np.empty((0, 1))
 
@@ -156,14 +228,19 @@ def training(
     for iteration in range(first_iter, opt.iterations + 1):
         deb = False
         iter_start.record()
-        jit_idx = 0
-        if iteration not in saving_iterations and iteration not in testing_iterations and done != 1:
-            jit_idx = np.random.randint(0, num_jitters)
-        jitter_cuda = big_jitter_cuda[jit_idx].ravel()
-        gt = big_gt_cuda[jit_idx].reshape(cell_count, cell_count, cell_count)
-        # gt_weights = big_gt_weights[jit_idx].reshape(cell_count, cell_count, cell_count)
-        # gt_weights = torch.tensor(gt_weights).cuda()
-        samples_cuda = big_samples_cuda[jit_idx]
+        fresh = (iteration not in saving_iterations and iteration not in testing_iterations
+                 and done != 1)
+        if node_sampler is not None:
+            # Offset 0 on reporting iterations so the logged PSNR is a fixed subgrid.
+            gt = node_sampler.draw(fresh)
+            gaussians.mins, gaussians.maxes = node_sampler.bounds()
+        else:
+            jit_idx = np.random.randint(0, num_jitters) if fresh else 0
+            jitter_cuda = big_jitter_cuda[jit_idx].ravel()
+            gt = big_gt_cuda[jit_idx].reshape(cell_count, cell_count, cell_count)
+            # gt_weights = big_gt_weights[jit_idx].reshape(cell_count, cell_count, cell_count)
+            # gt_weights = torch.tensor(gt_weights).cuda()
+            samples_cuda = big_samples_cuda[jit_idx]
 
         xyz_lr = gaussians.update_learning_rate(iteration)
 
@@ -468,6 +545,12 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default=None)
     parser.add_argument("--precomputed_samples", action="store_true")
+    # Restore the old target: probe.sample on a continuous lattice at one of 100 fixed
+    # jitters, instead of native node values (see NodeSampler). Worth it only when the
+    # model is for rendering: it is up to 1.5 dB better at continuous positions (6 of the
+    # 9 configs tested, the rest a wash) and up to 1.9 dB worse against the raw voxel
+    # array, and it spends 41-55 s probing at startup.
+    parser.add_argument("--probe_gt", action="store_true")
     parser.add_argument("--use_mcmc", action="store_true")
     # Default 0 = auto: spread the budget over --densify_events events instead of a
     # fixed count per event. A fixed 80000 silently became all-at-once at high
