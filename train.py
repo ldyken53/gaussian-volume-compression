@@ -469,7 +469,13 @@ if __name__ == "__main__":
     parser.add_argument("--start_checkpoint", type=str, default=None)
     parser.add_argument("--precomputed_samples", action="store_true")
     parser.add_argument("--use_mcmc", action="store_true")
-    parser.add_argument("--densify_batch", type=int, default=80000)
+    # Default 0 = auto: spread the budget over --densify_events events instead of a
+    # fixed count per event. A fixed 80000 silently became all-at-once at high
+    # compression -- every config with a total budget under 80k (all three 1024x, and
+    # vertebra 256x) placed every Gaussian it would ever have in a single event at
+    # iteration 500, siting them from the error map of a 500-iteration model. Pass a
+    # positive value to restore the old fixed-batch behaviour.
+    parser.add_argument("--densify_batch", type=int, default=0)
     parser.add_argument("--max_scale", type=float, default=0.02)
     parser.add_argument("--densify_events", type=int, default=3)
     parser.add_argument("--densify_alpha", type=float, default=1.5)
