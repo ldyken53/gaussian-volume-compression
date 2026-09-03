@@ -123,8 +123,8 @@ def compute_bhattacharyya_sums(means: torch.Tensor,
 
 def sample_mesh_points(mesh, num_batches, batch_size, device="cuda"):
     points = torch.tensor(mesh.points, dtype=torch.float32, device=device)
-    # tet_mesh = mesh.triangulate()
-    tet_mesh = pv.read("impacttet.vtu")
+    tet_mesh = mesh.triangulate()
+    # tet_mesh = pv.read("impacttet.vtu")
 
     # Extract cell connectivity — assumes tets (4 verts per cell)
     cells = torch.tensor(

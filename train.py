@@ -159,10 +159,10 @@ def training(
     save_cell = samples_tf.reshape(-1, 3)
     print("Save cell made")
     if precompute_samples:
-        big_gt = np.load("impactbig_gt.npy")
+        big_gt = np.load("/lus/eagle/projects/dist_relational_alg/ldyken53/earthquake2big_gt.npy")
         num_batches = big_gt.shape[0]
         size = big_gt.shape[1]
-        big_samples = np.load("impactbig_samples.npy")
+        big_samples = np.load("/lus/eagle/projects/dist_relational_alg/ldyken53/earthquake2big_samples.npy")
     else:
         # if struct:
         #     save_gt = gpu_sample(
@@ -272,14 +272,19 @@ def training(
         #     np.array(gaussians.maxes)
         # )
         big_samples = big_samples.reshape(num_batches * size, 3)
-        big_gt = gpu_sampleu(
-            gaussians.mesh.points, 
-            gaussians.mesh.cell_connectivity.astype(np.int64),
-            gaussians.mesh.celltypes.astype(np.int64),
-            gaussians.mesh.offset.astype(np.int64),
-            gaussians.mesh.point_data[gaussians.mesh.array_names[0]],
-            big_samples
-        )
+        probe_mesh = pv.PolyData(big_samples)
+        probed = probe_mesh.sample(gaussians.mesh)
+        big_gt = probed[gaussians.mesh.array_names[0]]
+        valid_mask = probed['vtkValidPointMask'].astype(bool)
+        big_gt[~valid_mask] = -1
+        # big_gt = gpu_sampleu(
+        #     gaussians.mesh.points, 
+        #     gaussians.mesh.cell_connectivity.astype(np.int64),
+        #     gaussians.mesh.celltypes.astype(np.int64),
+        #     gaussians.mesh.offset.astype(np.int64),
+        #     gaussians.mesh.point_data[gaussians.mesh.array_names[0]],
+        #     big_samples
+        # )
         # big_gt = gaussians.mesh.point_data[gaussians.mesh.array_names[0]][idx]
 
         big_gt = big_gt.reshape(num_batches, size)

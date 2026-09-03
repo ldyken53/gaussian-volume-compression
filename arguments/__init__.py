@@ -94,8 +94,8 @@ class OptimizationParams(ParamGroup):
         self.densify_from_iter = 500
         self.densify_until_iter = 16_000
         self.densify_grad_threshold = 0.000002
-        self.fn_reg = 0.5
-        self.fn_reg2 = 0.5
+        self.fn_reg = 0.06
+        self.fn_reg2 = 0.02
         self.fp_reg = 0.5
         self.scale_reg = 0.01
         self.weight_reg = 0.00001
