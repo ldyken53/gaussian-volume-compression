@@ -86,7 +86,17 @@ class OptimizationParams(ParamGroup):
         self.position_lr_max_steps = 30_000
         self.values_lr = 0.0025
         self.weight_lr = 0.025
-        self.scaling_lr = 0.001
+        # 3DGS's 0.001 is tuned for a 30k-iteration schedule; this project trains
+        # 1k-8k, which leaves the shape parameters frozen mid-descent (mean scale
+        # and its variance are still climbing monotonically at the final
+        # iteration). 0.005 roughly doubles the median axis ratio and gains +0.39
+        # to +1.38 dB across chameleon/miranda at 64/256/1024x. 0.01 adds nothing.
+        self.scaling_lr = 0.005
+        # Deliberately left at 0.001. Rotations already move plenty here (median
+        # 38.6 deg off identity); raising this buys undirected drift, not
+        # orientation -- at 0.005 even near-spherical Gaussians, which have no
+        # identifiable orientation, drift as far as elongated ones, and
+        # corr(log axis-ratio, angle) goes from +0.19 to -0.01.
         self.rotation_lr = 0.001
         self.percent_dense = 0.01
         self.densification_interval = 100
