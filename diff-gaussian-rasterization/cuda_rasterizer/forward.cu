@@ -93,7 +93,7 @@ __global__ void preprocessCUDA(int P,
     conic[idx * 6 + 5] = (a * d - b * b) * det_inv;
 
 	// Number of std devs at which this Gaussian's contribution falls below the cutoff.
-	float m = sqrtf(-2 * logf((0.1 * WEIGHT_CUTOFF) / weights[idx]));
+	float m = sqrtf(-2 * logf((TRUNC_FRAC * WEIGHT_CUTOFF) / weights[idx]));
 
 	const float3 position = { means3D[3 * idx], means3D[3 * idx + 1], means3D[3 * idx + 2] };
 	means[idx] = position;
