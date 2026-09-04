@@ -44,12 +44,6 @@ class GaussianModel:
         self.values_activation = torch.sigmoid
         self.inverse_value_activation = inverse_sigmoid
 
-        # self.values_activation = torch.tanh
-        # self.inverse_value_activation = torch.atanh
-
-        # self.values_activation = lambda x: x
-        # self.inverse_value_activation = lambda x: x
-
         self.rotation_activation = torch.nn.functional.normalize
 
     def __init__(self):
@@ -739,8 +733,14 @@ class GaussianModel:
             )
         )
 
+        # Same clamp as create_from_pcd: inverse_sigmoid maps an exact 0.0 to -inf and an
+        # exact 1.0 to +inf, and sigmoid'(+-inf) == 0, so such a Gaussian is frozen at that
+        # value with zero gradient forever. Densification targets the highest-error cells,
+        # which in a volume with large exact-valued regions are exactly the cells at 0 or 1:
+        # richt has 36.8M exact zeros and 2.24M exact ones, chameleon 238M zeros,
+        # vertebra 32M. The clamp existed only at init; this path had none.
         new_values = self.inverse_value_activation(
-            empty_values
+            torch.clamp(empty_values, VALUE_EPS, 1.0 - VALUE_EPS)
         )
 
         self.densification_postfix(
@@ -772,10 +772,17 @@ class GaussianModel:
         #         if remaining is not None:
         #             remaining -= added
 
+        n_before = self._xyz.shape[0]
         if not prune_only:
             self.densify_in_empty(empty_points, empty_values, new_scale, new_weight)
 
         prune_mask = (self.get_weight < min_weight).squeeze()
+        # Journal of this event's topology change, for the parameter EMA in
+        # train.py: the event appends (n_after_add - n_before) rows then drops
+        # prune_mask rows, and the EMA buffers must be remapped identically or
+        # they average unrelated Gaussians (count can stay constant while ORDER
+        # shifts: prune k, add k).
+        self.ema_journal = (n_before, prune_mask.detach().clone())
         # print(f"Number of Gaussians pruned: {torch.count_nonzero(prune_mask)}")
         self.prune_points(prune_mask)
 

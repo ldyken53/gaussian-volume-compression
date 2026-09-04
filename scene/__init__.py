@@ -22,6 +22,14 @@ class Scene:
         self.loaded_iter = None
         self.gaussians = gaussians
 
+        # Only treat model_path as a resume when the checkpoint is actually there.
+        # train.py passes load_iteration=0 whenever --model_path is set, which would
+        # otherwise make every named fresh run try to load a ply that does not exist.
+        if load_iteration is not None and load_iteration >= 0:
+            if not os.path.exists(os.path.join(
+                    self.model_path, "point_cloud", f"iteration_{load_iteration}",
+                    "point_cloud.ply")):
+                load_iteration = None
         if load_iteration is not None:
             if load_iteration == -1:
                 self.loaded_iter = searchForMaxIteration(

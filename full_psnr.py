@@ -68,6 +68,11 @@ def evaluate(gaussians, pipe, mesh, gt, block):
     n_cov = torch.zeros((), dtype=torch.long, device="cuda")
     n_fn = torch.zeros((), dtype=torch.long, device="cuda")
     n_fp = torch.zeros((), dtype=torch.long, device="cuda")
+    # Background/foreground split. These volumes are min-max normalised, so g == 0 is
+    # the exact background; with EMPTY_VALUE 0 an uncovered cell scores it perfectly,
+    # which makes "how much of the error is leakage into empty space" a real question.
+    sse_bg = torch.zeros((), dtype=torch.float64, device="cuda")
+    n_bg = torch.zeros((), dtype=torch.long, device="cuda")
 
     # Axis a of the render output is z, b is y, c is x.
     for a0 in range(0, nz, block):
@@ -80,20 +85,29 @@ def evaluate(gaussians, pipe, mesh, gt, block):
                 hi = tuple(lo[i] + (block - 1) * d[i] for i in range(3))
                 gaussians.mins = list(lo)
                 gaussians.maxes = list(hi)
-                cells = render(gaussians, pipe, jitter, block)["cells"]
+                rp = render(gaussians, pipe, jitter, block)
+                cells, wts = rp["cells"], rp["weights"]
 
                 la, lb, lc = min(block, nz - a0), min(block, ny - b0), min(block, nx - c0)
                 cells = cells[:la, :lb, :lc]
+                wts = wts[:la, :lb, :lc]
                 g = torch.as_tensor(
                     np.ascontiguousarray(gt[a0:a0 + la, b0:b0 + lb, c0:c0 + lc],
                                          dtype=np.float32)).cuda()
 
                 sse += ((cells - g) ** 2).double().sum()
-                covered = (cells != -1.0) & (g != -1.0)
+                # Coverage is read off the accumulated weight, not off a -1 in the
+                # value channel: EMPTY_VALUE makes an uncovered cell render 0, which is
+                # a legitimate value elsewhere. psnr itself is unaffected -- it is over
+                # every cell either way.
+                covered = wts > 0.0
                 sse_cov += ((cells[covered] - g[covered]) ** 2).double().sum()
                 n_cov += covered.sum()
-                n_fn += ((cells == -1.0) & (g != -1.0)).sum()
-                n_fp += ((cells != -1.0) & (g == -1.0)).sum()
+                n_fn += ((~covered) & (g != 0.0)).sum()
+                n_fp += (covered & (g == 0.0)).sum()
+                bg = g == 0.0
+                sse_bg += ((cells[bg]) ** 2).double().sum()
+                n_bg += bg.sum()
 
     n = float(nx) * ny * nz
     psnr = lambda mse: float(-10.0 * np.log10(max(mse, 1e-20)))
@@ -104,6 +118,10 @@ def evaluate(gaussians, pipe, mesh, gt, block):
         "covered_frac": int(n_cov) / n,
         "fn_frac": int(n_fn) / n,
         "fp_frac": int(n_fp) / n,
+        "bg_frac": int(n_bg) / n,
+        "psnr_bg": psnr(float(sse_bg) / max(int(n_bg), 1)),
+        "psnr_fg": psnr((float(sse) - float(sse_bg)) / max(n - int(n_bg), 1)),
+        "sse_bg_share": float(sse_bg) / max(float(sse), 1e-30),
     }
 
 
@@ -124,6 +142,8 @@ def main():
                    help="also report PSNR at fresh random continuous positions against the "
                         "trilinear interpolant -- what a renderer samples. Averaged over "
                         "TRIALS independent offsets of a --sample_grid lattice.")
+    p.add_argument("--skip_native", action="store_true",
+                   help="skip the blocked native-grid sweep; report --continuous only")
     p.add_argument("--sample_grid", type=int, default=128,
                    help="lattice resolution for --continuous (128 = train.py's)")
     args = p.parse_args()
@@ -155,7 +175,9 @@ def main():
             gaussians.load_ply(
                 os.path.join(mp, "point_cloud", f"iteration_{it}", "point_cloud.ply"), mesh)
             t = time.time()
-            r = evaluate(gaussians, pipe, mesh, gt, args.block)
+            r = (dict(cells=0, psnr=0.0, psnr_covered=0.0, covered_frac=0.0, fn_frac=0.0,
+                      fp_frac=0.0, bg_frac=0.0, psnr_bg=0.0, psnr_fg=0.0, sse_bg_share=0.0)
+                 if args.skip_native else evaluate(gaussians, pipe, mesh, gt, args.block))
         cont = ""
         if args.continuous:
             with torch.no_grad():
@@ -166,7 +188,9 @@ def main():
         print(f"RESULT model={mp} iter={it} gaussians={ng} "
               f"ratio={r['cells'] / (12.0 * ng):.1f} "
               f"psnr={r['psnr']:.3f} psnr_covered={r['psnr_covered']:.3f} "
-              f"covered={r['covered_frac']:.4f} fn={r['fn_frac']:.4f} fp={r['fp_frac']:.4f} "
+              f"covered={r['covered_frac']:.4f} fp={r['fp_frac']:.4f} "
+              f"bg={r['bg_frac']:.4f} psnr_bg={r['psnr_bg']:.3f} psnr_fg={r['psnr_fg']:.3f} "
+              f"bg_err_share={r['sse_bg_share']:.3f} "
               f"eval_s={time.time() - t:.1f}" + cont, flush=True)
         del gaussians
         torch.cuda.empty_cache()

@@ -58,17 +58,23 @@ class NodeSampler:
         self.lo = lo
         self.d = (hi - lo) / (self.n - 1)
         self.cc = cell_count
-        self.stride = (self.n - 1) // (cell_count - 1)
+        self.stride = np.maximum((self.n - 1) // (cell_count - 1), 1)
         self.span = (cell_count - 1) * self.stride
         self.noff = self.n - self.span
         # The rasterizer's own cell order is [z,y,x], which is also how a structured-points
         # volume is stored, so the raw array needs no permutation.
         vals = mesh.point_data[mesh.point_data.keys()[0]]
+        # fp16 residency. The volume is the single largest allocation -- richt is 8.05e9
+        # nodes, 32.2 GB in fp32, which does not leave room on a 40 GB A100 for a 64x
+        # model. Values are min-max normalised to [0,1], where fp16's step is at worst
+        # 4.9e-4 near 1.0: an RMS quantisation error of ~1.4e-4, i.e. a 77 dB ceiling,
+        # far above the 31-53 dB these models reach. The drawn subgrid is cast back to
+        # fp32 before it is ever used in the loss.
         self.vol = torch.tensor(
-            np.ascontiguousarray(vals.reshape(nz, ny, nx), dtype=np.float32), device="cuda")
+            np.ascontiguousarray(vals.reshape(nz, ny, nx), dtype=np.float16), device="cuda")
         self.off = np.zeros(3, dtype=np.int64)
         print(f"Node sampling: stride {self.stride.tolist()}, "
-              f"{int(np.prod(self.noff))} offsets, {self.vol.numel() * 4 / 1e9:.1f} GB resident")
+              f"{int(np.prod(self.noff))} offsets, {self.vol.numel() * 2 / 1e9:.1f} GB resident")
 
     def draw(self, random_offset):
         self.off = (np.array([np.random.randint(m) for m in self.noff], dtype=np.int64)
@@ -77,9 +83,71 @@ class NodeSampler:
         sx, sy, sz = self.stride
         return self.vol[oz:oz + self.span[2] + 1:sz,
                         oy:oy + self.span[1] + 1:sy,
-                        ox:ox + self.span[0] + 1:sx].contiguous()
+                        ox:ox + self.span[0] + 1:sx].contiguous().float()
+
+
+    def build_jitter_sets(self, k):
+        """Precompute k (offset, jitter, GT) sets for continuous-jittered training.
+
+        Positions are the fixed cc^3 lattice spanning the whole volume (the old
+        --probe_gt lattice, no subgrid offsets) plus a fresh uniform jitter within
+        +/- 0.5 lattice cells per axis, clamped to the volume; GT is the trilinear
+        interpolant of the native grid at those positions -- the field a renderer
+        actually asks the model for -- gathered on-GPU from the resident fp16 volume
+        instead of the old startup pyvista probe. Everything is built before the
+        timed loop; per-iteration cost is one index plus the same fp16->fp32 cast
+        draw() already pays. Storage is fp16, k * (4.2 + 12.6) MB on-GPU for cc=128.
+        """
+        cc = self.cc
+        ar = torch.arange(cc, device="cuda", dtype=torch.float32)
+        zi, yi, xi = torch.meshgrid(ar, ar, ar, indexing="ij")
+        base = [xi, yi, zi]
+        n = [int(v) for v in self.n]
+        # Full-domain lattice step in native-node units; fractional in general.
+        st = [(n[a] - 1) / (cc - 1) for a in range(3)]
+        self.jit_full = True
+        self.jit_step = st
+        vol_flat = self.vol.reshape(-1)
+        gts, jits = [], []
+        for _ in range(k):
+            i0, frac, jit = [], [], []
+            for a in range(3):
+                lattice = base[a] * st[a]
+                f = (lattice + (torch.rand_like(base[a]) - 0.5) * st[a]).clamp_(0.0, n[a] - 1.0)
+                lo = f.floor().long().clamp_(max=n[a] - 2)
+                i0.append(lo)
+                frac.append(f - lo)
+                jit.append((f - lattice) * self.d[a])
+            x0, y0, z0 = i0
+            tx, ty, tz = frac
+            def corner(dx, dy, dz):
+                return vol_flat[((z0 + dz) * n[1] + (y0 + dy)) * n[0] + (x0 + dx)].float()
+            lerp = lambda t, a, b: a + t * (b - a)
+            g = lerp(tz,
+                     lerp(ty, lerp(tx, corner(0, 0, 0), corner(1, 0, 0)),
+                              lerp(tx, corner(0, 1, 0), corner(1, 1, 0))),
+                     lerp(ty, lerp(tx, corner(0, 0, 1), corner(1, 0, 1)),
+                              lerp(tx, corner(0, 1, 1), corner(1, 1, 1))))
+            gts.append(g.half())
+            jits.append(torch.stack(jit, dim=-1).reshape(-1).half())
+        self.jit_gt = torch.stack(gts)
+        self.jit_jitter = torch.stack(jits)
+        # The resident volume exists only to build these sets: in jitter mode nothing
+        # after this point reads it (reporting draws set 0, densification uses lattice
+        # positions), so release the 2-16 GB instead of carrying it through training.
+        vol_gb = self.vol.numel() * 2 / 1e9
+        self.vol = None
+        torch.cuda.empty_cache()
+        print(f"Jittered GT: {k} sets, "
+              f"{(self.jit_gt.numel() + self.jit_jitter.numel()) * 2 / 1e9:.2f} GB resident; "
+              f"volume ({vol_gb:.1f} GB) released")
+
+    def draw_jit(self, idx):
+        return self.jit_gt[idx].float(), self.jit_jitter[idx].float()
 
     def bounds(self):
+        if getattr(self, "jit_full", False):
+            return list(self.lo), list(self.lo + (self.n - 1) * self.d)
         mins = self.lo + self.off * self.d
         return list(mins), list(mins + self.span * self.d)
 
@@ -91,6 +159,8 @@ class NodeSampler:
         c = idx % self.cc
         node = torch.stack([c, b, a], dim=1).float()
         t = lambda v: torch.tensor(v, dtype=torch.float, device=idx.device)
+        if getattr(self, "jit_full", False):
+            return t(self.lo) + node * t(self.jit_step) * t(self.d)
         return t(self.lo) + (t(self.off) + node * t(self.stride)) * t(self.d)
 
 
@@ -158,6 +228,8 @@ def training(
         gt = node_sampler.draw(False)
         jitter_cuda = torch.zeros(3 * cell_count ** 3, dtype=torch.float, device="cuda")
         samples_cuda = node_sampler
+        if args.jitter_gt > 0:
+            node_sampler.build_jitter_sets(args.jitter_gt)
     elif precomputed_samples:
         big_gt = np.load("richtmyer_meshkov_big_gt.npy")
         num_jitters = big_gt.shape[0]
@@ -221,6 +293,15 @@ def training(
     loss_samples = np.empty((0, 3))
     loss_vals = np.empty((0, 1))
 
+    # Training-time instrumentation. Wall clock over the iteration loop only:
+    # excludes mesh loading, GT construction and checkpoint writes, which is the
+    # convention the baseline table uses ("training time only").
+    save_seconds = 0.0
+    torch.cuda.synchronize()
+    train_t0 = time.perf_counter()
+    # --ema state: dict of buffers, (re)built lazily so densification cannot desync it.
+    ema_params = None
+    ema_names = ["_xyz", "_scaling", "_rotation", "_weight", "_values"]
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     done = 0
@@ -231,8 +312,13 @@ def training(
         fresh = (iteration not in saving_iterations and iteration not in testing_iterations
                  and done != 1)
         if node_sampler is not None:
-            # Offset 0 on reporting iterations so the logged PSNR is a fixed subgrid.
-            gt = node_sampler.draw(fresh)
+            if args.jitter_gt > 0:
+                # Set 0 on reporting iterations so the logged PSNR is a fixed sample set.
+                jit_idx = np.random.randint(args.jitter_gt) if fresh else 0
+                gt, jitter_cuda = node_sampler.draw_jit(jit_idx)
+            else:
+                # Offset 0 on reporting iterations so the logged PSNR is a fixed subgrid.
+                gt = node_sampler.draw(fresh)
             gaussians.mins, gaussians.maxes = node_sampler.bounds()
         else:
             jit_idx = np.random.randint(0, num_jitters) if fresh else 0
@@ -266,10 +352,8 @@ def training(
         )
         # l1_lv = l1_loss(cells, gt)
         # PSNR is MSE-based, so L2 optimises the reported metric directly.
-        if args.loss == "l2":
-            l1_lv = torch.mean((cells - gt) ** 2)
-        else:
-            l1_lv = torch.abs(cells - gt).mean()
+        err = (cells - gt) ** 2 if args.loss == "l2" else torch.abs(cells - gt)
+        l1_lv = err.mean()
         # l1_lv = torch.mean((cells - gt) ** 2)
         # delta = 1.0
         # residual = cells - gt
@@ -292,7 +376,12 @@ def training(
         # only dilute the mean, weakening the push on the cells still recoverable.
         fn_mask = torch.logical_and(gt != -1, weights > 0.0)
         fn_vals = torch.clamp(0.011 - weights, min=0) * fn_mask
-        false_negative = args.fn_reg * fn_vals.sum() / ((fn_vals > 0).sum().float() + 1e-8)
+        # "rel": fn_reg multiplies the current data loss instead of being an absolute
+        # weight, so the FN term keeps a fixed ratio to the data term regardless of the
+        # PSNR regime the dataset sits in. Ported from gaussian-volume to test whether a
+        # single setting can span both repos. Default "abs" leaves behaviour unchanged.
+        fn_scale = args.fn_reg * l1_lv.detach() if args.fn_mode == "rel" else args.fn_reg
+        false_negative = fn_scale * fn_vals.sum() / ((fn_vals > 0).sum().float() + 1e-8)
         # overlap_mask = torch.logical_and(gt != -1, weights > 1.0)
         # if overlap_mask.any():
             # overlap_loss = (torch.exp(weights[overlap_mask] - 1) - 1).mean()
@@ -324,6 +413,11 @@ def training(
 
         with torch.no_grad():
             # Logging
+            if args.fn_debug and iteration % args.fn_debug == 0:
+                print(f"[fndbg] iter {iteration} N {gaussians.get_values.shape[0]} "
+                      f"dead {int(torch.count_nonzero(cells == -1))} "
+                      f"near {int(torch.count_nonzero((weights > 0) & (weights <= 0.011)))} "
+                      f"of {cells.numel()}", flush=True)
             if log_to_file and iteration % 100 == 0:
                 mse = torch.mean((cells - gt) ** 2)
                 psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
@@ -440,11 +534,45 @@ def training(
                             iteration > opt.densify_until_iter,
                             k
                         )
+                        if ema_params is not None:
+                            # Replay the event's append+prune on the EMA buffers. After
+                            # P = cat(old, new)[keep], the first keep_old.sum() rows of
+                            # the live tensors are surviving OLD rows (order preserved)
+                            # and the rest are freshly added ones, whose EMA starts at
+                            # their current value.
+                            n_before, mask = gaussians.ema_journal
+                            keep_old = ~mask[:n_before]
+                            k_old = int(keep_old.sum())
+                            with torch.no_grad():
+                                for n in ema_names:
+                                    cur = getattr(gaussians, n).detach()
+                                    buf = cur.clone()
+                                    buf[:k_old] = ema_params[n][keep_old]
+                                    ema_params[n] = buf
 
             # Optimizer step
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none=True)
+
+                if args.ema > 0 and iteration >= args.ema_from:
+                    cur = {n: getattr(gaussians, n) for n in ema_names}
+                    if (ema_params is None
+                            or ema_params["_xyz"].shape[0] != cur["_xyz"].shape[0]):
+                        # (Re)start on first use or on a topology change. Densification
+                        # ends well before ema_from, so a restart after that is unexpected
+                        # but safe -- it just shortens the averaging window.
+                        ema_params = {n: cur[n].detach().clone() for n in ema_names}
+                    else:
+                        with torch.no_grad():
+                            # One fused kernel for all five tensors: the per-group
+                            # mul_/add_ pair was 10 launches and cost ~0.3s over a
+                            # 4000-iteration run, which matters at the time margins
+                            # these models are scored on.
+                            torch._foreach_lerp_(
+                                [ema_params[n] for n in ema_names],
+                                [cur[n].detach() for n in ema_names],
+                                1.0 - args.ema)
 
                 # if gaussians.get_values.shape[0] > args.cap_max and iteration % 10 == 0:
                 if use_mcmc:
@@ -460,8 +588,21 @@ def training(
 
             # Save
             if iteration in saving_iterations or done == 1:
+                torch.cuda.synchronize()
+                _save_t0 = time.perf_counter()
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
+                if ema_params is not None:
+                    # Ship the average, not the last iterate. Swap in-place so a mid-run
+                    # save leaves training state untouched afterwards.
+                    _bak = {n: getattr(gaussians, n).detach().clone() for n in ema_names}
+                    with torch.no_grad():
+                        for n in ema_names:
+                            getattr(gaussians, n).copy_(ema_params[n])
                 scene.save(iteration)
+                if ema_params is not None:
+                    with torch.no_grad():
+                        for n in ema_names:
+                            getattr(gaussians, n).copy_(_bak[n])
                 cpu_cells = cells.cpu().numpy()
                 # tensor_to_vtk(cpu_cells, f"out_vtk/test_{iteration}.vtk", spacing)
                 # tensor_to_vtk(torch.abs((cells - gt)).cpu().numpy(), f"out_vtk/test_{iteration}_loss.vtk", spacing)
@@ -473,6 +614,8 @@ def training(
                     "name": f"test_{iteration}_loss.vtk",
                     "time": float(iteration)
                 })
+                torch.cuda.synchronize()
+                save_seconds += time.perf_counter() - _save_t0
 
             if iteration in checkpoint_iterations:
                 print(f"\n[ITER {iteration}] Saving Checkpoint")
@@ -494,6 +637,12 @@ def training(
     # }
     # with open("out_vtk/test_loss.vtk.series", "w") as jf:
     #     json.dump(series_loss, jf, indent=2)
+
+    torch.cuda.synchronize()
+    train_seconds = time.perf_counter() - train_t0 - save_seconds
+    print(f"TRAIN_SECONDS: {train_seconds:.2f} (save {save_seconds:.2f})", flush=True)
+    with open(os.path.join(scene.model_path, "train_seconds.txt"), "w") as f:
+        f.write(f"{train_seconds:.3f}\n")
 
     if log_to_file:
         log_file_path = os.path.join(scene.model_path, 'training_log.json')
@@ -551,6 +700,10 @@ if __name__ == "__main__":
     # 9 configs tested, the rest a wash) and up to 1.9 dB worse against the raw voxel
     # array, and it spends 41-55 s probing at startup.
     parser.add_argument("--probe_gt", action="store_true")
+    parser.add_argument("--jitter_gt", type=int, default=0,
+        help="precompute this many continuous-jittered GT sets (trilinear interpolant at "
+             "subgrid nodes + U(-.5,.5)-cell jitter, fresh integer offset per set) and "
+             "train on those instead of native nodes; 0 = plain node sampling")
     parser.add_argument("--use_mcmc", action="store_true")
     # Default 0 = auto: spread the budget over --densify_events events instead of a
     # fixed count per event. A fixed 80000 silently became all-at-once at high
@@ -562,8 +715,24 @@ if __name__ == "__main__":
     parser.add_argument("--max_scale", type=float, default=0.02)
     parser.add_argument("--densify_events", type=int, default=3)
     parser.add_argument("--densify_alpha", type=float, default=1.5)
+    parser.add_argument("--ema", type=float, default=0.0,
+                        help="Polyak-average the parameters and SHIP THE AVERAGE: keep an "
+                             "EMA of all five parameter groups with this decay (0 = off, "
+                             "try 0.999) and write it, not the last iterate, at save time. "
+                             "The saved model is still exactly 12 floats/Gaussian; the EMA "
+                             "is a transient training buffer. Targets late-training Adam "
+                             "noise: at 64x compression each Gaussian sees ~1.4 cells per "
+                             "iteration, and the 8000-iter curve DECLINES past 6000.")
+    parser.add_argument("--ema_from", type=int, default=1000,
+                        help="start the EMA here (after densification placement ends, so "
+                             "the buffers never need remapping). Restarted automatically "
+                             "if the Gaussian count changes after it began.")
     parser.add_argument("--loss", type=str, default="l2", choices=["l1","l2"])
-
+    parser.add_argument("--fn_mode", type=str, default="abs", choices=["abs", "rel"],
+                        help="abs: fn_reg is an absolute weight. rel: fn_reg multiplies "
+                             "the data loss.")
+    parser.add_argument("--fn_debug", type=int, default=0,
+                        help="print dead/near-cutoff cell counts every N iterations (0 = off)")
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
