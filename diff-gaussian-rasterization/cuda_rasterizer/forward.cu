@@ -1,4 +1,6 @@
 #include "forward.h"
+#include <cstdlib>
+#include <cstdio>
 #include "auxiliary.h"
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
@@ -7,6 +9,7 @@ namespace cg = cooperative_groups;
 // Perform initial steps for each Gaussian prior to rasterization.
 template<int C>
 __global__ void preprocessCUDA(int P,
+	const float trunc_frac,
 	const float* means3D,
 	const glm::vec3* scales,
 	const float scale_modifier,
@@ -93,7 +96,7 @@ __global__ void preprocessCUDA(int P,
     conic[idx * 6 + 5] = (a * d - b * b) * det_inv;
 
 	// Number of std devs at which this Gaussian's contribution falls below the cutoff.
-	float m = sqrtf(-2 * logf((TRUNC_FRAC * WEIGHT_CUTOFF) / weights[idx]));
+	float m = sqrtf(-2 * logf((trunc_frac * WEIGHT_CUTOFF) / weights[idx]));
 
 	const float3 position = { means3D[3 * idx], means3D[3 * idx + 1], means3D[3 * idx + 2] };
 	means[idx] = position;
@@ -267,6 +270,19 @@ renderCUDA(
 	{
 		// This both gives a dropoff where we have to have a certain weight to set a value
 		// and prevents numerical issues of dividing by something close to 0
+#if SOFT_CUTOFF
+		// Clamp the denominator rather than thresholding it: the value stays bounded (the
+		// 1/aw blow-up is what the cutoff guarded against) and the cell stays differentiable.
+		// aw == 0 means no Gaussian reaches the cell, so there is nothing to differentiate.
+		if (accumulated_weight > 0.0f) {
+			out_cells[cell_id] = accumulated_value / SOFT_DENOM(accumulated_weight);
+			accumulated_weights[cell_id] = accumulated_weight;
+		} else {
+			out_cells[cell_id] = -1.0;
+			accumulated_weights[cell_id] = 0.0;
+		}
+		n_contrib[cell_id] = 0;
+#else
 		if (accumulated_weight > WEIGHT_CUTOFF) {
 			out_cells[cell_id] = accumulated_value / accumulated_weight;
 			accumulated_weights[cell_id] = accumulated_weight;
@@ -277,6 +293,7 @@ renderCUDA(
 			accumulated_weights[cell_id] = 0.0;
 			n_contrib[cell_id] = 0;
 		}
+#endif
 	}
 }
 
@@ -336,8 +353,19 @@ void FORWARD::preprocess(int P,
 	const dim3 grid,
 	uint32_t* blocks_touched)
 {
+	// Runtime override of the truncation radius, a pure speed/quality dial
+	// (per-Gaussian cost ~ (scale*m)^3; coverage semantics live in WEIGHT_CUTOFF,
+	// untouched). Read once per process: TRUNC_FRAC=0.3 env doubles down on speed
+	// for cells with PSNR margin to spend; unset = the config.h default.
+	static float trunc_frac = -1.0f;
+	if (trunc_frac < 0.0f) {
+		const char* e = getenv("TRUNC_FRAC");
+		trunc_frac = e ? (float)atof(e) : (float)TRUNC_FRAC;
+		if (e) printf("[rasterizer] TRUNC_FRAC override: %.3f\n", trunc_frac);
+	}
 	preprocessCUDA<NUM_CHANNELS> <<<(P + 255) / 256, 256>>> (
 		P,
+		trunc_frac,
 		means3D,
 		scales,
 		scale_modifier,

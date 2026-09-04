@@ -212,7 +212,13 @@ __global__ void renderCUDA(
 
 		float aw = accumulated_weights[cell_id];
 		s_acc_weight[idx] = aw;
+#if SOFT_CUTOFF
+		// Bounded at 1/WEIGHT_CUTOFF instead of cut to zero, so weakly covered cells emit a
+		// gradient without the 1/aw amplification the threshold was there to prevent.
+		float inv_aw = (aw > 0.0f) ? 1.0f / SOFT_DENOM(aw) : 0.0f;
+#else
 		float inv_aw = (aw > WEIGHT_CUTOFF) ? 1.0f / aw : 0.0f;
+#endif
 		s_inv_acc_weight[idx] = inv_aw;
 		s_dL_doutv_over_accw[idx] = dL_dcells[cell_id] * inv_aw;
 		s_dL_doutw[idx] = dL_dcell_weights[cell_id];
@@ -255,7 +261,11 @@ __global__ void renderCUDA(
 
 		for (uint32_t c = 0; c < num_cells_in_block; c++)
 		{
+#if SOFT_CUTOFF
+			if (s_acc_weight[c] <= 0.0f) continue;
+#else
 			if (s_acc_weight[c] <= WEIGHT_CUTOFF) continue;
+#endif
 
 			float3 d = make_float3(s_cell_pos[c].x - mean.x, s_cell_pos[c].y - mean.y, s_cell_pos[c].z - mean.z);
 			float quad_form = d.x*(con_xx*d.x + con_xy*d.y + con_xz*d.z)
@@ -270,7 +280,18 @@ __global__ void renderCUDA(
 
 			acc_dL_dvalue += dL_doutv_over_accw * weight_val;
 
-			float F = dL_doutv_over_accw * (value - s_out_cell_val[c]) + s_dL_doutw[c];
+			// dR/dw_i = (v_i - R * dD/daw) / D. With D = aw (or max(aw,c) above the cutoff)
+			// dD/daw == 1 and the usual (v_i - R) form is right. With D = max(aw,c) BELOW the
+			// cutoff D is constant, dD/daw == 0, and the correct adjoint is v_i / D -- the
+			// -R term must be dropped or the weight gradient is wrong exactly in the regime
+			// SOFT_CUTOFF exists to handle. (SOFT_SMOOTH's aw + c has dD/daw == 1
+			// everywhere, so it needs no special case -- but it biases every cell low.)
+#if SOFT_CUTOFF && !SOFT_SMOOTH && SOFT_TRUE_ADJOINT
+			const float r_term = (s_acc_weight[c] > (float)WEIGHT_CUTOFF) ? s_out_cell_val[c] : 0.0f;
+#else
+			const float r_term = s_out_cell_val[c];
+#endif
+			float F = dL_doutv_over_accw * (value - r_term) + s_dL_doutw[c];
 			float dL_dquad = F * (-0.5f * weight_val);
 
 			acc_sum_dLdq += dL_dquad;          // replaces acc_dL_dw computation
