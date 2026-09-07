@@ -22,6 +22,19 @@ namespace cg = cooperative_groups;
 #include "forward.h"
 #include "backward.h"
 
+// Persistent scratch buffers. Raw cudaMalloc/cudaFree implicitly synchronize the
+// device, and forward+backward together paid ~10 of them per training iteration for
+// buffers whose sizes only change at densification. Grow-only caches, never freed.
+static void* ensureScratch(void*& ptr, size_t& cap, size_t bytes)
+{
+	if (bytes > cap) {
+		if (ptr) cudaFree(ptr);
+		cudaMalloc(&ptr, bytes);
+		cap = bytes;
+	}
+	return ptr;
+}
+
 // Forward rendering procedure for differentiable rasterization
 // of Gaussians.
 void CudaRasterizer::Rasterizer::forward(
@@ -51,14 +64,12 @@ void CudaRasterizer::Rasterizer::forward(
 		}
 	}
 
-	int* d_count_intersections = nullptr;
-	if (use_gaussian_bvh) {
-		CHECK_CUDA(cudaMalloc(&d_count_intersections, sizeof(int) * S), debug);
-	} else {
-		CHECK_CUDA(cudaMalloc(&d_count_intersections, sizeof(int) * P), debug);
-	}
-	cuBQL::box3f* aabbs = nullptr;
-	CHECK_CUDA(cudaMalloc(&aabbs, sizeof(cuBQL::box3f) * P), debug);
+	static void* fwd_count = nullptr; static size_t fwd_count_cap = 0;
+	static void* fwd_aabbs = nullptr; static size_t fwd_aabbs_cap = 0;
+	int* d_count_intersections = (int*)ensureScratch(
+		fwd_count, fwd_count_cap, sizeof(int) * (use_gaussian_bvh ? S : P));
+	cuBQL::box3f* aabbs = (cuBQL::box3f*)ensureScratch(
+		fwd_aabbs, fwd_aabbs_cap, sizeof(cuBQL::box3f) * P);
 
 	// Preprocessing
 	if (debug) cudaEventRecord(events[0]);
@@ -118,6 +129,10 @@ void CudaRasterizer::Rasterizer::forward(
 		}
 		if (debug) cudaEventRecord(events[5]);
 
+		// The intersection-count scan below exists only to feed the debug printfs; the
+		// non-debug path was still paying a 2M-wide scan, two mallocs/frees, and a
+		// BLOCKING device-to-host memcpy every iteration.
+		if (debug) {
 		const int num_count_entries = use_gaussian_bvh ? S : P;
 		float inclusive_scan_time_ms = 0.0f;
 		int total_intersections = 0;
@@ -214,8 +229,7 @@ void CudaRasterizer::Rasterizer::forward(
 
 
 	}
-	CHECK_CUDA(cudaFree(d_count_intersections), debug);
-	CHECK_CUDA(cudaFree(aabbs), debug);
+		} // if (debug): intersection diagnostics
 
 	// Calculate and print timing (only when debug is enabled)
 	if (debug) {
@@ -273,13 +287,16 @@ void CudaRasterizer::Rasterizer::backward(
 		}
 	}
 
-	int* d_count_intersections = nullptr;
-	float* dL_dconics = nullptr;
-	CHECK_CUDA(cudaMalloc(&dL_dconics, sizeof(float) * P * 6), debug);
+	static void* bwd_conics = nullptr; static size_t bwd_conics_cap = 0;
+	static void* bwd_count  = nullptr; static size_t bwd_count_cap  = 0;
+	float* dL_dconics = (float*)ensureScratch(bwd_conics, bwd_conics_cap, sizeof(float) * P * 6);
+	int* d_count_intersections = (int*)ensureScratch(
+		bwd_count, bwd_count_cap, sizeof(int) * (use_gaussian_bvh ? S : P));
 	if (use_gaussian_bvh) {
-		CHECK_CUDA(cudaMalloc(&d_count_intersections, sizeof(int) * S), debug);
-	} else {
-		CHECK_CUDA(cudaMalloc(&d_count_intersections, sizeof(int) * P), debug);
+		// This path accumulates dL_dconics with atomicAdd, so it needs a zeroed
+		// buffer (the per-Gaussian path overwrites every entry). The old code
+		// handed it uninitialised cudaMalloc memory.
+		CHECK_CUDA(cudaMemsetAsync(dL_dconics, 0, sizeof(float) * P * 6), debug);
 	}
 
 	if (debug) cudaEventRecord(events[0]);
@@ -335,6 +352,10 @@ void CudaRasterizer::Rasterizer::backward(
 		}
 		if (debug) cudaEventRecord(events[1]);
 
+		// The intersection-count scan below exists only to feed the debug printfs; the
+		// non-debug path was still paying a 2M-wide scan, two mallocs/frees, and a
+		// BLOCKING device-to-host memcpy every iteration.
+		if (debug) {
 		const int num_count_entries = use_gaussian_bvh ? S : P;
 		float inclusive_scan_time_ms = 0.0f;
 		int total_intersections = 0;
@@ -431,9 +452,7 @@ void CudaRasterizer::Rasterizer::backward(
 
 
 	}
-
-	CHECK_CUDA(cudaFree(d_count_intersections), debug);
-	CHECK_CUDA(cudaFree(dL_dconics), debug);
+		} // if (debug): intersection diagnostics
 
 	if (debug) {
 		cudaDeviceSynchronize(); // ensure all events are completed

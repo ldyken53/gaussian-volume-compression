@@ -28,10 +28,15 @@ __global__ void buildBoxes(
 void BuildBVH(const torch::Tensor& samples, const bool debug, const bool use_gaussian_bvh) {
     stored_samples = samples.contiguous();
     if (!use_gaussian_bvh) {
+        // Event timing only when asked for: the unconditional cudaEventSynchronize
+        // here was a full device sync on every training iteration (and the events
+        // were never destroyed).
         cudaEvent_t gpuStart, gpuStop;
-        cudaEventCreate(&gpuStart);
-        cudaEventCreate(&gpuStop);
-        cudaEventRecord(gpuStart, 0);
+        if (debug) {
+            cudaEventCreate(&gpuStart);
+            cudaEventCreate(&gpuStop);
+            cudaEventRecord(gpuStart, 0);
+        }
         int  N = stored_samples.size(0);
         auto ptr = stored_samples.data_ptr<float>();
 
@@ -41,8 +46,14 @@ void BuildBVH(const torch::Tensor& samples, const bool debug, const bool use_gau
         samples_bvh.numNodes = 0;
         samples_bvh.numPrims = 0;
         samples_bvh = cuBQL::bvh3f();
-        cuBQL::box3f* d_boxes;
-        cudaMalloc(&d_boxes, N * sizeof(cuBQL::box3f));
+        // Grow-only box scratch: N is fixed for a whole training run.
+        static cuBQL::box3f* d_boxes = nullptr;
+        static size_t d_boxes_cap = 0;
+        if ((size_t)N * sizeof(cuBQL::box3f) > d_boxes_cap) {
+            if (d_boxes) cudaFree(d_boxes);
+            cudaMalloc(&d_boxes, N * sizeof(cuBQL::box3f));
+            d_boxes_cap = (size_t)N * sizeof(cuBQL::box3f);
+        }
 
         const int threads = 256;
         const int blocks  = (N + threads - 1) / threads;
@@ -52,14 +63,15 @@ void BuildBVH(const torch::Tensor& samples, const bool debug, const bool use_gau
         // cfg.maxAllowedLeafSize = 256;
         cuBQL::cuda::radixBuilder(samples_bvh, d_boxes, N, cfg);
         // cuBQL::gpuBuilder(samples_bvh, d_boxes, N, cfg);
-        cudaFree(d_boxes);
 
-        cudaEventRecord(gpuStop, 0);
-        cudaEventSynchronize(gpuStop);  
-        float msBoxes = 0.f;
-        cudaEventElapsedTime(&msBoxes, gpuStart, gpuStop);
         if (debug) {
+            cudaEventRecord(gpuStop, 0);
+            cudaEventSynchronize(gpuStop);
+            float msBoxes = 0.f;
+            cudaEventElapsedTime(&msBoxes, gpuStart, gpuStop);
             std::cout << "Sample BVH time: " << msBoxes << " ms\n";
+            cudaEventDestroy(gpuStart);
+            cudaEventDestroy(gpuStop);
         }
     }
 }
