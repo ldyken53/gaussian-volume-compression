@@ -76,7 +76,7 @@ __global__ void preprocessCUDA(const int P,
 	conics[idx * 6 + 5] = (a * d - b * b) * det_inv;
 
 	// Scale S by 3 to include up to where the weight is a tenth the cutoff
-	float m = sqrtf(-2 * logf((0.1 * WEIGHT_CUTOFF) / weights[idx]));
+	float m = sqrtf(-2 * logf((TRUNC_FRAC * WEIGHT_CUTOFF) / weights[idx]));
 	const float3 scaled_S = { S[0][0] * m, S[1][1] * m, S[2][2] * m };
 
  	// Create array for corner computations
@@ -247,6 +247,17 @@ __global__ void sampleRenderCUDA(const int S,
 	acc_value = cg::reduce(warp, acc_value, cg::plus<float>());
 	count = cg::reduce(warp, count, cg::plus<int>());
 	if (thread_in_warp == 0) {
+#if SOFT_CUTOFF
+		if (acc_weight <= 0.0f) {
+			out_test[idx] = -1.0;
+			out_testw[idx] = 0.0;
+		} else {
+			// Clamped denominator: weak cells render a small bounded value and keep
+			// their true accumulated weight (feeds the FN mask) and their gradient.
+			out_test[idx] = acc_value / SOFT_DENOM(acc_weight);
+			out_testw[idx] = acc_weight;
+		}
+#else
 		if (acc_weight <= WEIGHT_CUTOFF) {
 			out_test[idx] = -1.0;
 			out_testw[idx] = 0.0;
@@ -254,6 +265,7 @@ __global__ void sampleRenderCUDA(const int S,
 			out_test[idx] = acc_value / acc_weight;
 			out_testw[idx] = acc_weight;
 		}
+#endif
 		count_intersections[idx] = count;
 	}
 }
@@ -265,12 +277,21 @@ __global__ void normalizeCUDA(const int S,
 	auto idx = cg::this_grid().thread_rank();
 	if (idx >= S)
 		return;
+#if SOFT_CUTOFF
+	if (out_testw[idx] <= 0.0f) {
+		out_test[idx] = -1.0;
+		out_testw[idx] = 0.0;
+	} else {
+		out_test[idx] = out_test[idx] / SOFT_DENOM(out_testw[idx]);
+	}
+#else
 	if (out_testw[idx] <= WEIGHT_CUTOFF) {
 		out_test[idx] = -1.0;
 		out_testw[idx] = 0.0;
 	} else {
 		out_test[idx] = out_test[idx] / out_testw[idx];
 	}
+#endif
 }
 
 void FORWARD::preprocess(const int P,

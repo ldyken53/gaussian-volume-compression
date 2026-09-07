@@ -197,7 +197,7 @@ __global__ void renderCUDA(int P,
 
 
 		// Scale S by 3 to include up to where the weight is a tenth the cutoff
-		float m = sqrtf(-2 * logf((0.1 * WEIGHT_CUTOFF) / weights[idx]));
+		float m = sqrtf(-2 * logf((TRUNC_FRAC * WEIGHT_CUTOFF) / weights[idx]));
 		const float3 scaled_S = { S[0][0] * m, S[1][1] * m, S[2][2] * m };
 
 		// Create array for corner computations
@@ -265,14 +265,25 @@ __global__ void renderCUDA(int P,
 			float dL_doutv = dL_dsamples[primID];
 			float dL_doutw = dL_dsample_weights[primID];
 			float acc_weight = out_weights[primID];
+#if SOFT_CUTOFF
+			// Weak cells keep a gradient; the amplification is bounded at
+			// 1/WEIGHT_CUTOFF by the clamped denominator, matching the forward.
+			// out_cells for such cells holds the damped render (never the -1
+			// sentinel: aw > 0 here). Keeping the (v - R) adjoint below the cutoff
+			// is deliberate -- see config.h.
+			if (acc_weight <= 0.0f) {continue;};
+			float denom = SOFT_DENOM(acc_weight);
+#else
 			if (acc_weight <= WEIGHT_CUTOFF) {continue;};
+			float denom = acc_weight;
+#endif
 
 			float e = exp(power);
 			float weight = weights[idx] * e;
 
-			dL_dvalue += dL_doutv * weight / acc_weight;
+			dL_dvalue += dL_doutv * weight / denom;
 
-			float dLv_dweight = dL_doutv * (values[idx] / acc_weight - out_cells[primID] / acc_weight);
+			float dLv_dweight = dL_doutv * (values[idx] / denom - out_cells[primID] / denom);
 			float dLv_dw = dLv_dweight * e;
 
 			float dweight_dquad = -0.5f * weight;
@@ -378,7 +389,12 @@ __global__ void sampleRenderCUDA(const int S,
 	float dL_doutv = dL_dsamples[idx];
 	float dL_doutw = dL_dsample_weights[idx];
 	float acc_weight = out_weights[idx];
+#if SOFT_CUTOFF
+	if (acc_weight <= 0.0f) return;
+	acc_weight = SOFT_DENOM(acc_weight);
+#else
 	if (acc_weight <= WEIGHT_CUTOFF) return;
+#endif
 
 	cuBQL::fixedBoxQuery::forEachPrim<float,3>(
 	[&](int primID) {
@@ -420,7 +436,7 @@ __global__ void sampleRenderCUDA(const int S,
 		};
 
 		// Scale S by 3 to include up to where the weight is a tenth the cutoff
-		float m = sqrtf(-2 * logf((0.1 * WEIGHT_CUTOFF) / weights[primID]));
+		float m = sqrtf(-2 * logf((TRUNC_FRAC * WEIGHT_CUTOFF) / weights[primID]));
 		const float3 scaled_S = { Smat[0][0] * m, Smat[1][1] * m, Smat[2][2] * m };
 
 		// Create array for corner computations
