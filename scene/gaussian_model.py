@@ -18,6 +18,9 @@ from torch import nn
 import torch.nn.functional as F
 
 
+VALUE_EPS = 1e-6
+
+
 class GaussianModel:
     def setup_functions(self):
         def build_covariance_from_scaling_rotation(scaling, scaling_modifier, rotation, stripped=True):
@@ -187,8 +190,14 @@ class GaussianModel:
             )
         )
 
+        # Clamp away from the sigmoid's asymptotes before inverting. Data with exact
+        # 0.0 (or 1.0) values maps to a logit of -inf (+inf), where sigmoid' == 0, so
+        # those Gaussians would be frozen at that value with zero gradient forever.
         values = self.inverse_value_activation(
-            torch.tensor(values, dtype=torch.float, device="cuda")
+            torch.clamp(
+                torch.tensor(values, dtype=torch.float, device="cuda"),
+                VALUE_EPS, 1.0 - VALUE_EPS,
+            )
         )
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
@@ -237,7 +246,13 @@ class GaussianModel:
             },
         ]
 
-        self.optimizer = torch.optim.Adam(optimizer_params, lr=0.0, eps=1e-15)
+        # fused=True: the 5 param groups hold one tensor each, so the default foreach
+        # path launches ~35 tiny multi_tensor_apply kernels per step. The fused kernel
+        # does each group in one launch. Densification only ever rewrites
+        # exp_avg/exp_avg_sq, never state["step"], so fused mode's CUDA step tensor
+        # carries through prune/split untouched.
+        fused = os.environ.get("FUSED_ADAM", "1") != "0"
+        self.optimizer = torch.optim.Adam(optimizer_params, lr=0.0, eps=1e-15, fused=fused)
 
         self.xyz_scheduler_args = get_expon_lr_func(
             lr_init=training_args.position_lr_init,
@@ -491,7 +506,11 @@ class GaussianModel:
         self._weight[reinit_idx] = self._weight[dead_indices]
         self._scaling[reinit_idx] = self._scaling[dead_indices]
 
-        self.replace_tensors_to_optimizer(inds=reinit_idx) 
+        # Reset Adam moments for BOTH the split sources and the relocated
+        # destinations. The destinations get brand-new parameters, so keeping the
+        # dying Gaussian's stale exp_avg/exp_avg_sq drags them straight back down.
+        self.replace_tensors_to_optimizer(
+            inds=torch.cat([reinit_idx, dead_indices]).unique()) 
 
     def add_new_gs(self, cap_max):
         current_num_points = self._weight.shape[0]
@@ -750,8 +769,10 @@ class GaussianModel:
             )
         )
 
+        # Same clamp as create_from_pcd: densification targets the highest-error
+        # cells, which in data with exact-valued regions are exactly the 0/1 cells.
         new_values = self.inverse_value_activation(
-            empty_values
+            torch.clamp(empty_values, VALUE_EPS, 1.0 - VALUE_EPS)
         )
 
         self.densification_postfix(
@@ -784,9 +805,15 @@ class GaussianModel:
         #             remaining -= added
 
 
+        n_before = self._xyz.shape[0]
         self.densify_in_empty(empty_points, empty_values, new_scale)
 
         prune_mask = (self.get_weight < min_weight).squeeze()
+        # Journal of this event's topology change, for the parameter EMA in
+        # train.py: the event appends rows then drops prune_mask rows, and the EMA
+        # buffers must be remapped identically or they average unrelated Gaussians
+        # (count can stay constant while ORDER shifts: prune k, add k).
+        self.ema_journal = (n_before, prune_mask.detach().clone())
 
         # scales = self.get_scaling  # (N, 3)
         # max_axis_scale = torch.min(scales, dim=1).values  # (N,)
