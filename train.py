@@ -190,7 +190,7 @@ def training(
         #     )
         # else:
         #     save_gt = gpu_sampleu(
-        #         gaussians.mesh.points, 
+        #         gaussians.mesh.points,
         #         gaussians.mesh.cell_connectivity.astype(np.int64),
         #         gaussians.mesh.celltypes.astype(np.int64),
         #         gaussians.mesh.offset.astype(np.int64),
@@ -204,8 +204,8 @@ def training(
         # big_jitter *= np.array(spacing)[None, :]
         # big_jitter[: cell_count**3, :] = 0
         # big_samples = np.clip(
-        #     big_samples + big_jitter, 
-        #     np.array(gaussians.mins), 
+        #     big_samples + big_jitter,
+        #     np.array(gaussians.mins),
         #     np.array(gaussians.maxes)
         # )
         # # # Sort spatially via Morton code (Z-order curve)
@@ -242,7 +242,7 @@ def training(
         #     )
         # else:
         #     big_gt = gpu_sampleu(
-        #         gaussians.mesh.points, 
+        #         gaussians.mesh.points,
         #         gaussians.mesh.cell_connectivity.astype(np.int64),
         #         gaussians.mesh.celltypes.astype(np.int64),
         #         gaussians.mesh.offset.astype(np.int64),
@@ -252,7 +252,7 @@ def training(
         # big_gt = big_gt.reshape(num_batches, cell_count**3)
         # big_samples = big_samples.reshape(num_batches, cell_count**3, 3)
         # end = time.time()
- 
+
         size = cell_count ** 3
         # start = time.time()
         num_batches = 100
@@ -300,8 +300,8 @@ def training(
         # big_jitter *= np.array(spacing)[None, :]
         # # big_jitter[:size, :] = 0
         # big_samples = np.clip(
-        #     big_samples + big_jitter, 
-        #     np.array(gaussians.mins), 
+        #     big_samples + big_jitter,
+        #     np.array(gaussians.mins),
         #     np.array(gaussians.maxes)
         # )
             big_samples = big_samples.reshape(num_batches * size, 3)
@@ -315,7 +315,7 @@ def training(
             valid_mask = probed['vtkValidPointMask'].astype(bool)
             big_gt[~valid_mask] = -1
         # big_gt = gpu_sampleu(
-        #     gaussians.mesh.points, 
+        #     gaussians.mesh.points,
         #     gaussians.mesh.cell_connectivity.astype(np.int64),
         #     gaussians.mesh.celltypes.astype(np.int64),
         #     gaussians.mesh.offset.astype(np.int64),
@@ -366,7 +366,7 @@ def training(
         # big_gt = np.take_along_axis(big_gt, order, axis=1)
         # end = time.time()
         # print(f"Time to sample gt: {end - start}")
-    
+
     gt = big_gt_cuda[0]
     print(f"Number of invalid samples: {torch.count_nonzero(gt == -1)}")
     # tensor_to_vtk(save_gt.reshape(cell_count, cell_count, cell_count), "test_gt.vtk", spacing)
@@ -447,10 +447,14 @@ def training(
             else:
                 l1_lv = torch.abs(cells - gt).mean()
         else:
+            # Masked mean written as a multiply: boolean indexing (cells[recon_mask])
+            # launches nonzero(), whose data-dependent output size forces a device
+            # sync every iteration. Mathematically identical.
+            denom = recon_mask.sum().clamp_min(1)
             if args.loss == "l2":
-                l1_lv = torch.mean((cells[recon_mask] - gt[recon_mask]) ** 2)
+                l1_lv = (((cells - gt) ** 2) * recon_mask).sum() / denom
             else:
-                l1_lv = l1_loss(cells[recon_mask], gt[recon_mask])
+                l1_lv = ((cells - gt).abs() * recon_mask).sum() / denom
         # l1_lv = ((cells[recon_mask] - gt[recon_mask]) ** 2).mean()
         # TODO: FIX FP AND FN FOR CHANGING CELL COUNTS
         k = 600  # Adjust this to control decay rate
@@ -473,13 +477,17 @@ def training(
         false_negative = fn_scale * fn_vals.sum() / (fn_count + 1e-8)
         # false_negative = args.fn_reg * fn_vals.mean()
 
-        fp_mask = torch.logical_and(gt == -1, weights > 0.0)
-        fp_vals = weights[fp_mask]        
-        false_positive = args.fp_reg * fp_vals.sum() / ((fp_vals > 0).sum().float() + 1e-8)
-        # false_positive = args.fp_reg * fp_vals.mean()
+        # Multiply form for the same reason as above; and with encode_surface off the
+        # fp term never enters the loss, so skip computing it entirely.
+        if encode_surface:
+            fp_mask = torch.logical_and(gt == -1, weights > 0.0)
+            fp_vals = weights * fp_mask
+            false_positive = args.fp_reg * fp_vals.sum() / ((fp_vals > 0).sum().float() + 1e-8)
+        else:
+            false_positive = torch.zeros((), device="cuda")
 
         # t = 0.01
-        # delta = 0.002 
+        # delta = 0.002
         # # fn_mask = (gt != -1)
         # if fn_mask.any():
         #     false_negative = torch.exp(-k * weights[fn_mask])
@@ -536,10 +544,13 @@ def training(
 
             # Logging
             if log_to_file and iteration % 20 == 0:
-                cpu_cells = cells.cpu().numpy()
+                # (cells.cpu() used to be pulled here for a tensor_to_vtk dump that is
+                # long commented out -- it was a 2M-element device-to-host copy, and a
+                # sync, every 20 iterations for a value nothing read.)
                 mse = torch.mean((cells - gt) ** 2)
                 psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
-                mse2 = torch.mean((cells[torch.logical_and(cells != -1, gt != -1)] - gt[torch.logical_and(cells != -1, gt != -1)]) ** 2)
+                live = torch.logical_and(cells != -1, gt != -1)
+                mse2 = (((cells - gt) ** 2) * live).sum() / live.sum().clamp_min(1)
                 psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
                 num_gaussians = gaussians.get_values.shape[0]
                 log_data.append({
@@ -558,7 +569,7 @@ def training(
                     "psnr2": psnr2.item(),
                     "num_gaussians": num_gaussians
                 })
-            
+
             # Progress bar
             # if iteration in testing_iterations:
             #     print(f"Testing PSNR at iteration {iteration}: {psnr}")
@@ -573,7 +584,8 @@ def training(
                 ema_loss_for_log = 0.1 * loss.item() + 0.9 * ema_loss_for_log
                 mse = torch.mean((cells - gt) ** 2)
                 psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
-                mse2 = torch.mean((cells[torch.logical_and(cells != -1, gt != -1)] - gt[torch.logical_and(cells != -1, gt != -1)]) ** 2)
+                live250 = torch.logical_and(cells != -1, gt != -1)
+                mse2 = (((cells - gt) ** 2) * live250).sum() / live250.sum().clamp_min(1)
                 psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
                 ema_lv_for_log = 0.1 * l1_lv + 0.9 * ema_lv_for_log
                 ema_lfp_for_log = 0.1 * false_positive + 0.9 * ema_lfp_for_log
@@ -593,7 +605,7 @@ def training(
                 # print(f"0 cells: {torch.count_nonzero(cells == 0).cpu().numpy()}, -1: {torch.count_nonzero(cells == -1).cpu().numpy()}")
                 print(f"False negative: {torch.count_nonzero(torch.logical_and(cells== -1, gt != -1))}, false positive: {torch.count_nonzero(torch.logical_and(cells != -1, gt == -1))}")
                 print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr2: {psnr2}, weight: {torch.mean(weights)}")
-                print(f"False negative mask: {torch.count_nonzero((fn_vals > 0))}, false positive mask: {fp_mask.sum()}, false negative {false_negative.item()}, false positive {false_positive.item()}")
+                print(f"False negative mask: {torch.count_nonzero((fn_vals > 0))}, false negative {false_negative.item()}, false positive {false_positive.item()}")
                 print(f"Weight loss: {args.weight_reg * torch.abs(gaussians.get_weight).mean()}")
                 # print(f"loss_samples.shape: {loss_samples.shape[0]}")
                 # print(f"Overlap loss: {overlap_loss} mean {torch.mean(intersection_weights)} max: {torch.max(intersection_weights)} median: {torch.median(intersection_weights)} intersections: {torch.mean(intersections)}, max: {torch.max(intersections)}")
@@ -636,7 +648,7 @@ def training(
             #     vtk_files.append({
             #         "name": f"test_{iteration}.vtk",
             #         "time": float(saving_iterations.index(iteration))
-            #     })                
+            #     })
             #     vtk_files_loss.append({
             #         "name": f"test_{iteration}_loss.vtk",
             #         "time": float(saving_iterations.index(iteration))
@@ -746,7 +758,7 @@ def training(
 
                     def op_sigmoid(x, k=100, x0=0.995):
                         return 1 / (1 + torch.exp(-k * (x - x0)))
-                    
+
                     noise = torch.randn_like(gaussians._xyz) * (op_sigmoid(1- gaussians.get_weight)) * args.noise_lr * xyz_lr
                     noise = torch.bmm(actual_covariance, noise.unsqueeze(-1)).squeeze(-1)
                     gaussians._xyz.add_(noise)

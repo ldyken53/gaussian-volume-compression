@@ -8,6 +8,9 @@ import torch
 
 _rasterizer: GaussianRasterizer | None = None
 
+_morton_order = None
+_morton_state = (0, 0)  # (gaussian count, renders since refresh)
+
 def init_rasterizer(
     pc: GaussianModel,
     pipe,
@@ -67,14 +70,25 @@ def render(
 
     """
 
+    global _morton_order, _morton_state
     means3D = pc.get_xyz
     scales = pc.get_scaling
     rotations = pc.get_rotation
     values = pc.get_values
     weights = pc.get_weight
 
-    # Sort Gaussians by Morton code for spatial coherence
-    order = torch.argsort(morton3d_unit(means3D))
+    # Sort Gaussians by Morton code for spatial coherence. The order is only a
+    # memory-locality hint and goes stale slowly, so refresh it every 100 renders
+    # and whenever the Gaussian count changes (densification) instead of paying
+    # argsort + five gathers every iteration.
+    n = means3D.shape[0]
+    prev_n, age = _morton_state
+    if _morton_order is None or prev_n != n or age >= 100:
+        _morton_order = torch.argsort(morton3d_unit(means3D))
+        _morton_state = (n, 0)
+    else:
+        _morton_state = (n, age + 1)
+    order = _morton_order
     means3D = means3D[order]
     scales = scales[order]
     rotations = rotations[order]
