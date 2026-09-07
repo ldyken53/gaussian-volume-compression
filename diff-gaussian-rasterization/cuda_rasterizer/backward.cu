@@ -102,23 +102,28 @@ __global__ void preprocessCUDA(int P,
 		dL_dcov[1], dL_dcov[3] + (dL_dcov[0] + dL_dcov[3] + dL_dcov[5]) * depsilon_dSigma11, dL_dcov[4],
 		dL_dcov[2], dL_dcov[4], dL_dcov[5] + (dL_dcov[0] + dL_dcov[3] + dL_dcov[5]) * depsilon_dSigma22
 	);
-	glm::mat3 dL_dM = 2.f * dL_dSigma * M;
-	glm::mat3 dL_dS = dL_dM * glm::transpose(R);
+	// Sigma = M^T M  =>  dL_dM = 2 * M * dL_dSigma  (NOT dL_dSigma * M: dL_dSigma is
+	// symmetric but M is not, and the two orders only agree when R == I, which is why
+	// the old form was correct at init and drifted wrong as rotations moved.)
+	glm::mat3 dL_dM = 2.0f * M * dL_dSigma;
+
+	glm::mat3 Rt = glm::transpose(R);
+	glm::mat3 dL_dMt = glm::transpose(dL_dM);
 
 	// Gradients of loss w.r.t. scale
 	glm::vec3* dL_dscale = dL_dscales + idx;
-	dL_dscale->x = dL_dS[0][0] * scale_modifier;
-	dL_dscale->y = dL_dS[1][1] * scale_modifier;
-	dL_dscale->z = dL_dS[2][2] * scale_modifier;
+	dL_dscale->x = scale_modifier * glm::dot(Rt[0], dL_dMt[0]);
+	dL_dscale->y = scale_modifier * glm::dot(Rt[1], dL_dMt[1]);
+	dL_dscale->z = scale_modifier * glm::dot(Rt[2], dL_dMt[2]);
 
-	dL_dM[0] *= scale_modifier * scale.x;
-	dL_dM[1] *= scale_modifier * scale.y;
-	dL_dM[2] *= scale_modifier * scale.z;
+	dL_dMt[0] *= scale_modifier * scale.x;
+	dL_dMt[1] *= scale_modifier * scale.y;
+	dL_dMt[2] *= scale_modifier * scale.z;
 	glm::vec4 dL_dq;
-	dL_dq.x = 2 * z * (dL_dM[1][0] - dL_dM[0][1]) + 2 * y * (dL_dM[0][2] - dL_dM[2][0]) + 2 * x * (dL_dM[2][1] - dL_dM[1][2]);
-	dL_dq.y = 2 * y * (dL_dM[0][1] + dL_dM[1][0]) + 2 * z * (dL_dM[0][2] + dL_dM[2][0]) + 2 * r * (dL_dM[2][1] - dL_dM[1][2]) - 4 * x * (dL_dM[2][2] + dL_dM[1][1]);
-	dL_dq.z = 2 * x * (dL_dM[0][1] + dL_dM[1][0]) + 2 * r * (dL_dM[0][2] - dL_dM[2][0]) + 2 * z * (dL_dM[2][1] + dL_dM[1][2]) - 4 * y * (dL_dM[2][2] + dL_dM[0][0]);
-	dL_dq.w = 2 * r * (dL_dM[1][0] - dL_dM[0][1]) + 2 * x * (dL_dM[0][2] + dL_dM[2][0]) + 2 * y * (dL_dM[2][1] + dL_dM[1][2]) - 4 * z * (dL_dM[1][1] + dL_dM[0][0]);
+	dL_dq.x = 2 * z * (dL_dMt[0][1] - dL_dMt[1][0]) + 2 * y * (dL_dMt[2][0] - dL_dMt[0][2]) + 2 * x * (dL_dMt[1][2] - dL_dMt[2][1]);
+	dL_dq.y = 2 * y * (dL_dMt[1][0] + dL_dMt[0][1]) + 2 * z * (dL_dMt[2][0] + dL_dMt[0][2]) + 2 * r * (dL_dMt[1][2] - dL_dMt[2][1]) - 4 * x * (dL_dMt[2][2] + dL_dMt[1][1]);
+	dL_dq.z = 2 * x * (dL_dMt[1][0] + dL_dMt[0][1]) + 2 * r * (dL_dMt[2][0] - dL_dMt[0][2]) + 2 * z * (dL_dMt[1][2] + dL_dMt[2][1]) - 4 * y * (dL_dMt[2][2] + dL_dMt[0][0]);
+	dL_dq.w = 2 * r * (dL_dMt[0][1] - dL_dMt[1][0]) + 2 * x * (dL_dMt[2][0] + dL_dMt[0][2]) + 2 * y * (dL_dMt[1][2] + dL_dMt[2][1]) - 4 * z * (dL_dMt[1][1] + dL_dMt[0][0]);
 	// Gradients of loss w.r.t. unnormalized quaternion
 	float4* dL_drot = (float4*)(dL_drots + idx);
 	*dL_drot = float4{ dL_dq.x, dL_dq.y, dL_dq.z, dL_dq.w };//dnormvdv(float4{ rot.x, rot.y, rot.z, rot.w }, float4{ dL_dq.x, dL_dq.y, dL_dq.z, dL_dq.w });
