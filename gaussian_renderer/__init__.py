@@ -4,7 +4,15 @@ from bvh_diff_gaussian_rasterization import (
 )
 
 from scene.gaussian_model import GaussianModel
+import os
 import torch
+
+# The Morton reorder is a memory-locality hint, but it gathers five grad-requiring
+# tensors every render, so autograd pays a scatter-add back on each one -- 0.75 ms an
+# iteration at mito 64x (index_put_ 0.42 + indexing_backward 0.16 + index 0.14), which
+# is ~9% of the iteration once the batch is subsampled. GV_MORTON=0 disables it so the
+# hint can be priced against what it costs.
+_MORTON = os.environ.get("GV_MORTON", "1") != "0"
 
 _rasterizer: GaussianRasterizer | None = None
 
@@ -82,6 +90,11 @@ def render(
     # and whenever the Gaussian count changes (densification) instead of paying
     # argsort + five gathers every iteration.
     n = means3D.shape[0]
+    if not _MORTON:
+        out_cells, out_weights = _rasterizer(
+            means3D=means3D, scales=scales, rotations=rotations,
+            values=values, weights=weights, debug=debug)
+        return {"cells": out_cells, "weights": out_weights}
     prev_n, age = _morton_state
     if _morton_order is None or prev_n != n or age >= 100:
         _morton_order = torch.argsort(morton3d_unit(means3D))
