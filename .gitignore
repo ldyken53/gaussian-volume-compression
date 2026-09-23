@@ -69,3 +69,4 @@ test*.vtk
 *.npy
 _skbuild/
 out_vtk/
+finals/
