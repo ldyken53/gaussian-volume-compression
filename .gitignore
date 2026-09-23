@@ -70,3 +70,4 @@ diff_gaussian_rasterization/third_party/cuBQL/
 test*.vtk
 _skbuild/
 out_vtk/
+finals/
