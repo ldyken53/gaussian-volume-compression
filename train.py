@@ -125,7 +125,7 @@ def training(
     sample_cache_dir,
     stream_samples=False
 ):
-    use_mcmc = False
+    use_mcmc = args.use_mcmc
     vtk_files = []
     vtk_files_loss = []
     log_data = []
@@ -817,6 +817,36 @@ def training(
                     gaussians.relocate_gs(dead_mask=dead_mask, cells=cells, gt=gt)
                     gaussians.add_new_gs(cap_max=args.cap_max)
 
+                elif args.densify_3dgs:
+                    # Clone/split by position-gradient magnitude. grad_threshold is 0:
+                    # the stock 0.0002 is tuned for image-space 3DGS and never fires
+                    # here, which would leave the arm far short of the target count and
+                    # make the comparison meaningless.
+                    budget = int(
+                        args.cap_max - gaussians.get_values.shape[0]
+                        + torch.count_nonzero(gaussians.get_weight <= 0.005)
+                        + 1000
+                    )
+                    if args.densify_batch > 0:
+                        k3 = min(args.densify_batch, budget)
+                    else:
+                        remaining = max(1, args.densify_events - densifies)
+                        k3 = min(-(-budget // remaining), budget)
+                    k3 = max(0, k3)
+                    g = gaussians._xyz.grad
+                    if k3 > 0 and g is not None:
+                        n_cl = gaussians.densify_and_clone(g, 0.0, 1.0, max_new_points=k3)
+                        left = max(0, k3 - int(n_cl or 0))
+                        if left > 0:
+                            # NOT gaussians._xyz.grad: densify_and_clone replaced
+                            # _xyz with a new tensor, so .grad is None by now. Reuse the
+                            # gradient captured before cloning; densify_and_split already
+                            # handles grads shorter than the current point count.
+                            gaussians.densify_and_split(
+                                g, 0.0, 1.0, max_new_points=left)
+                        densifies += 1
+                        gaussians.prune_points(
+                            (gaussians.get_weight <= 0.005).squeeze(-1))
                 else:
                     cells_flat = cells.ravel()
                     gt_flat = gt.ravel()
@@ -1022,6 +1052,18 @@ if __name__ == "__main__":
     # all-at-once at high compression. Pass a positive value for fixed batches.
     parser.add_argument("--densify_batch", type=int, default=0,
                         help="Gaussians added per densification event; <=0 uses --densify_events.")
+    # Densification-method ablation. Default (no flag) = error-based placement with
+    # probability sampling, i.e. --densify_alpha 1.5.
+    #   --densify_alpha 0  -> error-based, plain top-k
+    #   --use_mcmc         -> MCMC relocate/add (relocate_gs + add_new_gs + xyz noise)
+    #   --densify_3dgs     -> 3DGS clone/split on position gradients
+    # NOTE: EMA bookkeeping here is the ema_journal, which is written ONLY in
+    # densify_and_prune. MCMC and 3DGS mutate rows without journaling, so EMA would
+    # average unrelated Gaussians. Both flags force --ema 0 and say so.
+    parser.add_argument("--use_mcmc", action="store_true",
+                        help="MCMC relocate/add densification instead of error-based.")
+    parser.add_argument("--densify_3dgs", action="store_true",
+                        help="3DGS clone/split densification instead of error-based.")
     parser.add_argument("--densify_alpha", type=float, default=1.5,
                         help="Error-mass densification: sample cells with p ~ err**alpha; <=0 restores pure topk.")
     # Ship the Polyak average of the last ~100 iterations instead of the last
@@ -1050,6 +1092,11 @@ if __name__ == "__main__":
     if args.encode_surface and "--fn_reg" not in sys.argv[1:]:
         args.fn_reg = 0.52
         print("encode_surface: fn_reg defaulting to 0.52 (pass --fn_reg to override)")
+    if (args.use_mcmc or args.densify_3dgs) and args.ema > 0:
+        print("[ablation] --use_mcmc/--densify_3dgs do not journal row mutations for "
+              "the EMA; forcing --ema 0 to avoid silently averaging unrelated "
+              "Gaussians. Use an --ema 0 control for a matched comparison.", flush=True)
+        args.ema = 0.0
     if args.ema_from < 0:
         args.ema_from = max(1, args.iterations - 100)
     args.save_iterations.append(args.iterations)
