@@ -450,6 +450,32 @@ def training(
     # loss_gt = gt[loss_idx]
 
     n = False
+    # Training-time instrumentation. Wall clock over the iteration loop only:
+    # excludes mesh loading, precomputed-sample loading and checkpoint writes, which
+    # is the convention the baseline table uses ("training time only").
+    save_seconds = 0.0
+    # PROFILE_ITERS=N: profile iterations 1000..1000+N and dump the per-kernel table.
+    # Diagnostic only -- unset, this costs nothing.
+    _prof_n = int(os.environ.get("PROFILE_ITERS", 0))
+    _prof = None
+    if _prof_n:
+        from torch.profiler import profile, ProfilerActivity
+        _prof = profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA])
+    sub_k = 0
+    sub_stride = 1
+    sub_base = None
+    if 0.0 < args.sample_frac < 1.0:
+        if args.sample_mode == "stratified":
+            # stride must divide the batch evenly so every point is reachable.
+            sub_stride = max(2, int(round(1.0 / args.sample_frac)))
+            sub_k = size // sub_stride
+            sub_base = (torch.arange(sub_k, device="cuda") * sub_stride)
+        else:
+            sub_k = max(1, int(round(size * args.sample_frac)))
+        print(f"--sample_frac {args.sample_frac} ({args.sample_mode}): rendering "
+              f"{sub_k} of {size} samples per iteration", flush=True)
+    torch.cuda.synchronize()
+    train_t0 = time.perf_counter()
     # --ema state: dict of buffers, (re)built lazily so densification cannot desync it.
     ema_params = None
     ema_names = ["_xyz", "_scaling", "_rotation", "_weight", "_values"]
@@ -477,6 +503,28 @@ def training(
         #     big_samples[jit_idx][:(size - num_loss)]
         # ])
         current_samples = big_samples_cuda[jit_idx]
+        if sub_k > 0:
+            # Either way the indices must come out ASCENDING: the batch is Morton-sorted
+            # and both the sample BVH build and its traversal rely on that locality.
+            if sub_base is not None:
+                # Stratified: one draw from each run of `sub_stride`. Ordered by
+                # construction, so no sort -- the i.i.d. branch below pays 0.17 ms an
+                # iteration for one.
+                sub_idx = sub_base + torch.randint(
+                    0, sub_stride, (sub_k,), device="cuda")
+            else:
+                sub_idx = torch.randint(0, size, (sub_k,), device="cuda").sort().values
+            gt = gt[sub_idx]
+            current_samples = current_samples[sub_idx]
+        if _prof is not None:
+            if iteration == 1000:
+                torch.cuda.synchronize(); _prof.__enter__()
+            elif iteration == 1000 + _prof_n:
+                torch.cuda.synchronize(); _prof.__exit__(None, None, None)
+                print(_prof.key_averages().table(
+                    sort_by="self_cuda_time_total", row_limit=35), flush=True)
+                print(f"PROFILED {_prof_n} iterations", flush=True)
+                return
         iter_start.record()
         build_bvh(current_samples, deb, use_gaussian_bvh)
         xyz_lr = gaussians.update_learning_rate(iteration)
@@ -688,6 +736,8 @@ def training(
 
             # Save
             if iteration in saving_iterations:
+                torch.cuda.synchronize()
+                _save_t0 = time.perf_counter()
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 if ema_params is not None:
                     # Ship the average, not the last iterate. Swap in-place so a mid-run
@@ -698,19 +748,51 @@ def training(
                     # Instrumentation only: PSNR of the EMA model on the current batch,
                     # printed beside the live-model PSNR the benchmark reads.
                     ema_pkg = render(gaussians, False)
-                    ema_mse = torch.mean((ema_pkg["cells"] - gt) ** 2)
-                    ema_psnr = -10 * torch.log10(ema_mse + 1e-8)
+                    ema_cells = ema_pkg["cells"]
+                    ema_mse = torch.mean((ema_cells.double() - gt.double()) ** 2)
+                    ema_psnr = -10 * torch.log10(ema_mse + 1e-16)
+                    # Masked twin, excluding cells the -1 sentinel touches on either
+                    # side. Identical to ema_psnr when every sample is interior, but
+                    # for sample sets that contain exterior points (encode_surface, or
+                    # a precomputed set with a few out-of-mesh points) the unmasked
+                    # figure is dominated by sentinel mismatch: 81 such cells out of
+                    # 2.1M drag earthquake 64x from 62.3 to 43.7.
+                    _m2 = torch.logical_and(ema_cells != -1, gt != -1)
+                    ema_mse2 = torch.mean((ema_cells.double()[_m2] - gt.double()[_m2]) ** 2)
+                    ema_psnr2 = -10 * torch.log10(ema_mse2 + 1e-16)
+                    # Average FN/FP/psnr2 over EVERY jitter batch, not just whichever
+                    # one the loop happened to end on -- a single batch is 1 of 100 and
+                    # at FN counts in the single digits that is not a stable estimate.
+                    tot_fn = tot_fp = tot_ext = 0
+                    for _b in range(num_batches):
+                        _gt = big_gt_cuda[_b]
+                        build_bvh(big_samples_cuda[_b], False, use_gaussian_bvh)
+                        _c = render(gaussians, False)["cells"]
+                        tot_fn += int(torch.count_nonzero(
+                            torch.logical_and(_c == -1, _gt != -1)))
+                        tot_fp += int(torch.count_nonzero(
+                            torch.logical_and(_c != -1, _gt == -1)))
+                        tot_ext += int(torch.count_nonzero(_gt == -1))
+                    # PSNR deliberately NOT reported from this loop: it is an
+                    # in-sample average over the training jitter batches. Use the
+                    # separate full-volume evaluation for the authoritative number.
+                    print(f"ALLBATCH fn: {tot_fn} fp: {tot_fp} "
+                          f"exterior: {tot_ext} cells: {num_batches * size}", flush=True)
+                    build_bvh(current_samples, False, use_gaussian_bvh)
                     ema_fn = int(torch.count_nonzero(
                         torch.logical_and(ema_pkg["cells"] == -1, gt != -1)))
                     ema_fp = int(torch.count_nonzero(
                         torch.logical_and(ema_pkg["cells"] != -1, gt == -1)))
                     n_ext = int(torch.count_nonzero(gt == -1))
                     print(f"EMA psnr: {ema_psnr.item()}")
+                    print(f"EMA psnr2: {ema_psnr2.item()}")
                     print(f"EMA fn: {ema_fn}, fp: {ema_fp}, exterior: {n_ext}")
                 scene.save(iteration)
                 if ema_params is not None:
                     for nm in ema_names:
                         getattr(gaussians, nm).copy_(_bak[nm])
+                torch.cuda.synchronize()
+                save_seconds += time.perf_counter() - _save_t0
             #     cpu_cells = cells.cpu().numpy()
             #     tensor_to_vtk(cpu_cells.reshape(cell_count, cell_count, cell_count), f"out_vtk/test_{iteration}.vtk", spacing)
             #     tensor_to_vtk(torch.abs((cells - gt)).cpu().numpy().reshape(cell_count, cell_count, cell_count), f"out_vtk/test_{iteration}_loss.vtk", spacing)
@@ -853,6 +935,12 @@ def training(
     # with open("out_vtk/test_loss.vtk.series", "w") as jf:
     #     json.dump(series_loss, jf, indent=2)
 
+    torch.cuda.synchronize()
+    train_seconds = time.perf_counter() - train_t0 - save_seconds
+    print(f"TRAIN_SECONDS: {train_seconds:.2f} (save {save_seconds:.2f})", flush=True)
+    with open(os.path.join(scene.model_path, "train_seconds.txt"), "w") as f:
+        f.write(f"{train_seconds:.3f}\n")
+
     if log_to_file:
         log_file_path = os.path.join(scene.model_path, 'training_log.json')
         with open(log_file_path, 'w') as log_file:
@@ -911,6 +999,22 @@ if __name__ == "__main__":
                              "beyond ~200 batches at 64x.")
     parser.add_argument("--encode_surface", action="store_true")
     parser.add_argument("--loss", type=str, default="l1", choices=["l1", "l2"])
+    # Each iteration renders the whole 2,097,152-point jitter batch, and the per-
+    # iteration cost is dominated by that sample count, not by the model: at 1024x a
+    # 4,539-Gaussian rbl run is SLOWER per iteration than an 88,659-Gaussian
+    # earthquake one. That puts a ~12 ms/iteration floor under every run and is why
+    # the two small datasets lose to UGINR on wall clock. --sample_frac renders a
+    # fresh random subset of each batch instead; the points come from the same
+    # distribution, there are just fewer of them per step.
+    parser.add_argument("--sample_frac", type=float, default=1.0,
+                        help="Fraction of each jitter batch rendered per iteration (1.0 = all).")
+    # "stratified" takes one random point from each consecutive run of `stride` points
+    # in the Morton-ordered batch. The indices come out already ordered, so it needs no
+    # sort (the i.i.d. path pays 0.17 ms/iteration for one), it cannot leave a spatial
+    # gap the way an i.i.d. draw can, and it is a lower-variance estimator of the same
+    # quantity. "random" is the plain i.i.d. draw, kept for comparison.
+    parser.add_argument("--sample_mode", type=str, default="stratified",
+                        choices=["stratified", "random"])
     parser.add_argument("--fn_mode", type=str, default="abs", choices=["abs", "rel"],
                         help="abs: fn_reg is an absolute weight. rel: fn_reg multiplies the data loss.")
     # Default 0 = auto: spread the budget over --densify_events events instead of a
