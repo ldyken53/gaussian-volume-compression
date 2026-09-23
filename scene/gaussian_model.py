@@ -791,7 +791,7 @@ class GaussianModel:
             new_values,
         )
 
-    def densify_and_prune(self, max_grad, min_weight, new_scale, new_weight, empty_points, empty_values, prune_only=False, num_densify=None):
+    def densify_and_prune(self, max_grad, min_weight, new_scale, new_weight, empty_points, empty_values, prune_only=False, num_densify=None, use_3dgs=False):
         # xyz_grads = None
         # if self._xyz.grad is not None:
         #     xyz_grads = self._xyz.grad.detach().clone()   # (N, 3)
@@ -813,7 +813,24 @@ class GaussianModel:
         #             remaining -= added
 
         if not prune_only:
-            self.densify_in_empty(empty_points, empty_values, new_scale, new_weight)
+            if use_3dgs:
+                # Stock 3DGS placement: clone/split existing Gaussians whose position
+                # gradient exceeds max_grad, instead of seeding at high-error cells.
+                # Uses the instantaneous xyz grad (this is called before optimizer.step,
+                # so .grad is live); stock 3DGS averages it over the interval.
+                xyz_grads = (self._xyz.grad.detach().clone()
+                             if self._xyz.grad is not None else None)
+                if xyz_grads is not None:
+                    remaining = num_densify
+                    added = self.densify_and_clone(
+                        xyz_grads, max_grad, 1.0, max_new_points=remaining)
+                    if remaining is not None:
+                        remaining -= added
+                    if remaining is None or remaining > 0:
+                        self.densify_and_split(
+                            xyz_grads, max_grad, 1.0, max_new_points=remaining)
+            else:
+                self.densify_in_empty(empty_points, empty_values, new_scale, new_weight)
 
         prune_mask = (self.get_weight < min_weight).squeeze()
         # print(f"Number of Gaussians pruned: {torch.count_nonzero(prune_mask)}")

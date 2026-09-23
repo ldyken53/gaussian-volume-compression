@@ -532,7 +532,8 @@ def training(
                             samples_cuda[loss_idx],
                             gt.ravel()[loss_idx].reshape(-1, 1),
                             iteration > opt.densify_until_iter,
-                            k
+                            k,
+                            args.densify_3dgs
                         )
 
             # Optimizer step
@@ -697,6 +698,9 @@ if __name__ == "__main__":
              "subgrid nodes + U(-.5,.5)-cell jitter, fresh integer offset per set) and "
              "train on those instead of native nodes; 0 = plain node sampling")
     parser.add_argument("--use_mcmc", action="store_true")
+    parser.add_argument("--densify_3dgs", action="store_true",
+        help="place new Gaussians by 3DGS clone/split on the position gradient instead "
+             "of seeding at high-error cells")
     # Default 0 = auto: spread the budget over --densify_events events instead of a
     # fixed count per event. A fixed 80000 silently became all-at-once at high
     # compression -- every config with a total budget under 80k (all three 1024x, and
