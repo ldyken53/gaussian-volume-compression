@@ -462,8 +462,9 @@ class GaussianModel:
         # Reset Adam moments for BOTH the split sources and the relocated
         # destinations. The destinations get brand-new parameters, so keeping the
         # dying Gaussian's stale exp_avg/exp_avg_sq drags them straight back down.
-        self.replace_tensors_to_optimizer(
-            inds=torch.cat([reinit_idx, dead_indices]).unique()) 
+        reset_idx = torch.cat([reinit_idx, dead_indices]).unique()
+        self._ema_reset(reset_idx)
+        self.replace_tensors_to_optimizer(inds=reset_idx) 
 
     def add_new_gs(self, cap_max):
         current_num_points = self._weight.shape[0]
@@ -487,6 +488,7 @@ class GaussianModel:
         self._weight[add_idx] = new_weight
         self._scaling[add_idx] = new_scaling
 
+        self._ema_reset(add_idx)
         self.densification_postfix(new_xyz, new_weight, new_scaling, new_rotation, new_values, reset_params=False)
         self.replace_tensors_to_optimizer(inds=add_idx)
 
@@ -514,6 +516,42 @@ class GaussianModel:
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
 
+
+    # ---- Parameter-EMA row bookkeeping -------------------------------------
+    # train.py installs `ema_buffers` (name -> tensor, one row per Gaussian). Any
+    # operation that reorders, drops or appends rows must apply the same change to
+    # them, or the average is taken over unrelated Gaussians -- a failure that is
+    # invisible during training and only corrupts the saved model. Routing this
+    # through prune_points/densification_postfix covers every densification path
+    # (error-based, 3DGS clone/split, MCMC add) with no per-path journal.
+    EMA_NAMES = ("_xyz", "_scaling", "_rotation", "_weight", "_values")
+
+    def _ema_prune(self, valid_points_mask):
+        if getattr(self, "ema_buffers", None) is None:
+            return
+        for n in self.EMA_NAMES:
+            self.ema_buffers[n] = self.ema_buffers[n][valid_points_mask]
+
+    def _ema_extend(self, n_new):
+        if getattr(self, "ema_buffers", None) is None or n_new <= 0:
+            return
+        for n in self.EMA_NAMES:
+            # A freshly created Gaussian has no history: its average starts at its
+            # current value.
+            self.ema_buffers[n] = torch.cat(
+                (self.ema_buffers[n], getattr(self, n)[-n_new:].detach().clone()), dim=0)
+
+    def _ema_reset(self, idx):
+        """Restart the average for rows whose parameters were overwritten in place.
+
+        Mirrors replace_tensors_to_optimizer: wherever the Adam moments are reset
+        because the row now holds a different Gaussian, the EMA must restart too.
+        """
+        if getattr(self, "ema_buffers", None) is None or idx is None or idx.numel() == 0:
+            return
+        for n in self.EMA_NAMES:
+            self.ema_buffers[n][idx] = getattr(self, n)[idx].detach().clone()
+
     def prune_points(self, mask):
         valid_points_mask = ~mask
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
@@ -523,6 +561,7 @@ class GaussianModel:
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
         self._values = optimizable_tensors["value"]
+        self._ema_prune(valid_points_mask)
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -594,6 +633,7 @@ class GaussianModel:
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
         self._values = optimizable_tensors["value"]
+        self._ema_extend(new_xyz.shape[0])
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2, max_new_points=None):
         n_points = self.get_xyz.shape[0]
@@ -772,17 +812,10 @@ class GaussianModel:
         #         if remaining is not None:
         #             remaining -= added
 
-        n_before = self._xyz.shape[0]
         if not prune_only:
             self.densify_in_empty(empty_points, empty_values, new_scale, new_weight)
 
         prune_mask = (self.get_weight < min_weight).squeeze()
-        # Journal of this event's topology change, for the parameter EMA in
-        # train.py: the event appends (n_after_add - n_before) rows then drops
-        # prune_mask rows, and the EMA buffers must be remapped identically or
-        # they average unrelated Gaussians (count can stay constant while ORDER
-        # shifts: prune k, add k).
-        self.ema_journal = (n_before, prune_mask.detach().clone())
         # print(f"Number of Gaussians pruned: {torch.count_nonzero(prune_mask)}")
         self.prune_points(prune_mask)
 

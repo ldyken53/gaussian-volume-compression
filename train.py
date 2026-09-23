@@ -534,21 +534,6 @@ def training(
                             iteration > opt.densify_until_iter,
                             k
                         )
-                        if ema_params is not None:
-                            # Replay the event's append+prune on the EMA buffers. After
-                            # P = cat(old, new)[keep], the first keep_old.sum() rows of
-                            # the live tensors are surviving OLD rows (order preserved)
-                            # and the rest are freshly added ones, whose EMA starts at
-                            # their current value.
-                            n_before, mask = gaussians.ema_journal
-                            keep_old = ~mask[:n_before]
-                            k_old = int(keep_old.sum())
-                            with torch.no_grad():
-                                for n in ema_names:
-                                    cur = getattr(gaussians, n).detach()
-                                    buf = cur.clone()
-                                    buf[:k_old] = ema_params[n][keep_old]
-                                    ema_params[n] = buf
 
             # Optimizer step
             if iteration < opt.iterations:
@@ -559,10 +544,16 @@ def training(
                     cur = {n: getattr(gaussians, n) for n in ema_names}
                     if (ema_params is None
                             or ema_params["_xyz"].shape[0] != cur["_xyz"].shape[0]):
-                        # (Re)start on first use or on a topology change. Densification
-                        # ends well before ema_from, so a restart after that is unexpected
-                        # but safe -- it just shortens the averaging window.
+                        # First use. A shape mismatch here means a row mutation was not
+                        # mirrored onto the buffers (see GaussianModel._ema_prune /
+                        # _ema_extend / _ema_reset); restarting is safe but silently
+                        # shortens the window, so it is worth knowing about.
+                        if ema_params is not None:
+                            print(f"[ema] buffer desync at iter {iteration}: "
+                                  f"{ema_params['_xyz'].shape[0]} -> {cur['_xyz'].shape[0]}; "
+                                  f"restarting the average")
                         ema_params = {n: cur[n].detach().clone() for n in ema_names}
+                        gaussians.ema_buffers = ema_params
                     else:
                         with torch.no_grad():
                             # One fused kernel for all five tensors: the per-group
@@ -573,6 +564,7 @@ def training(
                                 [ema_params[n] for n in ema_names],
                                 [cur[n].detach() for n in ema_names],
                                 1.0 - args.ema)
+                    ema_params = gaussians.ema_buffers
 
                 # if gaussians.get_values.shape[0] > args.cap_max and iteration % 10 == 0:
                 if use_mcmc:
