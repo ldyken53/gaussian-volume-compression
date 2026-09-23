@@ -120,8 +120,10 @@ def training(
     min_weight,
     is_scaled,
     precompute_samples,
+    precomputed_prefix,
     encode_surface,
-    sample_cache_dir
+    sample_cache_dir,
+    stream_samples=False
 ):
     use_mcmc = False
     vtk_files = []
@@ -175,10 +177,20 @@ def training(
     save_cell = samples_tf.reshape(-1, 3)
     print("Save cell made")
     if precompute_samples:
-        big_gt = np.load("/lus/eagle/projects/dist_relational_alg/ldyken53/earthquake2big_gt.npy")
+        # <prefix>_gt.npy (num_batches, size) and <prefix>_samples.npy (num_batches,
+        # size, 3), already in the mesh's coordinate space. Skips sampling and the
+        # vtkProbeFilter entirely -- the only tractable path for meshes whose
+        # triangulation would not fit on the GPU.
+        t0 = time.time()
+        big_gt = np.load(precomputed_prefix + "_gt.npy")
         num_batches = big_gt.shape[0]
         size = big_gt.shape[1]
-        big_samples = np.load("/lus/eagle/projects/dist_relational_alg/ldyken53/earthquake2big_samples.npy")
+        big_samples = np.load(precomputed_prefix + "_samples.npy")
+        assert big_samples.shape[:2] == (num_batches, size), (
+            f"shape mismatch: gt {big_gt.shape} vs samples {big_samples.shape}")
+        print(f"Loaded precomputed samples from {precomputed_prefix}_* "
+              f"({num_batches}x{size}, {int((big_gt == -1).sum())} sentinels) "
+              f"in {time.time() - t0:.1f}s")
     else:
         # if struct:
         #     save_gt = gpu_sample(
@@ -334,8 +346,38 @@ def training(
                 os.replace(tmp + ".npy" if not tmp.endswith(".npy") else tmp, cache_g)
                 print(f"Wrote ground-truth cache to {cache_g} in {time.time() - t0:.1f}s")
 
-    big_gt_cuda = torch.tensor(big_gt, dtype=torch.float, device="cuda")
-    big_samples_cuda = torch.tensor(big_samples, dtype=torch.float, device="cuda")
+    if not encode_surface:
+        # A non-surface model has no exterior to encode, so a -1 target is not
+        # something it can or should be fitted or scored against. Drop those samples
+        # outright rather than masking them downstream: each is replaced by another
+        # in-mesh sample drawn from the same batch, which keeps the arrays rectangular
+        # and every reported metric sentinel-free. Almost always a no-op (the on-the-fly
+        # sampler draws inside tetrahedra); it matters for precomputed sets, e.g.
+        # earthquakebig carries 81 out-of-mesh points that otherwise dominate PSNR.
+        bad = (big_gt == -1)
+        n_bad = int(bad.sum())
+        if n_bad:
+            rng = np.random.default_rng(SAMPLE_SEED)
+            big_gt = np.array(big_gt, copy=True)
+            big_samples = np.array(big_samples, copy=True)
+            for b in range(big_gt.shape[0]):
+                idx = np.flatnonzero(bad[b])
+                if idx.size == 0:
+                    continue
+                good = np.flatnonzero(~bad[b])
+                repl = rng.choice(good, size=idx.size, replace=False)
+                big_gt[b, idx] = big_gt[b, repl]
+                big_samples[b, idx] = big_samples[b, repl]
+            print(f"non-surface: replaced {n_bad} out-of-mesh samples with in-mesh ones")
+
+    if stream_samples:
+        big_gt_host = torch.from_numpy(np.ascontiguousarray(big_gt, dtype=np.float32)).pin_memory()
+        big_samples_host = torch.from_numpy(np.ascontiguousarray(big_samples, dtype=np.float32)).pin_memory()
+        print(f"stream_samples: {num_batches} batches pinned on host "
+              f"({(big_gt_host.numel()*4 + big_samples_host.numel()*4)/1e9:.1f} GB)", flush=True)
+    else:
+        big_gt_cuda = torch.tensor(big_gt, dtype=torch.float, device="cuda")
+        big_samples_cuda = torch.tensor(big_samples, dtype=torch.float, device="cuda")
 
     # Sort spatially via Morton code (Z-order curve)
     def part1by2_torch(n: torch.Tensor) -> torch.Tensor:
@@ -350,18 +392,39 @@ def training(
 
     scale = (1 << 21) - 1
 
-    norm = torch.clamp(big_samples_cuda, 0.0, 1.0)
-    q = (norm * scale).to(torch.int64)
+    if stream_samples:
+        # Sort each batch on the GPU one at a time and write it back to host; the
+        # wrapper below then serves batches with a per-iteration H2D copy so every
+        # downstream `big_*_cuda[i]` reads unchanged.
+        for _b in range(num_batches):
+            _s = big_samples_host[_b].cuda(non_blocking=True)
+            _g = big_gt_host[_b].cuda(non_blocking=True)
+            _q = (torch.clamp(_s, 0.0, 1.0) * scale).to(torch.int64)
+            _m = (part1by2_torch(_q[:, 0]) | (part1by2_torch(_q[:, 1]) << 1)
+                  | (part1by2_torch(_q[:, 2]) << 2))
+            _o = _m.argsort()
+            big_samples_host[_b].copy_(_s[_o].cpu())
+            big_gt_host[_b].copy_(_g[_o].cpu())
+        class _HostBatches:
+            def __init__(self, host): self.host = host
+            def __getitem__(self, i): return self.host[i].cuda(non_blocking=True)
+            @property
+            def shape(self): return self.host.shape
+        big_samples_cuda = _HostBatches(big_samples_host)
+        big_gt_cuda = _HostBatches(big_gt_host)
+    else:
+        norm = torch.clamp(big_samples_cuda, 0.0, 1.0)
+        q = (norm * scale).to(torch.int64)
 
-    morton = (
-        part1by2_torch(q[:, :, 0])
-        | (part1by2_torch(q[:, :, 1]) << 1)
-        | (part1by2_torch(q[:, :, 2]) << 2)
-    )
-    order = morton.argsort(dim=1)
-    idx3 = order.unsqueeze(-1).expand(-1, -1, 3)  # [B, S, 3]
-    big_samples_cuda = big_samples_cuda.gather(1, idx3)
-    big_gt_cuda = big_gt_cuda.gather(1, order)
+        morton = (
+            part1by2_torch(q[:, :, 0])
+            | (part1by2_torch(q[:, :, 1]) << 1)
+            | (part1by2_torch(q[:, :, 2]) << 2)
+        )
+        order = morton.argsort(dim=1)
+        idx3 = order.unsqueeze(-1).expand(-1, -1, 3)  # [B, S, 3]
+        big_samples_cuda = big_samples_cuda.gather(1, idx3)
+        big_gt_cuda = big_gt_cuda.gather(1, order)
         # big_samples = np.take_along_axis(big_samples, order[:, :, None], axis=1)
         # big_gt = np.take_along_axis(big_gt, order, axis=1)
         # end = time.time()
@@ -838,6 +901,14 @@ if __name__ == "__main__":
     parser.add_argument("--log_to_file", action="store_true")
     parser.add_argument("--is_scaled", action="store_true")
     parser.add_argument("--precomputed_samples", action="store_true")
+    parser.add_argument("--precomputed_prefix", type=str,
+                        default="/lus/eagle/projects/dist_relational_alg/ldyken53/earthquake2big",
+                        help="Prefix for <prefix>_gt.npy / <prefix>_samples.npy with --precomputed_samples.")
+    parser.add_argument("--stream_samples", action="store_true",
+                        help="Keep the sample/GT arrays in pinned host memory and copy one "
+                             "batch to the GPU per iteration (~2 ms) instead of holding the "
+                             "whole set (and a sorted copy) on the GPU. Needed for sets "
+                             "beyond ~200 batches at 64x.")
     parser.add_argument("--encode_surface", action="store_true")
     parser.add_argument("--loss", type=str, default="l1", choices=["l1", "l2"])
     parser.add_argument("--fn_mode", type=str, default="abs", choices=["abs", "rel"],
@@ -899,8 +970,10 @@ if __name__ == "__main__":
         args.min_weight,
         args.is_scaled,
         args.precomputed_samples,
+        args.precomputed_prefix,
         args.encode_surface,
-        args.sample_cache_dir
+        args.sample_cache_dir,
+        args.stream_samples
     )
 
     # All done
