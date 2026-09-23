@@ -547,11 +547,14 @@ def training(
                 # (cells.cpu() used to be pulled here for a tensor_to_vtk dump that is
                 # long commented out -- it was a 2M-element device-to-host copy, and a
                 # sync, every 20 iterations for a value nothing read.)
-                mse = torch.mean((cells - gt) ** 2)
-                psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
+                # float64 and a non-binding epsilon: at 1e-8 the epsilon alone caps
+                # PSNR at 80 dB and compresses everything above ~72 (a true 90 dB reads
+                # 79.6). float32 also runs out of digits when the residual is ~1e-5.
+                mse = torch.mean((cells.double() - gt.double()) ** 2)
+                psnr = -10 * torch.log10(mse + 1e-16)
                 live = torch.logical_and(cells != -1, gt != -1)
                 mse2 = (((cells - gt) ** 2) * live).sum() / live.sum().clamp_min(1)
-                psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
+                psnr2 = -10 * torch.log10(mse2 + 1e-16)
                 num_gaussians = gaussians.get_values.shape[0]
                 log_data.append({
                     "iteration": iteration,
@@ -582,11 +585,14 @@ def training(
                 iter_end.synchronize()
                 print(iter_start.elapsed_time(iter_end), "ms")
                 ema_loss_for_log = 0.1 * loss.item() + 0.9 * ema_loss_for_log
-                mse = torch.mean((cells - gt) ** 2)
-                psnr = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse + 1e-8)
+                # float64 and a non-binding epsilon: at 1e-8 the epsilon alone caps
+                # PSNR at 80 dB and compresses everything above ~72 (a true 90 dB reads
+                # 79.6). float32 also runs out of digits when the residual is ~1e-5.
+                mse = torch.mean((cells.double() - gt.double()) ** 2)
+                psnr = -10 * torch.log10(mse + 1e-16)
                 live250 = torch.logical_and(cells != -1, gt != -1)
                 mse2 = (((cells - gt) ** 2) * live250).sum() / live250.sum().clamp_min(1)
-                psnr2 = 20 * torch.log10(torch.tensor(1.0)) - 10 * torch.log10(mse2 + 1e-8)
+                psnr2 = -10 * torch.log10(mse2 + 1e-16)
                 ema_lv_for_log = 0.1 * l1_lv + 0.9 * ema_lv_for_log
                 ema_lfp_for_log = 0.1 * false_positive + 0.9 * ema_lfp_for_log
                 ema_lfn_for_log = 0.1 * false_negative + 0.9 * ema_lfn_for_log
