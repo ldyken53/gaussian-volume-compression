@@ -173,64 +173,12 @@ __global__ void renderCUDA(int P,
 	};
 	const float3 position = { means3D[3 * idx], means3D[3 * idx + 1], means3D[3 * idx + 2] };
 
-	float3 mins, maxes;
-	{
-		// Create scaling matrix
-		glm::mat3 S = glm::mat3(1.0f);
-		S[0][0] = scale_modifier * scale.x;
-		S[1][1] = scale_modifier * scale.y;
-		S[2][2] = scale_modifier * scale.z;
-
-		// Normalize quaternion to get valid rotation (commented out for some reason?)
-		glm::vec4 q = rot;// / glm::length(rot);
-		float r = q.x;
-		float x = q.y;
-		float y = q.z;
-		float z = q.w;
-
-		// Compute rotation matrix from quaternion
-		glm::mat3 R = glm::mat3(
-			1.f - 2.f * (y * y + z * z), 2.f * (x * y - r * z), 2.f * (x * z + r * y),
-			2.f * (x * y + r * z), 1.f - 2.f * (x * x + z * z), 2.f * (y * z - r * x),
-			2.f * (x * z - r * y), 2.f * (y * z + r * x), 1.f - 2.f * (x * x + y * y)
-		);
-
-
-		// Scale S by 3 to include up to where the weight is a tenth the cutoff
-		float m = sqrtf(-2 * logf((TRUNC_FRAC * WEIGHT_CUTOFF) / weights[idx]));
-		const float3 scaled_S = { S[0][0] * m, S[1][1] * m, S[2][2] * m };
-
-		// Create array for corner computations
-		const float n[2] = {-1.0f, 1.0f};
-		
-		// Initialize mins and maxes with gaussian position
-		mins = position;
-		maxes = position;
-
-		// Compute corners using vector operations
-		for (int i = 0; i < 2; i++) {
-			for (int j = 0; j < 2; j++) {
-				for (int k = 0; k < 2; k++) {
-					float3 corner = make_float3(
-						position.x + n[i] * R[0].x * scaled_S.x + n[j] * R[1].x * scaled_S.y +  n[k] * R[2].x * scaled_S.z,
-						position.y + n[i] * R[0].y * scaled_S.x + n[j] * R[1].y * scaled_S.y +  n[k] * R[2].y * scaled_S.z,
-						position.z + n[i] * R[0].z * scaled_S.x + n[j] * R[1].z * scaled_S.y +  n[k] * R[2].z * scaled_S.z
-					);
-						
-					mins = make_float3(
-						min(mins.x, corner.x),
-						min(mins.y, corner.y),
-						min(mins.z, corner.z)
-					);
-					maxes = make_float3(
-						max(maxes.x, corner.x),
-						max(maxes.y, corner.y),
-						max(maxes.z, corner.z)
-					);
-				}
-			}
-		}
-	}
+	// The same tight box the forward pass queried with (shared helpers, same inputs), so the
+	// gradient is accumulated over exactly the samples the forward value was.
+	float cov[6];
+	computeCov3D(scale, scale_modifier, rot, cov);
+	const float m = truncationRadius(weights[idx]);
+	const cuBQL::box3f box = tightGaussianBox(position, cov, m);
 
 	float dL_dvalue = 0.0;
 	float dL_dw = 0.0;
@@ -318,7 +266,7 @@ __global__ void renderCUDA(int P,
 		return 0;
     },
 		bvh,
-		cuBQL::box3f(cuBQL::vec3f(mins.x, mins.y, mins.z), cuBQL::vec3f(maxes.x, maxes.y, maxes.z))
+		box
 	);
 
 	dL_dvalue = cg::reduce(warp, dL_dvalue, cg::plus<float>());
@@ -435,13 +383,6 @@ __global__ void sampleRenderCUDA(const int S,
 			conics[primID * 6 + 5]
 		};
 
-		// Scale S by 3 to include up to where the weight is a tenth the cutoff
-		float m = sqrtf(-2 * logf((TRUNC_FRAC * WEIGHT_CUTOFF) / weights[primID]));
-		const float3 scaled_S = { Smat[0][0] * m, Smat[1][1] * m, Smat[2][2] * m };
-
-		// Create array for corner computations
-		const float n[2] = {-1.0f, 1.0f};
-		
 		const float3 position = { means3D[3 * primID], means3D[3 * primID + 1], means3D[3 * primID + 2] };
 
 		float dL_dvalue = 0.0;

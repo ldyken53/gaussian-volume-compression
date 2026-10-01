@@ -20,44 +20,9 @@ __global__ void preprocessCUDA(const int P,
 	if (idx >= P)
 		return;
 
-	auto scale = scales[idx];
-	auto rot = rotations[idx];
-	
-	// Create scaling matrix
-	glm::mat3 S = glm::mat3(1.0f);
-	S[0][0] = scale_modifier * scale.x;
-	S[1][1] = scale_modifier * scale.y;
-	S[2][2] = scale_modifier * scale.z;
-
-	// Normalize quaternion to get valid rotation (commented out for some reason?)
-	glm::vec4 q = rot;// / glm::length(rot);
-	float r = q.x;
-	float x = q.y;
-	float y = q.z;
-	float z = q.w;
-
-	// Compute rotation matrix from quaternion
-	glm::mat3 R = glm::mat3(
-		1.f - 2.f * (y * y + z * z), 2.f * (x * y - r * z), 2.f * (x * z + r * y),
-		2.f * (x * y + r * z), 1.f - 2.f * (x * x + z * z), 2.f * (y * z - r * x),
-		2.f * (x * z - r * y), 2.f * (y * z + r * x), 1.f - 2.f * (x * x + y * y)
-	);
-
-	glm::mat3 M = S * R;
-
-	// Compute 3D world covariance matrix Sigma
-	glm::mat3 Sigma = glm::transpose(M) * M;
-
-	// Normalize by epsilon to prevent numerical issues
-	const float epsilon = max(max(abs(Sigma[0][0]), abs(Sigma[1][1])), abs(Sigma[2][2])) * 1e-5;
-	const float cov[6] = {
-		Sigma[0][0] + epsilon,
-        Sigma[0][1],
-        Sigma[0][2],
-		Sigma[1][1] + epsilon,
-        Sigma[1][2],
-        Sigma[2][2] + epsilon,
-	};
+	// 3D world covariance (with epsilon); shared with the backward pass's box
+	float cov[6];
+	computeCov3D(scales[idx], scale_modifier, rotations[idx], cov);
 
 	// Use 3D covariance to compute and store 3D conic
 	const float a = cov[0]; // Sigma[0][0]
@@ -75,42 +40,9 @@ __global__ void preprocessCUDA(const int P,
 	conics[idx * 6 + 4] = (b * c - a * e) * det_inv;
 	conics[idx * 6 + 5] = (a * d - b * b) * det_inv;
 
-	// Scale S by 3 to include up to where the weight is a tenth the cutoff
-	float m = sqrtf(-2 * logf((TRUNC_FRAC * WEIGHT_CUTOFF) / weights[idx]));
-	const float3 scaled_S = { S[0][0] * m, S[1][1] * m, S[2][2] * m };
-
- 	// Create array for corner computations
-    const float n[2] = {-1.0f, 1.0f};
-    
-    // Initialize mins and maxes with gaussian position
+	const float m = truncationRadius(weights[idx]);
 	const float3 position = { means3D[3 * idx], means3D[3 * idx + 1], means3D[3 * idx + 2] };
-    float3 mins = position;
-    float3 maxes = position;
-
-	// Compute corners using vector operations
-    for (int i = 0; i < 2; i++) {
-        for (int j = 0; j < 2; j++) {
-            for (int k = 0; k < 2; k++) {
-                float3 corner = make_float3(
-					position.x + n[i] * R[0].x * scaled_S.x + n[j] * R[1].x * scaled_S.y +  n[k] * R[2].x * scaled_S.z,
-					position.y + n[i] * R[0].y * scaled_S.x + n[j] * R[1].y * scaled_S.y +  n[k] * R[2].y * scaled_S.z,
-					position.z + n[i] * R[0].z * scaled_S.x + n[j] * R[1].z * scaled_S.y +  n[k] * R[2].z * scaled_S.z
-				);
-                    
-                mins = make_float3(
-					min(mins.x, corner.x),
-					min(mins.y, corner.y),
-					min(mins.z, corner.z)
-				);
-                maxes = make_float3(
-					max(maxes.x, corner.x),
-					max(maxes.y, corner.y),
-					max(maxes.z, corner.z)
-				);
-            }
-        }
-    }
-	aabbs[idx] = cuBQL::box3f(cuBQL::vec3f(mins.x, mins.y, mins.z), cuBQL::vec3f(maxes.x, maxes.y, maxes.z));	
+	aabbs[idx] = tightGaussianBox(position, cov, m);
 }
 
 __global__ void renderCUDA(const int P,
