@@ -151,7 +151,9 @@ __global__ void renderCUDA(int P,
 	glm::vec3* dL_dscales,
 	glm::vec4* dL_drots,
 	float* dL_dconics,
-	int* count_intersections)
+	int* count_intersections,
+	const float4* __restrict__ sample_pack,
+	const float* __restrict__ sample_fc)
 {
 	const int THREADS_PER_GAUSSIAN = 32; // One warp per Gaussian
 	auto block = cg::this_thread_block();
@@ -180,124 +182,105 @@ __global__ void renderCUDA(int P,
 	const float m = truncationRadius(weights[idx]);
 	const cuBQL::box3f box = tightGaussianBox(position, cov, m);
 
-	float dL_dvalue = 0.0;
-	float dL_dw = 0.0;
-	float dL_dmean_x = 0.0;
-	float dL_dmean_y = 0.0;
-	float dL_dmean_z = 0.0;
-	float dL_dxx = 0.0;
-	float dL_dxy = 0.0;
-	float dL_dxz = 0.0;
-	float dL_dyy = 0.0;
-	float dL_dyz = 0.0;
-	float dL_dzz = 0.0;
+	// Per-sample terms come precomputed (samplePrepCUDA): sample_pack = (x, y, z, dvo) with
+	// dvo = dL/dR / D, and sample_fc = dL/dw_sample - dvo * R, both 0 for uncovered samples,
+	// so those contribute exactly zero without a branch. With e = exp(-q/2) and
+	// F = dvo * (v - R) + dL/dw_sample = dvo * v + fc, every per-pair term is built from e and
+	// qe = F * e; w and the -1/2 are applied once after the warp reduction.
+	const float w = weights[idx], v = values[idx];
+	const float cxx = conic[0], cxy = conic[1], cxz = conic[2];
+	const float cyy = conic[3], cyz = conic[4], czz = conic[5];
+	const float c2xy = 2.0f * cxy, c2xz = 2.0f * cxz, c2yz = 2.0f * cyz;
+
+	float s_v = 0.0f, s_q = 0.0f, Gx = 0.0f, Gy = 0.0f, Gz = 0.0f;
+	float xx = 0.0f, xy = 0.0f, xz = 0.0f, yy = 0.0f, yz = 0.0f, zz = 0.0f;
 	int count = 0;
-	int numLeaves = 0;
 	cuBQL::fixedBoxQuery::forEachLeaf<float,3>(
 	[&](uint32_t* primIDs, int count2) {
 		for (int i = thread_in_warp; i < count2; i += THREADS_PER_GAUSSIAN) {
-			int primID = primIDs[i];
-			float3 d = make_float3(
-				samples[primID * 3] - position.x, 
-				samples[primID * 3 + 1] - position.y, 
-				samples[primID * 3 + 2] - position.z
-			);
-			float quad_form = (
-				d.x * (conic[0] * d.x + conic[1] * d.y + conic[2] * d.z) +
-				d.y * (conic[1] * d.x + conic[3] * d.y + conic[4] * d.z) +
-				d.z * (conic[2] * d.x + conic[4] * d.y + conic[5] * d.z)
-			);
-			float power = -0.5 * quad_form;
-			if (power < -14.0 || power > 0.0) {continue;};
-
-			float dL_doutv = dL_dsamples[primID];
-			float dL_doutw = dL_dsample_weights[primID];
-			float acc_weight = out_weights[primID];
-#if SOFT_CUTOFF
-			// Weak cells keep a gradient; the amplification is bounded at
-			// 1/WEIGHT_CUTOFF by the clamped denominator, matching the forward.
-			// out_cells for such cells holds the damped render (never the -1
-			// sentinel: aw > 0 here). Keeping the (v - R) adjoint below the cutoff
-			// is deliberate -- see config.h.
-			if (acc_weight <= 0.0f) {continue;};
-			float denom = SOFT_DENOM(acc_weight);
-#else
-			if (acc_weight <= WEIGHT_CUTOFF) {continue;};
-			float denom = acc_weight;
-#endif
-
-			float e = exp(power);
-			float weight = weights[idx] * e;
-
-			dL_dvalue += dL_doutv * weight / denom;
-
-			float dLv_dweight = dL_doutv * (values[idx] / denom - out_cells[primID] / denom);
-			float dLv_dw = dLv_dweight * e;
-
-			float dweight_dquad = -0.5f * weight;
-			float dLv_dquad = dLv_dweight * dweight_dquad;
-			
-			// Test not having gradients for weight from weight loss
-			float dLw_dw = dL_doutw * e;
-			// float dLw_dw = 0;
-			float dLw_dquad = dL_doutw * dweight_dquad;
-
-			dL_dw += dLv_dw + dLw_dw;
-			float dL_dquad = dLv_dquad + dLw_dquad;
-			
-			// Gradients for means
-			dL_dmean_x += dL_dquad * 2 * -1 *
-				(conic[0] * d.x + conic[1] * d.y + conic[2] * d.z);
-			dL_dmean_y += dL_dquad * 2 * -1 *
-				(conic[1] * d.x + conic[3] * d.y + conic[4] * d.z);
-			dL_dmean_z += dL_dquad * 2 * -1 *
-				(conic[2] * d.x + conic[4] * d.y + conic[5] * d.z);
-
-			// Gradients for conic
-			dL_dxx += dL_dquad * d.x * d.x;
-			dL_dxy += dL_dquad * 2.f * d.x * d.y;
-			dL_dxz += dL_dquad * 2.f * d.x * d.z;
-			dL_dyy += dL_dquad * d.y * d.y;
-			dL_dyz += dL_dquad * 2.f * d.y * d.z;
-			dL_dzz += dL_dquad * d.z * d.z;
+			const int primID = primIDs[i];
+			const float4 sp = sample_pack[primID];
+			const float dx = sp.x - position.x, dy = sp.y - position.y, dz = sp.z - position.z;
+			const float t0 = fmaf(c2xz, dz, fmaf(c2xy, dy, cxx * dx));
+			const float t1 = fmaf(c2yz, dz, cyy * dy);
+			const float q = fmaf(dx, t0, fmaf(dy, t1, czz * dz * dz));
+			// q in [0, 28] <=> power in [-14, 0]; also rejects NaN.
+			if (!(q >= 0.0f && q <= 28.0f)) continue;
+			const float e = expf(-0.5f * q);
+			s_v = fmaf(sp.w, e, s_v);
+			const float qe = fmaf(sp.w, v, sample_fc[primID]) * e;
+			s_q += qe;
+			const float ax = qe * dx, ay = qe * dy, az = qe * dz;
+			Gx += ax; Gy += ay; Gz += az;
+			xx = fmaf(ax, dx, xx); xy = fmaf(ax, dy, xy); xz = fmaf(ax, dz, xz);
+			yy = fmaf(ay, dy, yy); yz = fmaf(ay, dz, yz); zz = fmaf(az, dz, zz);
 			count++;
 		}
-		numLeaves++;
 		return 0;
     },
 		bvh,
 		box
 	);
 
-	dL_dvalue = cg::reduce(warp, dL_dvalue, cg::plus<float>());
-	dL_dw = cg::reduce(warp, dL_dw, cg::plus<float>());
-	dL_dmean_x = cg::reduce(warp, dL_dmean_x, cg::plus<float>());
-	dL_dmean_y = cg::reduce(warp, dL_dmean_y, cg::plus<float>());
-	dL_dmean_z = cg::reduce(warp, dL_dmean_z, cg::plus<float>());
-	dL_dxx = cg::reduce(warp, dL_dxx, cg::plus<float>());
-	dL_dxy = cg::reduce(warp, dL_dxy, cg::plus<float>());
-	dL_dxz = cg::reduce(warp, dL_dxz, cg::plus<float>());
-	dL_dyy = cg::reduce(warp, dL_dyy, cg::plus<float>());
-	dL_dyz = cg::reduce(warp, dL_dyz, cg::plus<float>());
-	dL_dzz = cg::reduce(warp, dL_dzz, cg::plus<float>());
+	s_v = cg::reduce(warp, s_v, cg::plus<float>());
+	s_q = cg::reduce(warp, s_q, cg::plus<float>());
+	Gx = cg::reduce(warp, Gx, cg::plus<float>());
+	Gy = cg::reduce(warp, Gy, cg::plus<float>());
+	Gz = cg::reduce(warp, Gz, cg::plus<float>());
+	xx = cg::reduce(warp, xx, cg::plus<float>());
+	xy = cg::reduce(warp, xy, cg::plus<float>());
+	xz = cg::reduce(warp, xz, cg::plus<float>());
+	yy = cg::reduce(warp, yy, cg::plus<float>());
+	yz = cg::reduce(warp, yz, cg::plus<float>());
+	zz = cg::reduce(warp, zz, cg::plus<float>());
 	count = cg::reduce(warp, count, cg::plus<int>());
+
 	if (thread_in_warp == 0) {
 		count_intersections[idx] = count;
+		// dL/dquad = -w/2 * qe, so with h = -w/2:
+		const float h = -0.5f * w;
+		dL_dvalues[idx] = w * s_v;
+		dL_dweights[idx] = s_q;
+		// dquad/dmean = -2 conic d  =>  dL/dmean = -2 h conic G = w conic G.
+		dL_dmeans[idx * 3]     = w * (cxx * Gx + cxy * Gy + cxz * Gz);
+		dL_dmeans[idx * 3 + 1] = w * (cxy * Gx + cyy * Gy + cyz * Gz);
+		dL_dmeans[idx * 3 + 2] = w * (cxz * Gx + cyz * Gy + czz * Gz);
+		// Same convention as before: off-diagonals carry the 2 of the symmetric form.
+		dL_dconics[idx * 6 + 0] = h * xx;
+		dL_dconics[idx * 6 + 1] = 2.0f * h * xy;
+		dL_dconics[idx * 6 + 2] = 2.0f * h * xz;
+		dL_dconics[idx * 6 + 3] = h * yy;
+		dL_dconics[idx * 6 + 4] = 2.0f * h * yz;
+		dL_dconics[idx * 6 + 5] = h * zz;
 	}
+}
 
-	if (thread_in_warp == 0) { 
-		dL_dvalues[idx] = dL_dvalue;
-		dL_dweights[idx] = dL_dw;
-		dL_dmeans[idx * 3] = dL_dmean_x;
-		dL_dmeans[idx * 3 + 1] = dL_dmean_y;	
-		dL_dmeans[idx * 3 + 2] = dL_dmean_z;
-		dL_dconics[idx * 6 + 0] = dL_dxx;
-		dL_dconics[idx * 6 + 1] = dL_dxy;
-		dL_dconics[idx * 6 + 2] = dL_dxz;
-		dL_dconics[idx * 6 + 3] = dL_dyy;
-		dL_dconics[idx * 6 + 4] = dL_dyz;
-		dL_dconics[idx * 6 + 5] = dL_dzz;
-	}
+// Per-sample backward terms for the per-Gaussian kernel, computed once per sample instead
+// of once per (Gaussian, sample) pair: position and dvo = dL/dR / D packed in one float4,
+// and fc = dL/dw_sample - dvo * R. Uncovered samples get dvo = fc = 0.
+__global__ void samplePrepCUDA(const int S,
+	const float* __restrict__ samples,
+	const float* __restrict__ out_cells,
+	const float* __restrict__ out_weights,
+	const float* __restrict__ dL_dsamples,
+	const float* __restrict__ dL_dsample_weights,
+	float4* __restrict__ sample_pack,
+	float* __restrict__ sample_fc)
+{
+	const int s = blockIdx.x * blockDim.x + threadIdx.x;
+	if (s >= S) return;
+	const float aw = out_weights[s];
+#if SOFT_CUTOFF
+	// Keeping the (v - R) adjoint below the cutoff is deliberate -- see config.h.
+	const bool covered = aw > 0.0f;
+	const float denom = covered ? SOFT_DENOM(aw) : 1.0f;
+#else
+	const bool covered = aw > WEIGHT_CUTOFF;
+	const float denom = covered ? aw : 1.0f;
+#endif
+	const float dvo = covered ? dL_dsamples[s] / denom : 0.0f;
+	sample_pack[s] = make_float4(samples[3 * s], samples[3 * s + 1], samples[3 * s + 2], dvo);
+	sample_fc[s] = covered ? dL_dsample_weights[s] - dvo * out_cells[s] : 0.0f;
 }
 
 __global__ void sampleRenderCUDA(const int S,
@@ -584,6 +567,15 @@ void BACKWARD::render(
 		);
 	} else {
 		dim3 block(256);
+		static float4* sample_pack = nullptr; static float* sample_fc = nullptr; static int prep_cap = 0;
+		if (S > prep_cap) {
+			if (sample_pack) { cudaFree(sample_pack); cudaFree(sample_fc); }
+			cudaMalloc(&sample_pack, sizeof(float4) * S);
+			cudaMalloc(&sample_fc, sizeof(float) * S);
+			prep_cap = S;
+		}
+		samplePrepCUDA<<<(S + block.x - 1) / block.x, block.x>>>(S, samples, out_cells, out_weights,
+			dL_dsamples, dL_dsample_weights, sample_pack, sample_fc);
 		dim3 grid((P * 32 + block.x - 1) / block.x); // 32 threads per Gaussian
 		renderCUDA << < grid, block >> > (
 			P,
@@ -607,7 +599,9 @@ void BACKWARD::render(
 			dL_dscale,
 			dL_drot,
 			dL_dconics,
-			count_intersections);
+			count_intersections,
+			sample_pack,
+			sample_fc);
 		preprocessCUDA<<<(P + block.x - 1) / block.x, block.x>>>(
 			P,
 			(glm::vec3*)scales,

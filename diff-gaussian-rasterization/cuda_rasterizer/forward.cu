@@ -78,27 +78,30 @@ __global__ void renderCUDA(const int P,
 		conics[idx * 6 + 5]
 	};
 
+	// Per-Gaussian constants in registers (the atomics below may alias these arrays, so
+	// the compiler otherwise reloads them every pair), with the off-diagonal conic terms
+	// doubled once so the quadratic form folds into 4 MUL + 5 FMA.
+	const float w = weights[idx], v = values[idx];
+	const float cxx = conic[0], c2xy = 2.0f * conic[1], c2xz = 2.0f * conic[2];
+	const float cyy = conic[3], c2yz = 2.0f * conic[4], czz = conic[5];
+
 	int count = 0;
 	cuBQL::fixedBoxQuery::forEachLeaf<float,3>(
 	[&](uint32_t* primIDs, int count2) {
 		// Distribute primitives across threads in the warp
 		for (int i = thread_in_warp; i < count2; i += THREADS_PER_GAUSSIAN) {
-			uint primID = primIDs[i]; 
-			float3 d = make_float3(
-				samples[primID * 3] - position.x, 
-				samples[primID * 3 + 1] - position.y, 
-				samples[primID * 3 + 2] - position.z
-			);
-			float quad_form = (
-				d.x * (conic[0] * d.x + conic[1] * d.y + conic[2] * d.z) +
-				d.y * (conic[1] * d.x + conic[3] * d.y + conic[4] * d.z) +
-				d.z * (conic[2] * d.x + conic[4] * d.y + conic[5] * d.z)
-			);
-			float power = -0.5 * quad_form;
-			if (power < -14.0 || power > 0.0) {continue;};
-			float weight = weights[idx] * exp(power);
+			uint primID = primIDs[i];
+			const float dx = samples[primID * 3] - position.x;
+			const float dy = samples[primID * 3 + 1] - position.y;
+			const float dz = samples[primID * 3 + 2] - position.z;
+			const float t0 = fmaf(c2xz, dz, fmaf(c2xy, dy, cxx * dx));
+			const float t1 = fmaf(c2yz, dz, cyy * dy);
+			const float q = fmaf(dx, t0, fmaf(dy, t1, czz * dz * dz));
+			// q in [0, 28] <=> power in [-14, 0]; also rejects NaN.
+			if (!(q >= 0.0f && q <= 28.0f)) continue;
+			const float weight = w * expf(-0.5f * q);
 			atomicAdd(&out_testw[primID], weight);
-			atomicAdd(&out_test[primID], weight * values[idx]);
+			atomicAdd(&out_test[primID], weight * v);
 			count++;
 		}
 		return 0;
