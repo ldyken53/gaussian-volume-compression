@@ -27,6 +27,10 @@ namespace CudaRasterizer
 		float* volumes;
 		float3* means;
 		float* conic;
+		// Render-side copy of each Gaussian as three aligned float4s, so both render
+		// kernels gather it in 3 vector loads instead of ~11 scattered scalar ones:
+		// (mean.xyz, value), (weight, cxx, cxy, cxz), (cyy, cyz, czz, unused).
+		float4* packed;
 		uint* aabbs;
 		uint32_t* point_offsets;
 		uint32_t* blocks_touched;

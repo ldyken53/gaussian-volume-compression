@@ -27,6 +27,7 @@ __global__ void preprocessCUDA(int P,
 	float* weights_out,
 	float* volumes,
 	float* conic,
+	float4* packed,
 	uint* aabbs,
 	const dim3 grid,
 	uint32_t* blocks_touched)
@@ -100,6 +101,10 @@ __global__ void preprocessCUDA(int P,
 
 	const float3 position = { means3D[3 * idx], means3D[3 * idx + 1], means3D[3 * idx + 2] };
 	means[idx] = position;
+	const float* cn = conic + idx * 6;
+	packed[3 * idx + 0] = make_float4(position.x, position.y, position.z, values[idx]);
+	packed[3 * idx + 1] = make_float4(weights[idx], cn[0], cn[1], cn[2]);
+	packed[3 * idx + 2] = make_float4(cn[3], cn[4], cn[5], 0.0f);
 
 	// Tight axis-aligned bounds of the m-sigma ellipsoid {(x-u)^T Sigma^-1 (x-u) <= m^2},
 	// which is exactly the region the conic above is nonzero over: ext_d = m * sqrt(Sigma_dd).
@@ -168,10 +173,7 @@ renderCUDA(
 	const uint3 num_cells,
 	const float3 cell_size,
 	const float* __restrict__ jitter,
-	const float3* __restrict__ means,
-	const float* __restrict__ values,
-	const float* __restrict__ weights,
-	const float* __restrict__ conic,
+	const float4* __restrict__ packed,
 	float* __restrict__ accumulated_weights,
 	uint32_t* __restrict__ n_contrib,
 	float* __restrict__ out_cells)
@@ -199,10 +201,9 @@ renderCUDA(
 	int toDo = range.y - range.x;
 
 	// Allocate storage for batches of collectively fetched data.
-	__shared__ float3 collected_means[BLOCK_SIZE];
-	__shared__ float collected_values[BLOCK_SIZE];
-	__shared__ float collected_weights[BLOCK_SIZE];
-	__shared__ float collected_conic[BLOCK_SIZE * 6];
+	// Per Gaussian: (mean.xyz, value), (w, cxx, 2cxy, 2cxz), (cyy, 2cyz, czz, -). The
+	// off-diagonal conic terms are stored doubled so the quadratic form folds into FMAs.
+	__shared__ float4 collected[3 * BLOCK_SIZE];
 
 	// Initialize helper variables
 	float accumulated_weight = 0;
@@ -219,47 +220,30 @@ renderCUDA(
 
 		// Collectively fetch per-Gaussian data from global to shared
 		int progress = i * BLOCK_SIZE + block.thread_rank();
-		if (range.x + progress < range.y) // TODO: try using float4s, align to 128 bit for bank conflict
+		if (range.x + progress < range.y)
 		{
 			int coll_id = point_list[range.x + progress];
-			collected_means[block.thread_rank()] = means[coll_id];
-			collected_values[block.thread_rank()] = values[coll_id];
-			collected_weights[block.thread_rank()] = weights[coll_id];
-			for (int k = 0; k < 6; k++)
-                collected_conic[block.thread_rank() * 6 + k] = conic[coll_id * 6 + k];
+			const int rank = block.thread_rank();
+			const float4 p1 = packed[3 * coll_id + 1], p2 = packed[3 * coll_id + 2];
+			collected[3 * rank + 0] = packed[3 * coll_id + 0];
+			collected[3 * rank + 1] = make_float4(p1.x, p1.y, 2.0f * p1.z, 2.0f * p1.w);
+			collected[3 * rank + 2] = make_float4(p2.x, 2.0f * p2.y, p2.z, 0.0f);
 		}
 		block.sync();
 
 		// Iterate over current batch
 		for (int j = 0; !done && j < min(BLOCK_SIZE, toDo); j++)
 		{
-			// Keep track of current position in range
-			// n_contributor++;
-
-			float3 d = make_float3(cell_pos.x - collected_means[j].x, cell_pos.y - collected_means[j].y, cell_pos.z - collected_means[j].z);
-			float quad_form = (
-				d.x * (collected_conic[j * 6] * d.x + collected_conic[j * 6 + 1] * d.y + collected_conic[j * 6 + 2] * d.z) +
-				d.y * (collected_conic[j * 6 + 1] * d.x + collected_conic[j * 6 + 3] * d.y + collected_conic[j * 6 + 4] * d.z) +
-				d.z * (collected_conic[j * 6 + 2] * d.x + collected_conic[j * 6 + 4] * d.y + collected_conic[j * 6 + 5] * d.z)
-			);
-			float power = -0.5 * quad_form;
-			if (power < -14.0 || power > 0.0) continue;
-			float weight = collected_weights[j] * __expf(power);
-			// float dx = cell_pos.x - collected_means[j].x;
-			// float dy = cell_pos.y - collected_means[j].y;
-			// float dz = cell_pos.z - collected_means[j].z;
-			// int base = j * 6;
-			// float t;
-			// t = collected_conic[base] * dx + collected_conic[base + 1] * dy + collected_conic[base + 2] * dz;
-			// float qf = dx * t;
-			// t = collected_conic[base + 1] * dx + collected_conic[base + 3] * dy + collected_conic[base + 4] * dz;
-			// qf += dy * t;
-			// t = collected_conic[base + 2] * dx + collected_conic[base + 4] * dy + collected_conic[base + 5] * dz;
-			// qf += dz * t;
-			// if (qf > 28.0f || qf < 0.0f) continue;  // equivalent to power check
-			// float weight = collected_weights[j] * __expf(-0.5f * qf);
-
-			accumulated_value += collected_values[j] * weight;
+			const float4 p0 = collected[3 * j], p1 = collected[3 * j + 1], p2 = collected[3 * j + 2];
+			const float dx = cell_pos.x - p0.x, dy = cell_pos.y - p0.y, dz = cell_pos.z - p0.z;
+			// d^T conic d in 4 MUL + 5 FMA, all float (the old -0.5 / -14.0 / 0.0 literals were
+			// doubles and promoted every evaluation). q in [0, 28] <=> power in [-14, 0].
+			const float t0 = fmaf(p1.w, dz, fmaf(p1.z, dy, p1.y * dx));
+			const float t1 = fmaf(p2.y, dz, p2.x * dy);
+			const float q  = fmaf(dx, t0, fmaf(dy, t1, p2.z * dz * dz));
+			if (!(q >= 0.0f && q <= 28.0f)) continue;
+			const float weight = p1.x * __expf(-0.5f * q);
+			accumulated_value  += p0.w * weight;
 			accumulated_weight += weight;
 		}
 	}
@@ -305,11 +289,7 @@ void FORWARD::render(
 	const uint3 num_cells,
 	const float3 cell_size,
 	const float* jitter,
-	const float3* means,
-	const float* values,
-	const float* weights,
-	const float* volumes,
-	const float* conic,
+	const float4* packed,
 	float* accumulated_weights,
 	uint32_t* n_contrib,
 	float* out_cells)
@@ -322,10 +302,7 @@ void FORWARD::render(
 		num_cells,
 		cell_size,
 		jitter,
-		means,
-		values,
-		weights,
-		conic,
+		packed,
 		accumulated_weights,
 		n_contrib,
 		out_cells);
@@ -349,6 +326,7 @@ void FORWARD::preprocess(int P,
 	float* weights_out,
 	float* volumes,
 	float* conic,
+	float4* packed,
 	uint* aabbs,
 	const dim3 grid,
 	uint32_t* blocks_touched)
@@ -383,6 +361,7 @@ void FORWARD::preprocess(int P,
 		weights_out,
 		volumes,
 		conic,
+		packed,
 		aabbs,
 		grid,
 		blocks_touched

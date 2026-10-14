@@ -165,11 +165,8 @@ __global__ void renderCUDA(
 	const uint3 num_cells,
 	const float3 cell_size,
 	const float* __restrict__ jitter,
-	const float3* __restrict__ means3D,
-	const float* __restrict__ values,
-	const float* __restrict__ weights,
+	const float4* __restrict__ packed,
 	const float* __restrict__ out_cells,
-	const float* __restrict__ conic,
 	const float* __restrict__ accumulated_weights,
 	const float* __restrict__ dL_dcells,
 	const float* __restrict__ dL_dcell_weights,
@@ -187,13 +184,11 @@ __global__ void renderCUDA(
 	uint32_t bz = cell_max.z - cell_min.z;
 	uint32_t num_cells_in_block = bx * by * bz;
 
-	// Load all cell data for this block into shared memory
-	__shared__ float3 s_cell_pos[BLOCK_X * BLOCK_Y * BLOCK_Z];
-	__shared__ float s_acc_weight[BLOCK_X * BLOCK_Y * BLOCK_Z];
-	__shared__ float s_inv_acc_weight[BLOCK_X * BLOCK_Y * BLOCK_Z];
-	__shared__ float s_dL_doutv_over_accw[BLOCK_X * BLOCK_Y * BLOCK_Z];
-	__shared__ float s_dL_doutw[BLOCK_X * BLOCK_Y * BLOCK_Z];
-	__shared__ float s_out_cell_val[BLOCK_X * BLOCK_Y * BLOCK_Z];
+	// Per cell: position and dvo = dL/dR * 1/D, plus fc = dL/dweight_cell - dvo * R.
+	// Every per-(Gaussian, cell) term below is built from these two, and uncovered
+	// cells are stored as dvo = fc = 0, so they contribute exactly zero without a branch.
+	__shared__ float4 s_cell[BLOCK_X * BLOCK_Y * BLOCK_Z];  // (x, y, z, dvo)
+	__shared__ float  s_fc[BLOCK_X * BLOCK_Y * BLOCK_Z];
 
 	for (uint32_t idx = threadIdx.x; idx < num_cells_in_block; idx += blockDim.x)
 	{
@@ -204,25 +199,29 @@ __global__ void renderCUDA(
 		uint3 cell = { cell_min.x + lx, cell_min.y + ly, cell_min.z + lz };
 		uint32_t cell_id = cell.z * num_cells.x * num_cells.y + cell.y * num_cells.x + cell.x;
 
-		s_cell_pos[idx] = make_float3(
-			static_cast<float>(cell.x) * cell_size.x + volume_mins.x + jitter[cell_id * 3],
-			static_cast<float>(cell.y) * cell_size.y + volume_mins.y + jitter[cell_id * 3 + 1],
-			static_cast<float>(cell.z) * cell_size.z + volume_mins.z + jitter[cell_id * 3 + 2]
-		);
-
 		float aw = accumulated_weights[cell_id];
-		s_acc_weight[idx] = aw;
 #if SOFT_CUTOFF
 		// Bounded at 1/WEIGHT_CUTOFF instead of cut to zero, so weakly covered cells emit a
 		// gradient without the 1/aw amplification the threshold was there to prevent.
-		float inv_aw = (aw > 0.0f) ? 1.0f / SOFT_DENOM(aw) : 0.0f;
+		const bool covered = aw > 0.0f;
+		float inv_aw = covered ? 1.0f / SOFT_DENOM(aw) : 0.0f;
 #else
-		float inv_aw = (aw > WEIGHT_CUTOFF) ? 1.0f / aw : 0.0f;
+		const bool covered = aw > WEIGHT_CUTOFF;
+		float inv_aw = covered ? 1.0f / aw : 0.0f;
 #endif
-		s_inv_acc_weight[idx] = inv_aw;
-		s_dL_doutv_over_accw[idx] = dL_dcells[cell_id] * inv_aw;
-		s_dL_doutw[idx] = dL_dcell_weights[cell_id];
-		s_out_cell_val[idx] = out_cells[cell_id];
+		// dR/dw_i = (v_i - R * dD/daw) / D. Above the cutoff dD/daw == 1 and this is exact.
+		// Below it D = max(aw, c) is constant, so the true adjoint is v_i / D; keeping the
+		// -R term anyway is deliberate and measured better (see SOFT_DENOM in config.h):
+		// it pushes w_i up where v_i > R and down where v_i < R, instead of pushing every
+		// weight up uniformly.
+		const float r_term = out_cells[cell_id];
+		const float dvo = covered ? dL_dcells[cell_id] * inv_aw : 0.0f;
+		s_cell[idx] = make_float4(
+			static_cast<float>(cell.x) * cell_size.x + volume_mins.x + jitter[cell_id * 3],
+			static_cast<float>(cell.y) * cell_size.y + volume_mins.y + jitter[cell_id * 3 + 1],
+			static_cast<float>(cell.z) * cell_size.z + volume_mins.z + jitter[cell_id * 3 + 2],
+			dvo);
+		s_fc[idx] = covered ? dL_dcell_weights[cell_id] - dvo * r_term : 0.0f;
 	}
 	__syncthreads();
 
@@ -235,80 +234,48 @@ __global__ void renderCUDA(
 	{
 		int point_idx = point_list[range.x + g];
 
-		// Load Gaussian data into registers
-		float3 mean = means3D[point_idx];
-		float value = values[point_idx];
-		float w = weights[point_idx];
-		float con_xx = conic[point_idx * 6 + 0];
-		float con_xy = conic[point_idx * 6 + 1];
-		float con_xz = conic[point_idx * 6 + 2];
-		float con_yy = conic[point_idx * 6 + 3];
-		float con_yz = conic[point_idx * 6 + 4];
-		float con_zz = conic[point_idx * 6 + 5];
+		const float4 p0 = packed[3 * point_idx], p1 = packed[3 * point_idx + 1], p2 = packed[3 * point_idx + 2];
+		const float3 mean = make_float3(p0.x, p0.y, p0.z);
+		const float value = p0.w, w = p1.x;
+		const float con_xx = p1.y, con_xy = p1.z, con_xz = p1.w;
+		const float con_yy = p2.x, con_yz = p2.y, con_zz = p2.z;
+		const float c2xy = 2.0f * con_xy, c2xz = 2.0f * con_xz, c2yz = 2.0f * con_yz;
 
-		// Accumulate gradients across all cells in the block
-		float acc_dL_dvalue = 0.0f;
-		float acc_dL_dxx = 0.0f;
-		float acc_dL_dxy = 0.0f;
-		float acc_dL_dxz = 0.0f;
-		float acc_dL_dyy = 0.0f;
-		float acc_dL_dyz = 0.0f;
-		float acc_dL_dzz = 0.0f;
-		// Replace the 3 mean accumulators + weight accumulator with:
-		float acc_Gx = 0.0f, acc_Gy = 0.0f, acc_Gz = 0.0f;
-		float acc_sum_dLdq = 0.0f;
-		// acc_dL_dvalue stays the same
-
+		// With e = exp(-q/2), F = dvo*(v - R) + dL/dw_cell = dvo*v + fc and
+		// dL/dquad = -w/2 * F * e, the per-cell sums need only e and qe = F * e; w and the
+		// -1/2 are applied once after the loop.
+		float s_v = 0.0f, s_q = 0.0f, Gx = 0.0f, Gy = 0.0f, Gz = 0.0f;
+		float xx = 0.0f, xy = 0.0f, xz = 0.0f, yy = 0.0f, yz = 0.0f, zz = 0.0f;
 		for (uint32_t c = 0; c < num_cells_in_block; c++)
 		{
-#if SOFT_CUTOFF
-			if (s_acc_weight[c] <= 0.0f) continue;
-#else
-			if (s_acc_weight[c] <= WEIGHT_CUTOFF) continue;
-#endif
-
-			float3 d = make_float3(s_cell_pos[c].x - mean.x, s_cell_pos[c].y - mean.y, s_cell_pos[c].z - mean.z);
-			float quad_form = d.x*(con_xx*d.x + con_xy*d.y + con_xz*d.z)
-							+ d.y*(con_xy*d.x + con_yy*d.y + con_yz*d.z)
-							+ d.z*(con_xz*d.x + con_yz*d.y + con_zz*d.z);
-			float power = -0.5f * quad_form;
-			if (power < -14.0f || power > 0.0f) continue;
-
-			float e = __expf(power);
-			float weight_val = w * e;
-			float dL_doutv_over_accw = s_dL_doutv_over_accw[c];
-
-			acc_dL_dvalue += dL_doutv_over_accw * weight_val;
-
-			// dR/dw_i = (v_i - R * dD/daw) / D. Above the cutoff dD/daw == 1 and this is exact.
-			// Below it D = max(aw, c) is constant, so the true adjoint is v_i / D; keeping the
-			// -R term anyway is deliberate and measured better (see SOFT_DENOM in config.h):
-			// it pushes w_i up where v_i > R and down where v_i < R, instead of pushing every
-			// weight up uniformly.
-			const float r_term = s_out_cell_val[c];
-			float F = dL_doutv_over_accw * (value - r_term) + s_dL_doutw[c];
-			float dL_dquad = F * (-0.5f * weight_val);
-
-			acc_sum_dLdq += dL_dquad;          // replaces acc_dL_dw computation
-			acc_Gx += dL_dquad * d.x;          // replaces the con-multiply mean grad lines
-			acc_Gy += dL_dquad * d.y;
-			acc_Gz += dL_dquad * d.z;
-
-			acc_dL_dxx += dL_dquad * d.x * d.x;
-			acc_dL_dxy += dL_dquad * d.x * d.y;
-			acc_dL_dxz += dL_dquad * d.x * d.z;
-			acc_dL_dyy += dL_dquad * d.y * d.y;
-			acc_dL_dyz += dL_dquad * d.y * d.z;
-			acc_dL_dzz += dL_dquad * d.z * d.z;
+			const float4 cp = s_cell[c];
+			const float dx = cp.x - mean.x, dy = cp.y - mean.y, dz = cp.z - mean.z;
+			const float t0 = fmaf(c2xz, dz, fmaf(c2xy, dy, con_xx * dx));
+			const float t1 = fmaf(c2yz, dz, con_yy * dy);
+			const float q  = fmaf(dx, t0, fmaf(dy, t1, con_zz * dz * dz));
+			if (!(q >= 0.0f && q <= 28.0f)) continue;
+			const float e = __expf(-0.5f * q);
+			s_v = fmaf(cp.w, e, s_v);
+			const float qe = fmaf(cp.w, value, s_fc[c]) * e;
+			s_q += qe;
+			const float a = qe * dx, b = qe * dy, cz = qe * dz;
+			Gx += a; Gy += b; Gz += cz;
+			xx = fmaf(a, dx, xx); xy = fmaf(a, dy, xy); xz = fmaf(a, dz, xz);
+			yy = fmaf(b, dy, yy); yz = fmaf(b, dz, yz); zz = fmaf(cz, dz, zz);
 		}
 
-		// Recover mean grads post-loop (con is still in registers)
-		float dL_dmean_x = -2.0f * (con_xx*acc_Gx + con_xy*acc_Gy + con_xz*acc_Gz);
-		float dL_dmean_y = -2.0f * (con_xy*acc_Gx + con_yy*acc_Gy + con_yz*acc_Gz);
-		float dL_dmean_z = -2.0f * (con_xz*acc_Gx + con_yz*acc_Gy + con_zz*acc_Gz);
-
-		// Recover weight grad: since dL_dquad = F * (-0.5*w*e), and acc_dL_dw = sum(F*e) = sum(-2*dL_dquad/w)
-		float acc_dL_dw = -2.0f * acc_sum_dLdq / w;
+		const float h = -0.5f * w;
+		const float acc_dL_dvalue = w * s_v;
+		// = -2 * sum(dL/dquad) / w, without the division.
+		const float acc_dL_dw = s_q;
+		// Off-diagonals keep the undoubled convention sum(dL/dquad * dx * dy); backward
+		// preprocessing applies the symmetric doubling.
+		const float acc_dL_dxx = h * xx, acc_dL_dxy = h * xy, acc_dL_dxz = h * xz;
+		const float acc_dL_dyy = h * yy, acc_dL_dyz = h * yz, acc_dL_dzz = h * zz;
+		// dquad/dmean = -2 conic d, so dL/dmean = -2 conic sum(dL/dquad * d) = w conic G.
+		const float dL_dmean_x = w * (con_xx * Gx + con_xy * Gy + con_xz * Gz);
+		const float dL_dmean_y = w * (con_xy * Gx + con_yy * Gy + con_yz * Gz);
+		const float dL_dmean_z = w * (con_xz * Gx + con_yz * Gy + con_zz * Gz);
 
 		// Single atomic write per Gaussian — all cell contributions already accumulated
 		atomicAdd(&dL_dvalues[point_idx], acc_dL_dvalue);
@@ -361,12 +328,9 @@ void BACKWARD::render(
 	const float3 cell_size,
 	const float* jitter,
 	const bool* clamped,
-	const float3* means3D,
-	const float* values,
-	const float* weights,
+	const float4* packed,
 	const float* out_cells,
 	const float* volumes,
-	const float* conic,
 	const float* accumulated_weights,
 	const uint32_t* n_contrib,
 	const float* dL_dcells,
@@ -385,11 +349,8 @@ void BACKWARD::render(
 		num_cells,
 		cell_size,
 		jitter,
-		means3D,
-		values,
-		weights,
+		packed,
 		out_cells,
-		conic,
 		accumulated_weights,
 		dL_dcells,
 		dL_dcell_weights,

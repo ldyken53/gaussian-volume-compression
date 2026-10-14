@@ -29,6 +29,7 @@ namespace FORWARD
 		float* weights_out,
 		float* volumes,
 		float* conic,
+		float4* packed,
 		uint* aabbs,
 		const dim3 grid,
 		uint32_t* blocks_touched);
@@ -42,11 +43,7 @@ namespace FORWARD
 		const uint3 num_cells,
 		const float3 cell_size,
 		const float* jitter,
-		const float3* means,
-		const float* values,
-		const float* weights,
-		const float* volumes,
-		const float* conic,
+		const float4* packed,
 		float* accumulated_weights,
 		uint32_t* n_contrib,
 		float* out_cells);
