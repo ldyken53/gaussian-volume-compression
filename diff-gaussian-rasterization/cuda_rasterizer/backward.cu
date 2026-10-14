@@ -280,17 +280,12 @@ __global__ void renderCUDA(
 
 			acc_dL_dvalue += dL_doutv_over_accw * weight_val;
 
-			// dR/dw_i = (v_i - R * dD/daw) / D. With D = aw (or max(aw,c) above the cutoff)
-			// dD/daw == 1 and the usual (v_i - R) form is right. With D = max(aw,c) BELOW the
-			// cutoff D is constant, dD/daw == 0, and the correct adjoint is v_i / D -- the
-			// -R term must be dropped or the weight gradient is wrong exactly in the regime
-			// SOFT_CUTOFF exists to handle. (SOFT_SMOOTH's aw + c has dD/daw == 1
-			// everywhere, so it needs no special case -- but it biases every cell low.)
-#if SOFT_CUTOFF && !SOFT_SMOOTH && SOFT_TRUE_ADJOINT
-			const float r_term = (s_acc_weight[c] > (float)WEIGHT_CUTOFF) ? s_out_cell_val[c] : 0.0f;
-#else
+			// dR/dw_i = (v_i - R * dD/daw) / D. Above the cutoff dD/daw == 1 and this is exact.
+			// Below it D = max(aw, c) is constant, so the true adjoint is v_i / D; keeping the
+			// -R term anyway is deliberate and measured better (see SOFT_DENOM in config.h):
+			// it pushes w_i up where v_i > R and down where v_i < R, instead of pushing every
+			// weight up uniformly.
 			const float r_term = s_out_cell_val[c];
-#endif
 			float F = dL_doutv_over_accw * (value - r_term) + s_dL_doutw[c];
 			float dL_dquad = F * (-0.5f * weight_val);
 
