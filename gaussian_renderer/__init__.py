@@ -19,6 +19,12 @@ from diff_gaussian_rasterization import (
 
 from scene.gaussian_model import GaussianModel
 
+try:
+    from diff_gaussian_rasterization.fused import fused_activations
+except ImportError:  # a rasterizer build without fused_ops.cu
+    fused_activations = None
+import os
+
 
 def render(
     pc: GaussianModel,
@@ -46,11 +52,15 @@ def render(
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
     means3D = pc.get_xyz
-    scales = pc.get_scaling
-    rotations = pc.get_rotation
-
-    values = pc.get_values
-    weights = pc.get_weight
+    if fused_activations is not None and os.environ.get("FUSED", "1") != "0":
+        # One kernel each way for get_scaling / get_rotation / get_values / get_weight.
+        scales, rotations, values, weights = fused_activations(
+            pc._scaling, pc._rotation, pc._values, pc._weight, pc.max_scale)
+    else:
+        scales = pc.get_scaling
+        rotations = pc.get_rotation
+        values = pc.get_values
+        weights = pc.get_weight
 
     # Rasterize visible Gaussians to cells, obtain their radii
     out_cells, out_weights, radii = rasterizer(

@@ -41,20 +41,24 @@ uint32_t getHigherMsb(uint32_t n)
 }
 
 // Generates one key/value pair for all Gaussian / tile overlaps.
-// One warp per Gaussian, lanes striding over its tiles. Pair order is Gaussian-major and
-// z, y, x within each AABB.
+// A group of 2^log2g threads per Gaussian, striding over its tiles. Pair order is
+// Gaussian-major and z, y, x within each AABB, and every pair goes to the same slot
+// whatever the group size, so the sort input does not depend on it.
 __global__ void duplicateWithKeys(
 	int P,
+	int log2g,
 	const uint* aabbs,
 	const uint32_t* offsets,
 	uint32_t* gaussian_keys_unsorted,
 	uint32_t* gaussian_values_unsorted,
 	dim3 grid)
 {
-	unsigned int idx = blockIdx.x * (blockDim.x / 32) + (threadIdx.x / 32);
-	if (idx >= P)
+	const unsigned long long t = blockIdx.x * (unsigned long long)blockDim.x + threadIdx.x;
+	const unsigned int idx = (unsigned int)(t >> log2g);
+	if (idx >= (unsigned int)P)
 		return;
-	unsigned int lane = threadIdx.x & 31;
+	const unsigned int g = 1u << log2g;
+	const unsigned int lane = (unsigned int)t & (g - 1);
 
 	uint32_t off = (idx == 0) ? 0 : offsets[idx - 1];
 	// A Gaussian that owns no pairs may have no valid AABB (a culled one is never
@@ -65,7 +69,7 @@ __global__ void duplicateWithKeys(
 	uint x0 = aabbs[idx * 6 + 0], y0 = aabbs[idx * 6 + 1], z0 = aabbs[idx * 6 + 2];
 	uint nx = aabbs[idx * 6 + 3] - x0, ny = aabbs[idx * 6 + 4] - y0, nz = aabbs[idx * 6 + 5] - z0;
 	uint total = nx * ny * nz;
-	for (uint i = lane; i < total; i += 32) {
+	for (uint i = lane; i < total; i += g) {
 		uint iz = i / (nx * ny), rem = i - iz * (nx * ny);
 		uint iy = rem / nx, ix = rem - iy * nx;
 		gaussian_keys_unsorted[off + i] = (z0 + iz) * grid.x * grid.y + (y0 + iy) * grid.x + (x0 + ix);
@@ -280,9 +284,18 @@ int CudaRasterizer::Rasterizer::forward(
 
 	// Key duplication
 	if (debug) cudaEventRecord(events[4]);
-	// 8 warps per 256-thread block, one warp per Gaussian.
-	duplicateWithKeys<<<(P + 7) / 8, 256>>>(
+	// Size the per-Gaussian thread group to the mean tile count: a full warp idles most
+	// lanes when Gaussians span ~5 tiles (richtmyer 256x), while one thread per Gaussian
+	// serialises the ~90-tile ones (vertebra 256x).
+	int log2g = 0;
+	{
+		const double mean_tiles = P > 0 ? (double)num_intersections / P : 0.0;
+		while (log2g < 5 && (double)(1 << log2g) < mean_tiles) log2g++;
+	}
+	const unsigned long long dup_threads = (unsigned long long)P << log2g;
+	duplicateWithKeys<<<(unsigned int)((dup_threads + 255) / 256), 256>>>(
 		P,
+		log2g,
 		geomState.aabbs,
 		geomState.point_offsets,
 		binningState.point_list_keys_unsorted,

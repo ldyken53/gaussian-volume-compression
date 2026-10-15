@@ -30,6 +30,11 @@ except ImportError:
 
 DEBUG = True
 
+try:
+    from diff_gaussian_rasterization.fused import fused_volume_loss as _fused_loss
+except ImportError:  # a rasterizer build without fused_ops.cu
+    _fused_loss = None
+
 
 class NodeSampler:
     """Ground truth read straight off the native grid, on an integer-strided subgrid.
@@ -306,7 +311,30 @@ def training(
     first_iter += 1
     done = 0
     n = False
+    # PROFILE_ITERS=a:b wraps iterations a..b in torch.profiler and prints where the time
+    # goes (GPU kernels vs everything else). Unset = no effect.
+    # PROFILE_MODE=nsys instead opens a cudaProfilerApi capture range over the same
+    # iterations (run under `nsys profile --capture-range=cudaProfilerApi`), with NVTX
+    # ranges around each phase.
+    _pw = os.environ.get("PROFILE_ITERS")
+    _pa, _pb = (int(v) for v in _pw.split(":")) if _pw else (-1, -1)
+    _nsys = os.environ.get("PROFILE_MODE") == "nsys"
+    _nv_on = False
+    def _nv(name=None):
+        if _nv_on:
+            torch.cuda.nvtx.range_pop() if name is None else torch.cuda.nvtx.range_push(name)
     for iteration in range(first_iter, opt.iterations + 1):
+        if iteration == _pa:
+            torch.cuda.synchronize()
+            if _nsys:
+                torch.cuda.cudart().cudaProfilerStart()
+                _nv_on = True
+            else:
+                _prof = torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
+                                                           torch.profiler.ProfilerActivity.CUDA])
+                _prof.__enter__()
+            _pt0 = time.perf_counter()
+        _nv("iter")
         deb = False
         iter_start.record()
         fresh = (iteration not in saving_iterations and iteration not in testing_iterations
@@ -337,6 +365,7 @@ def training(
         if iteration % 2000 == 0:
             deb = True
 
+        _nv("render")
         render_pkg = render(
             gaussians,
             pipe,
@@ -350,64 +379,73 @@ def training(
             render_pkg["visibility_filter"],
             render_pkg["radii"],
         )
+        _nv(); _nv("loss")
         # l1_lv = l1_loss(cells, gt)
         # PSNR is MSE-based, so L2 optimises the reported metric directly.
-        err = (cells - gt) ** 2 if args.loss == "l2" else torch.abs(cells - gt)
-        l1_lv = err.mean()
-        # l1_lv = torch.mean((cells - gt) ** 2)
-        # delta = 1.0
-        # residual = cells - gt
-        # loss = torch.where(
-        #     residual.abs() <= delta,
-        #     0.5 * residual ** 2,
-        #     delta * (residual.abs() - 0.5 * delta)
-        # )
-        # l1_lv = loss.mean()
-        # TODO: FIX FP AND FN FOR CHANGING CELL COUNTS
-        k = 600  # Adjust this to control decay rate
-        # fn_mask = torch.logical_and(gt != -1, weights < 0.02)
-        # false_negative = torch.exp(-k * weights[fn_mask])
-        # false_negative = false_negative[false_negative > 0].mean()
-            # false_negative = torch.exp(-k * torch.clamp(weights[fn_mask] - 0.01, 0.0))
-        # False-negative loss. A cell whose accumulated weight drops under the
-        # rasterizer cutoff (1e-2) is undefined, so penalise cells approaching it.
-        # Cells already at W == 0 are excluded: the rasterizer zeroes their weight
-        # and skips them in the backward pass, so they carry no gradient and would
-        # only dilute the mean, weakening the push on the cells still recoverable.
-        fn_mask = torch.logical_and(gt != -1, weights > 0.0)
-        fn_vals = torch.clamp(0.011 - weights, min=0) * fn_mask
-        # "rel": fn_reg multiplies the current data loss instead of being an absolute
-        # weight, so the FN term keeps a fixed ratio to the data term regardless of the
-        # PSNR regime the dataset sits in. Ported from gaussian-volume to test whether a
-        # single setting can span both repos. Default "abs" leaves behaviour unchanged.
-        fn_scale = args.fn_reg * l1_lv.detach() if args.fn_mode == "rel" else args.fn_reg
-        false_negative = fn_scale * fn_vals.sum() / ((fn_vals > 0).sum().float() + 1e-8)
-        # overlap_mask = torch.logical_and(gt != -1, weights > 1.0)
-        # if overlap_mask.any():
-            # overlap_loss = (torch.exp(weights[overlap_mask] - 1) - 1).mean()
-        # else:
-        #     overlap_loss = torch.tensor(0., device="cuda")
-        # fp_mask = torch.logical_and(gt == -1, weights > 0.0)
-        # fp_vals = weights[fp_mask]        
-        # false_positive = args.fp_reg * fp_vals.sum() / ((fp_vals > 0).sum().float() + 1e-8)
-        # if mask.any():
-        #     false_positive = (2 * (1 - torch.exp(-k * weights[mask]))).mean()
-        # else:
-        #     false_positive = torch.tensor(0., device="cuda")
-        # min_allowed_scale = min(spacing) / 6.0  # One cell worth of extent
-        # mask = gaussians.get_scaling < min_allowed_scale
-        # if mask.any():
-        #     false_positive = torch.relu(min_allowed_scale - gaussians.get_scaling[mask]).mean()
-        # else:
-        #     false_positive = torch.tensor(0., device="cuda")
-        # loss = l1_lv + false_negative + 0.0000 * overlap_loss
-        loss = l1_lv + false_negative
-        if gaussians.get_values.shape[0] > args.cap_max:
+        if _fused_loss is not None and args.loss == "l2" and args.fn_mode == "abs" \
+                and os.environ.get("FUSED", "1") != "0":
+            # Same loss as the branch below, as 3 kernels instead of ~15 (+ ~12 backward).
+            _lo = _fused_loss(cells, gt, weights, args.fn_reg)
+            loss, l1_lv, false_negative = _lo[0], _lo[1], _lo[2]
+        else:
+            err = (cells - gt) ** 2 if args.loss == "l2" else torch.abs(cells - gt)
+            l1_lv = err.mean()
+            # l1_lv = torch.mean((cells - gt) ** 2)
+            # delta = 1.0
+            # residual = cells - gt
+            # loss = torch.where(
+            #     residual.abs() <= delta,
+            #     0.5 * residual ** 2,
+            #     delta * (residual.abs() - 0.5 * delta)
+            # )
+            # l1_lv = loss.mean()
+            # TODO: FIX FP AND FN FOR CHANGING CELL COUNTS
+            k = 600  # Adjust this to control decay rate
+            # fn_mask = torch.logical_and(gt != -1, weights < 0.02)
+            # false_negative = torch.exp(-k * weights[fn_mask])
+            # false_negative = false_negative[false_negative > 0].mean()
+                # false_negative = torch.exp(-k * torch.clamp(weights[fn_mask] - 0.01, 0.0))
+            # False-negative loss. A cell whose accumulated weight drops under the
+            # rasterizer cutoff (1e-2) is undefined, so penalise cells approaching it.
+            # Cells already at W == 0 are excluded: the rasterizer zeroes their weight
+            # and skips them in the backward pass, so they carry no gradient and would
+            # only dilute the mean, weakening the push on the cells still recoverable.
+            fn_mask = torch.logical_and(gt != -1, weights > 0.0)
+            fn_vals = torch.clamp(0.011 - weights, min=0) * fn_mask
+            # "rel": fn_reg multiplies the current data loss instead of being an absolute
+            # weight, so the FN term keeps a fixed ratio to the data term regardless of the
+            # PSNR regime the dataset sits in. Ported from gaussian-volume to test whether a
+            # single setting can span both repos. Default "abs" leaves behaviour unchanged.
+            fn_scale = args.fn_reg * l1_lv.detach() if args.fn_mode == "rel" else args.fn_reg
+            false_negative = fn_scale * fn_vals.sum() / ((fn_vals > 0).sum().float() + 1e-8)
+            # overlap_mask = torch.logical_and(gt != -1, weights > 1.0)
+            # if overlap_mask.any():
+                # overlap_loss = (torch.exp(weights[overlap_mask] - 1) - 1).mean()
+            # else:
+            #     overlap_loss = torch.tensor(0., device="cuda")
+            # fp_mask = torch.logical_and(gt == -1, weights > 0.0)
+            # fp_vals = weights[fp_mask]        
+            # false_positive = args.fp_reg * fp_vals.sum() / ((fp_vals > 0).sum().float() + 1e-8)
+            # if mask.any():
+            #     false_positive = (2 * (1 - torch.exp(-k * weights[mask]))).mean()
+            # else:
+            #     false_positive = torch.tensor(0., device="cuda")
+            # min_allowed_scale = min(spacing) / 6.0  # One cell worth of extent
+            # mask = gaussians.get_scaling < min_allowed_scale
+            # if mask.any():
+            #     false_positive = torch.relu(min_allowed_scale - gaussians.get_scaling[mask]).mean()
+            # else:
+            #     false_positive = torch.tensor(0., device="cuda")
+            # loss = l1_lv + false_negative + 0.0000 * overlap_loss
+            loss = l1_lv + false_negative
+        if gaussians._values.shape[0] > args.cap_max:
             n = True
         if use_mcmc:
             loss = loss + args.weight_reg * torch.abs(gaussians.get_weight).mean()
             loss = loss + args.scale_reg * torch.abs(gaussians.get_scaling).mean()
+        _nv(); _nv("backward")
         loss.backward()
+        _nv()
 
         iter_end.record()
 
@@ -475,6 +513,7 @@ def training(
             if iteration == opt.iterations:
                 progress_bar.close()
 
+            _nv("densify")
             # Densification
             if (iteration <= opt.prune_until_iter and
                 iteration >= opt.densify_from_iter and
@@ -537,8 +576,9 @@ def training(
                         )
 
             # Optimizer step
+            _nv(); _nv("adam+ema")
             if iteration < opt.iterations:
-                gaussians.optimizer.step()
+                gaussians.optimizer_step()
                 gaussians.optimizer.zero_grad(set_to_none=True)
 
                 if args.ema > 0 and iteration >= args.ema_from:
@@ -579,6 +619,28 @@ def training(
                     noise = torch.bmm(actual_covariance, noise.unsqueeze(-1)).squeeze(-1)
                     gaussians._xyz.add_(noise)
 
+            _nv(); _nv()
+            if iteration == _pb and _nsys:
+                torch.cuda.synchronize()
+                torch.cuda.cudart().cudaProfilerStop()
+                _nv_on = False
+                print(f"[profile] nsys window {_pa}-{_pb}: {1e3 * (time.perf_counter() - _pt0) / (_pb - _pa + 1):.3f} ms/iter")
+            elif iteration == _pb:
+                torch.cuda.synchronize()
+                _wall = time.perf_counter() - _pt0
+                _prof.__exit__(None, None, None)
+                _n = _pb - _pa + 1
+                _ka = _prof.key_averages()
+                _dev = lambda e: getattr(e, "self_device_time_total", getattr(e, "self_cuda_time_total", 0))
+                _gpu = sum(_dev(e) for e in _ka) / 1e3  # ms
+                print(f"[profile] iters {_pa}-{_pb}: wall {1e3 * _wall / _n:.3f} ms/iter (profiled), "
+                      f"GPU kernels {_gpu / _n:.3f} ms/iter, N={gaussians._xyz.shape[0]}")
+                _rows = sorted((e for e in _ka if _dev(e) > 0), key=_dev, reverse=True)[:30]
+                for e in _rows:
+                    print(f"[profile]   {_dev(e) / 1e3 / _n:8.4f} ms/iter  {e.count / _n:6.2f}/iter  {e.key[:90]}")
+                print(f"[profile] cpu-side top:")
+                for e in sorted(_ka, key=lambda e: e.self_cpu_time_total, reverse=True)[:15]:
+                    print(f"[profile]   {e.self_cpu_time_total / 1e3 / _n:8.4f} ms/iter  {e.count / _n:6.2f}/iter  {e.key[:90]}")
             # Save
             if iteration in saving_iterations or done == 1:
                 torch.cuda.synchronize()

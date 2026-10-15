@@ -15,6 +15,7 @@ import pyvista as pv
 import torch
 from plyfile import PlyData, PlyElement
 from simple_knn._C import distCUDA2
+from diff_gaussian_rasterization import _C as _dgr_C
 from torch import nn
 
 
@@ -231,6 +232,50 @@ class GaussianModel:
             lr_delay_mult=training_args.position_lr_delay_mult,
             max_steps=training_args.position_lr_max_steps,
         )
+
+    def optimizer_step(self):
+        """optimizer.step(), but as ONE kernel over all five parameter tensors.
+
+        torch's fused Adam launches once per param group with one block per 65536
+        elements, so on small models each launch runs 1-3 blocks and is latency-bound
+        (~0.26 ms/iteration of GPU time at 44k Gaussians for ~10 us of traffic). Same
+        update, same state tensors (densification edits exp_avg/exp_avg_sq in place, which
+        this reads), so torch keeps owning the state. The first step goes through torch to
+        create that state.
+        """
+        opt = self.optimizer
+        if getattr(self, "_adam_torch_only", False) or not hasattr(_dgr_C, "multi_adam_"):
+            opt.step()
+            return
+        groups = [g for g in opt.param_groups if g["params"][0].grad is not None]
+        if not groups:
+            # Densification just replaced every parameter, so none has a gradient yet;
+            # torch's step is a no-op here (no state change, no step increment).
+            return
+        states = [opt.state.get(g["params"][0]) for g in groups]
+        if (len(groups) != len(opt.param_groups) or not all(states)
+                or getattr(self, "_adam_t", None) is None):
+            # First step (creates the state), or a partial step: let torch do it, then
+            # re-read the shared step count once. Per-group counts that ever diverge
+            # cannot share one bias correction, so stay on torch from then on.
+            opt.step()
+            steps = {int(st["step"]) for st in (opt.state[g["params"][0]] for g in opt.param_groups)
+                     if st}
+            self._adam_t = steps.pop() if len(steps) == 1 else None
+            self._adam_torch_only = self._adam_t is None
+            return
+        ps = [g["params"][0] for g in groups]
+        if not all(p.grad.is_contiguous() for p in ps):
+            opt.step()
+            self._adam_t += 1
+            return
+        self._adam_t += 1
+        b1, b2 = groups[0]["betas"]
+        _dgr_C.multi_adam_([p.data for p in ps], [p.grad for p in ps],
+                           [st["exp_avg"] for st in states], [st["exp_avg_sq"] for st in states],
+                           [float(g["lr"]) for g in groups], self._adam_t,
+                           float(b1), float(b2), float(groups[0]["eps"]))
+        torch._foreach_add_([st["step"] for st in states], 1.0)
 
     def update_learning_rate(self, iteration):
         """Learning rate scheduling per step"""
@@ -748,14 +793,72 @@ class GaussianModel:
         )
         return num_added
 
+    def _new_point_knn(self, new_pts):
+        """distCUDA2 (mean squared distance to the 3 nearest other points) for the new
+        points only, against existing + new points.
+
+        distCUDA2 scans every box per point, O(P^2/1024), plus ~10 ms of fixed sort /
+        malloc / free per call: 60-135 ms per densification event at 1.4M-2.6M Gaussians
+        and 36 events per run, although after the growth phase an event adds only the
+        tens to a few hundred Gaussians pruning freed. Instead, bin all points into a grid
+        of cell size R and compare each new point only with the points in its 27 nearby
+        cells, which contain every point within distance R. When the three nearest found
+        all lie within R they are the global three nearest, so the result matches
+        distCUDA2 to float rounding; queries that miss retry once at 2R, and anything
+        still unresolved, or a large batch, falls back to the full pass.
+        """
+        old = self._xyz.detach()
+        n_old, k = old.shape[0], new_pts.shape[0]
+        def full():
+            return distCUDA2(torch.cat([old, new_pts], dim=0))[n_old:]
+        if k == 0 or 8 * k > n_old:
+            return full()
+        dev = old.device
+        pts = torch.cat([old, new_pts], dim=0)
+        P = pts.shape[0]
+        lo = pts.min(dim=0).values
+        ext = (pts.max(dim=0).values - lo).clamp_min(1e-12)
+        spacing = float((torch.prod(ext) / P) ** (1.0 / 3.0))
+        offs = torch.stack(torch.meshgrid(*[torch.arange(-1, 2, device=dev)] * 3,
+                                          indexing="ij"), -1).reshape(-1, 3)
+        out = torch.empty(k, device=dev)
+        todo = torch.arange(k, device=dev)
+        for R in (2.0 * spacing, 4.0 * spacing):
+            G = (ext / R).floor().long() + 1
+            c = ((pts - lo) / R).floor().long().clamp_min(0).minimum(G - 1)
+            lin = (c[:, 2] * G[1] + c[:, 1]) * G[0] + c[:, 0]
+            order = torch.argsort(lin)
+            counts = torch.bincount(lin, minlength=int(torch.prod(G)))
+            starts = torch.cumsum(counts, 0) - counts
+            raw = c[n_old + todo][:, None, :] + offs[None]                     # (q, 27, 3)
+            # Out-of-grid neighbours must be dropped, not clamped: clamping maps two of a
+            # boundary cell's neighbours onto the same cell and counts its points twice.
+            inb = ((raw >= 0) & (raw < G)).all(-1)
+            qc = raw.clamp_min(0).minimum(G - 1)
+            nb = (qc[..., 2] * G[1] + qc[..., 1]) * G[0] + qc[..., 0]          # (q, 27)
+            cnt = counts[nb] * inb
+            M = int(cnt.max())
+            if M == 0:
+                continue
+            ar = torch.arange(M, device=dev)
+            slot = (starts[nb][..., None] + ar).clamp(max=P - 1)                # (q, 27, M)
+            idx = order[slot].reshape(todo.shape[0], -1)
+            valid = (ar < cnt[..., None]).reshape(todo.shape[0], -1)
+            valid &= idx != (n_old + todo)[:, None]                             # not itself
+            d2 = ((pts[idx] - new_pts[todo][:, None, :]) ** 2).sum(-1)
+            d2 = d2.masked_fill(~valid, float("inf"))
+            if d2.shape[1] < 3:
+                continue
+            best = torch.topk(d2, 3, dim=1, largest=False, sorted=True).values
+            ok = best[:, 2] <= R * R
+            out[todo[ok]] = (best[ok, 0] + best[ok, 1] + best[ok, 2]) / 3.0
+            todo = todo[~ok]
+            if todo.numel() == 0:
+                return out
+        return full()
+
     def densify_in_empty(self, empty_points, empty_values, new_scale, new_weight):
-        # Concatenate existing and new points for distance computation
-        all_points = torch.cat([self.get_xyz, empty_points], dim=0)
-        all_dist2 = torch.clamp_min(
-            distCUDA2(all_points) * 0.1,
-            0.0000001,
-        )
-        dist2 = all_dist2[len(self.get_xyz):]
+        dist2 = torch.clamp_min(self._new_point_knn(empty_points) * 0.1, 0.0000001)
         new_scaling = self.inverse_scaling_activation(torch.sqrt(dist2))[..., None].repeat(1, 3)
         # new_scaling = self.inverse_scaling_activation(
         #     (new_scale) # Slightly bigger than 1 cell in 100^3 grid
@@ -836,7 +939,6 @@ class GaussianModel:
         # print(f"Number of Gaussians pruned: {torch.count_nonzero(prune_mask)}")
         self.prune_points(prune_mask)
 
-        torch.cuda.empty_cache()
 
     def convert_ply_to_ascii(self, binary_ply_file_path):
         ascii_ply_file_path = binary_ply_file_path.replace(".ply", "_ascii.ply")
