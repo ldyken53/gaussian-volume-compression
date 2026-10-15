@@ -296,8 +296,10 @@ class GaussianModel:
         el = PlyElement.describe(elements, "vertex")
         PlyData([el]).write(path)
 
-        # Also produce an ascii version of the .ply file
-        self.convert_ply_to_ascii(path)
+        # The ascii copy is ~3x the binary's size and nothing reads it; it filled the home
+        # quota and crashed saves. Opt in with SAVE_ASCII_PLY=1.
+        if os.environ.get("SAVE_ASCII_PLY") == "1":
+            self.convert_ply_to_ascii(path)
 
     def save_ply_activated(self, path):
         # Apply activation functions to get the actual values
