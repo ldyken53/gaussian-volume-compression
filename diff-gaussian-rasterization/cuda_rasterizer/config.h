@@ -16,7 +16,12 @@
 // written -1 exactly when no Gaussian's truncated support reaches it, so raising
 // TRUNC_FRAC shrinks coverage too. Overridable at runtime via the TRUNC_FRAC env
 // var; a model must be rendered at the value it was trained with.
-#define TRUNC_FRAC 0.1
+// 0.01 (T = w*G >= 1e-4) since the per-Gaussian cutoff: with GAUSS_CUTOFF on, 1e-3 cost
+// 7.6 dB summed over the 14 benchmark cells (miranda 64x -5.4: its points carry little
+// accumulated weight, so an absolute 1e-3 cut drops a large share of it) and 1e-4 matched
+// the old q <= 28-per-tile rule's speed at +3.0 dB. Models trained before carry no
+// raster_env file and full_psnr.py evaluates them under the old rule (0.1, GAUSS_CUTOFF=0).
+#define TRUNC_FRAC 0.01
 
 // 0 = hard cutoff (original): a cell whose accumulated weight is under WEIGHT_CUTOFF is
 // declared empty, written as -1.0, reports weight 0, and receives no gradient. The FN
@@ -48,5 +53,40 @@
 //   m64 52.615 vs 53.371, m1k 34.765 vs 35.297, r1k 29.726 vs 29.935, c64 49.386 vs 49.396.
 // The shipped backward is therefore deliberately inexact below the cutoff. Do not "fix" it.
 #define SOFT_DENOM(aw) (max((aw), (float)WEIGHT_CUTOFF))
+
+// Backward-render speed switches (results unchanged up to float summation order).
+// SKIP_EMPTY: a (Gaussian, tile) pair whose support reaches no cell of the tile skips its
+// 11 global atomics -- the tile-overlap test is conservative, so at high Gaussian density
+// many binned pairs contribute exactly zero.
+#ifndef SKIP_EMPTY
+#define SKIP_EMPTY 1
+#endif
+// PACKED_GRAD: accumulate each Gaussian's 11 render gradients into one 12-float row
+// (conic[6], mean[3], value, weight, pad) so a pair's atomics hit one cache line instead
+// of four arrays; preprocess backward reads the conic part at stride 12.
+// FUSE_ACT: the rasterizer takes the RAW parameters (log-scales, unnormalised quaternions,
+// pre-sigmoid value and weight) and applies the activations itself -- exp + soft cap
+// M tanh(||s||/M)/||s|| with M passed in the scale_modifier slot, normalise, sigmoid -- in
+// forward preprocess, and their chain rule in backward preprocess, which also writes the
+// mean / value / weight gradients straight from the packed row. Same float expressions as
+// fused_ops.cu's actForward / actBackward; removes those two kernels and their tensors.
+// GAUSS_CUTOFF: each Gaussian contributes to a cell only where w * exp(-q/2) >= T with
+// T = TRUNC_FRAC * WEIGHT_CUTOFF (1e-3 by default, TRUNC_FRAC env overrides), i.e.
+// q <= qmax = 2 ln(w / T) -- exactly the ellipsoid the tile AABB is built from. Without it
+// the per-cell test is the blanket q <= 28, so a Gaussian reaches out to 5.3 sigma inside
+// any tile its 1e-3 ellipsoid touches and its support depends on tile alignment; with it
+// the support is a per-Gaussian ellipsoid a renderer can reproduce exactly.
+#ifndef GAUSS_CUTOFF
+#define GAUSS_CUTOFF 1
+#endif
+#ifndef FUSE_ACT
+#define FUSE_ACT 1
+#endif
+#ifndef BWD_THREADS
+#define BWD_THREADS 256
+#endif
+#ifndef PACKED_GRAD
+#define PACKED_GRAD 1
+#endif
 
 #endif

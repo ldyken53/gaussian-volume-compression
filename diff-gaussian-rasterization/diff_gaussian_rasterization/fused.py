@@ -27,11 +27,14 @@ def fused_activations(raw_scaling, raw_rotation, raw_values, raw_weight, max_sca
     return _FusedActivations.apply(raw_scaling, raw_rotation, raw_values, raw_weight, max_scale)
 
 
+_FN_MODES = {"abs": 0, "log": 1}
+
+
 class _FusedVolumeLoss(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, cells, gt, weights, fn_reg):
-        out, acc = _C.fused_loss_forward(cells, gt, weights, float(fn_reg))
-        ctx.fn_reg = float(fn_reg)
+    def forward(ctx, cells, gt, weights, fn_reg, mode, tau):
+        out, acc = _C.fused_loss_forward(cells, gt, weights, float(fn_reg), int(mode), float(tau))
+        ctx.fn_reg, ctx.mode, ctx.tau = float(fn_reg), int(mode), float(tau)
         ctx.save_for_backward(cells, gt, weights, acc)
         ctx.mark_non_differentiable(gt)
         return out
@@ -39,11 +42,12 @@ class _FusedVolumeLoss(torch.autograd.Function):
     @staticmethod
     def backward(ctx, g_out):
         cells, gt, weights, acc = ctx.saved_tensors
-        dc, dw = _C.fused_loss_backward(cells, gt, weights, acc, ctx.fn_reg, g_out.contiguous())
-        return dc, None, dw, None
+        dc, dw = _C.fused_loss_backward(cells, gt, weights, acc, ctx.fn_reg, ctx.mode, ctx.tau,
+                                        g_out.contiguous())
+        return dc, None, dw, None, None, None
 
 
-def fused_volume_loss(cells, gt, weights, fn_reg):
+def fused_volume_loss(cells, gt, weights, fn_reg, fn_mode="abs", fn_thresh=0.011):
     """[mean (c-g)^2 + FN term, the mean, the FN term], as train.py computes them with
-    --loss l2 --fn_mode abs."""
-    return _FusedVolumeLoss.apply(cells, gt, weights, fn_reg)
+    --loss l2 and --fn_mode abs (linear hinge) or log (log barrier) at threshold fn_thresh."""
+    return _FusedVolumeLoss.apply(cells, gt, weights, fn_reg, _FN_MODES[fn_mode], fn_thresh)

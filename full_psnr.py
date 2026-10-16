@@ -132,8 +132,9 @@ def main():
     p.add_argument("-m", "--model_path", nargs="+", required=True)
     p.add_argument("--iteration", type=int, default=-1,
                    help="-1 picks the highest saved iteration in each model dir")
-    p.add_argument("--max_scale", type=float, default=0.02,
-                   help="must match training: get_scaling caps on it")
+    p.add_argument("--max_scale", type=float, default=None,
+                   help="must match training: get_scaling caps on it (default: the model's "
+                        "max_scale file, else 0.02)")
     p.add_argument("--is_scaled", action="store_true",
                    help="volume already in the unit cube with values in [0,1]")
     p.add_argument("--block", type=int, default=256,
@@ -147,6 +148,21 @@ def main():
     p.add_argument("--sample_grid", type=int, default=128,
                    help="lattice resolution for --continuous (128 = train.py's)")
     args = p.parse_args()
+    # Evaluate under the support rule the models were trained with (read once per process
+    # by the rasterizer, so every model in one call must share it).
+    envs = set()
+    for mp in args.model_path:
+        ef = os.path.join(mp, "raster_env")
+        envs.add(open(ef).read() if os.path.exists(ef) else "")
+    if len(envs) > 1:
+        raise SystemExit(f"models were trained under different rasterizer env settings: {envs}")
+    # A key a model does not record predates it: no raster_env at all (or no TRUNC_FRAC in
+    # it) means the model was trained under the old rule, TRUNC_FRAC 0.1 and the blanket
+    # q <= 28 per tile, which is no longer the build default.
+    rec = dict(line.split("=", 1) for line in envs.pop().split())
+    for k, legacy in (("TRUNC_FRAC", "0.1"), ("GAUSS_CUTOFF", "0")):
+        if k not in os.environ:
+            os.environ[k] = rec.get(k, legacy)
 
     t0 = time.time()
     mesh = pv.read(args.source_path)
@@ -170,7 +186,9 @@ def main():
                      for f in os.listdir(os.path.join(mp, "point_cloud"))]
             it = max(saved)
         gaussians = GaussianModel()
-        gaussians.max_scale = args.max_scale
+        ms_file = os.path.join(mp, "max_scale")
+        gaussians.max_scale = (args.max_scale if args.max_scale is not None else
+                               float(open(ms_file).read()) if os.path.exists(ms_file) else 0.02)
         with torch.no_grad():
             gaussians.load_ply(
                 os.path.join(mp, "point_cloud", f"iteration_{it}", "point_cloud.ply"), mesh)
@@ -191,7 +209,7 @@ def main():
               f"covered={r['covered_frac']:.4f} fp={r['fp_frac']:.4f} "
               f"bg={r['bg_frac']:.4f} psnr_bg={r['psnr_bg']:.3f} psnr_fg={r['psnr_fg']:.3f} "
               f"bg_err_share={r['sse_bg_share']:.3f} "
-              f"eval_s={time.time() - t:.1f}" + cont, flush=True)
+              f"eval_s={time.time() - t:.1f}" + cont + f" max_scale={gaussians.max_scale:.4f}", flush=True)
         del gaussians
         torch.cuda.empty_cache()
 

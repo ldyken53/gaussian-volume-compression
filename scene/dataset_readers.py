@@ -5,7 +5,7 @@ import torch
 from scene.gaussian_model import BasicPointCloud
 # from gpu_mesh_sampling import gpu_sample
 
-def readData(path, fraction, normalized):
+def readData(path, fraction, normalized, max_points=None):
     mesh = pv.read(path)
 
     # Rescale the values to the range [0, 1]
@@ -51,6 +51,13 @@ def readData(path, fraction, normalized):
         ox, oy, oz = mesh.origin
         sx, sy, sz = mesh.spacing
         n_pts = mesh.n_points
+        if max_points is not None and fraction * n_pts > max_points:
+            # Cap the initial count at a share of the final model: a fixed node fraction
+            # would otherwise seed nearly the whole budget at extreme ratios (vertebra
+            # 4096x: 98%), leaving error-guided densification nothing to place.
+            print(f"init capped: fraction {fraction:g} -> {max_points / n_pts:g} "
+                  f"({int(max_points)} of {n_pts} nodes)")
+            fraction = max_points / n_pts
 
         mask = (torch.rand(n_pts) < fraction)
         idx = torch.nonzero(mask, as_tuple=False).squeeze(1)

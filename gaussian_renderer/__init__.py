@@ -23,6 +23,13 @@ try:
     from diff_gaussian_rasterization.fused import fused_activations
 except ImportError:  # a rasterizer build without fused_ops.cu
     fused_activations = None
+try:
+    from diff_gaussian_rasterization import _C as _dgr_C
+    # A FUSE_ACT build applies the activations inside the rasterizer: it takes the raw
+    # parameters, with max_scale passed in the scale_modifier slot.
+    _RAW_ACT = bool(getattr(_dgr_C, "RAW_ACTIVATIONS", False))
+except ImportError:
+    _RAW_ACT = False
 import os
 
 
@@ -40,19 +47,24 @@ def render(
 
     """
 
+    raw = _RAW_ACT and os.environ.get("FUSED", "1") != "0"
+    if raw and scaling_modifier != 1.0:
+        raise ValueError("a FUSE_ACT rasterizer build uses scale_modifier for max_scale")
     raster_settings = GaussianRasterizationSettings(
         volume_mins=pc.mins,
         volume_maxes=pc.maxes,
         cell_count=cell_count,
         bg=bg,
-        scale_modifier=scaling_modifier,
+        scale_modifier=float(pc.max_scale) if raw else scaling_modifier,
         debug=pipe.debug if not debug else True,
     )
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
     means3D = pc.get_xyz
-    if fused_activations is not None and os.environ.get("FUSED", "1") != "0":
+    if raw:
+        scales, rotations, values, weights = pc._scaling, pc._rotation, pc._values, pc._weight
+    elif fused_activations is not None and os.environ.get("FUSED", "1") != "0":
         # One kernel each way for get_scaling / get_rotation / get_values / get_weight.
         scales, rotations, values, weights = fused_activations(
             pc._scaling, pc._rotation, pc._values, pc._weight, pc.max_scale)

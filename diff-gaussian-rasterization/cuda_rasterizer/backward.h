@@ -39,7 +39,12 @@ namespace BACKWARD
 		const float scale_modifier,
 		const float* dL_dconics,
 		glm::vec3* dL_dscale,
-		glm::vec4* dL_drot);
+		glm::vec4* dL_drot,
+		const float* values,
+		const float* weights,
+		float* dL_dmeans,
+		float* dL_dvalues,
+		float* dL_dweights);
 }
 
 #endif

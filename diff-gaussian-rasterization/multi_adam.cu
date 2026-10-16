@@ -22,11 +22,13 @@ struct AdamArgs {
 	float* v[MAX_TENSORS];
 	long long end[MAX_TENSORS];   // inclusive prefix sum of element counts
 	float step_size[MAX_TENSORS]; // lr / (1 - b1^t)
+	float* e[MAX_TENSORS];        // optional Polyak average, updated from the new p
 	int n;
 };
 
+template <bool EMA>
 __global__ void multiAdamKernel(AdamArgs a, long long total, float b1, float b2,
-                                float bc2_sqrt, float eps)
+                                float bc2_sqrt, float eps, float ema_w)
 {
 	for (long long i = blockIdx.x * (long long)blockDim.x + threadIdx.x; i < total;
 	     i += (long long)gridDim.x * blockDim.x) {
@@ -38,13 +40,17 @@ __global__ void multiAdamKernel(AdamArgs a, long long total, float b1, float b2,
 		const float v = b2 * a.v[t][j] + (1.0f - b2) * g * g;
 		a.m[t][j] = m;
 		a.v[t][j] = v;
-		a.p[t][j] -= a.step_size[t] * m / (sqrtf(v) / bc2_sqrt + eps);
+		const float p = a.p[t][j] - a.step_size[t] * m / (sqrtf(v) / bc2_sqrt + eps);
+		a.p[t][j] = p;
+		// torch.lerp_(ema, p, w) for w < 0.5: ema + w * (p - ema)
+		if (EMA) { const float e = a.e[t][j]; a.e[t][j] = e + ema_w * (p - e); }
 	}
 }
 
-void multi_adam_(std::vector<torch::Tensor> params, std::vector<torch::Tensor> grads,
-                 std::vector<torch::Tensor> exp_avgs, std::vector<torch::Tensor> exp_avg_sqs,
-                 std::vector<double> lrs, int64_t step, double beta1, double beta2, double eps)
+static void multi_adam_impl(std::vector<torch::Tensor>& params, std::vector<torch::Tensor>& grads,
+                 std::vector<torch::Tensor>& exp_avgs, std::vector<torch::Tensor>& exp_avg_sqs,
+                 std::vector<double>& lrs, int64_t step, double beta1, double beta2, double eps,
+                 std::vector<torch::Tensor>* emas, double ema_w)
 {
 	const int n = params.size();
 	TORCH_CHECK(n > 0 && n <= MAX_TENSORS, "multi_adam_: 1..8 tensors");
@@ -67,11 +73,38 @@ void multi_adam_(std::vector<torch::Tensor> params, std::vector<torch::Tensor> g
 		total += params[t].numel();
 		a.end[t] = total;
 		a.step_size[t] = (float)(lrs[t] / bc1);
+		a.e[t] = nullptr;
+		if (emas) {
+			auto& x = (*emas)[t];
+			TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kFloat32 && x.is_contiguous() &&
+			            x.numel() == params[t].numel(), "multi_adam_ema_: bad EMA buffer");
+			a.e[t] = x.data_ptr<float>();
+		}
 	}
 	if (total == 0) return;
 	const float bc2_sqrt = (float)std::sqrt(1.0 - std::pow(beta2, (double)step));
 	const int threads = 256;
 	const long long blocks = std::min<long long>((total + threads - 1) / threads, 108 * 16);
-	multiAdamKernel<<<(int)blocks, threads>>>(a, total, (float)beta1, (float)beta2, bc2_sqrt, (float)eps);
+	if (emas)
+		multiAdamKernel<true><<<(int)blocks, threads>>>(a, total, (float)beta1, (float)beta2, bc2_sqrt, (float)eps, (float)ema_w);
+	else
+		multiAdamKernel<false><<<(int)blocks, threads>>>(a, total, (float)beta1, (float)beta2, bc2_sqrt, (float)eps, 0.0f);
 	C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void multi_adam_(std::vector<torch::Tensor> params, std::vector<torch::Tensor> grads,
+                 std::vector<torch::Tensor> exp_avgs, std::vector<torch::Tensor> exp_avg_sqs,
+                 std::vector<double> lrs, int64_t step, double beta1, double beta2, double eps)
+{
+	multi_adam_impl(params, grads, exp_avgs, exp_avg_sqs, lrs, step, beta1, beta2, eps, nullptr, 0.0);
+}
+
+// Same step, plus emas[t] = lerp(emas[t], new params[t], ema_w) in the same pass.
+void multi_adam_ema_(std::vector<torch::Tensor> params, std::vector<torch::Tensor> grads,
+                     std::vector<torch::Tensor> exp_avgs, std::vector<torch::Tensor> exp_avg_sqs,
+                     std::vector<double> lrs, int64_t step, double beta1, double beta2, double eps,
+                     std::vector<torch::Tensor> emas, double ema_w)
+{
+	TORCH_CHECK(emas.size() == params.size(), "multi_adam_ema_: list length mismatch");
+	multi_adam_impl(params, grads, exp_avgs, exp_avg_sqs, lrs, step, beta1, beta2, eps, &emas, ema_w);
 }

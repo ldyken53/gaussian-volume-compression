@@ -513,11 +513,16 @@ void CudaRasterizer::Rasterizer::backward(
 		radii,
 		(glm::vec3*)scales,
 		(glm::vec4*)rotations,
-		geomState.conic,
+		(const float*)geomState.packed,
 		scale_modifier,
 		dL_dconic,
 		(glm::vec3*)dL_dscale,
-		(glm::vec4*)dL_drot), debug);
+		(glm::vec4*)dL_drot,
+		values,
+		weights,
+		dL_dmean3D,
+		dL_dvalue,
+		dL_dweights), debug);
 	if (debug) cudaEventRecord(events[3]);
 
 	if (debug) {

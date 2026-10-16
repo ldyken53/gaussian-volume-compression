@@ -14,7 +14,6 @@ namespace {
 
 constexpr float CAP_EPS = 1e-8f;    // _apply_cap: r = ||s|| + 1e-8
 constexpr float NORM_EPS = 1e-12f;  // F.normalize default eps
-constexpr float FN_THRESH = 0.011f; // train.py: clamp(0.011 - weights, min=0)
 
 __device__ __forceinline__ float sigmoidf(float x) { return 1.0f / (1.0f + expf(-x)); }
 
@@ -81,18 +80,25 @@ __global__ void actBackward(int N, const float* __restrict__ rs, const float* __
 	dw[i] = gw[i] * w * (1.0f - w);
 }
 
-// acc = [sum (c-g)^2, sum fn_vals, count(fn_vals > 0)] with
-// fn_vals = clamp(0.011 - w, 0) * ((g != -1) & (w > 0)).
+// FN term per cell, on m = (g != -1) & (w > 0):
+//   mode 0 (linear hinge): clamp(tau - w, 0)
+//   mode 1 (log barrier):  clamp(log(tau / (w + 0.01 tau)), 0)
+__device__ __forceinline__ float fnValue(int mode, float tau, float w, bool m)
+{
+	if (!m) return 0.0f;
+	return mode == 0 ? fmaxf(tau - w, 0.0f) : fmaxf(logf(tau / (w + 0.01f * tau)), 0.0f);
+}
+
+// acc = [sum (c-g)^2, sum fn_vals, count(fn_vals > 0)].
 __global__ void lossReduce(long long N, const float* __restrict__ c, const float* __restrict__ g,
-	const float* __restrict__ w, double* __restrict__ acc)
+	const float* __restrict__ w, int mode, float tau, double* __restrict__ acc)
 {
 	float e = 0.0f, fv = 0.0f, cnt = 0.0f;
 	for (long long i = blockIdx.x * (long long)blockDim.x + threadIdx.x; i < N;
 	     i += (long long)gridDim.x * blockDim.x) {
 		const float d = c[i] - g[i];
 		e += d * d;
-		const bool m = (g[i] != -1.0f) && (w[i] > 0.0f);
-		const float v = m ? fmaxf(FN_THRESH - w[i], 0.0f) : 0.0f;
+		const float v = fnValue(mode, tau, w[i], (g[i] != -1.0f) && (w[i] > 0.0f));
 		fv += v;
 		cnt += (v > 0.0f) ? 1.0f : 0.0f;
 	}
@@ -126,7 +132,7 @@ __global__ void lossEpilogue(long long N, const double* __restrict__ acc, float 
 }
 
 __global__ void lossBackward(long long N, const float* __restrict__ c, const float* __restrict__ g,
-	const float* __restrict__ w, const double* __restrict__ acc, float fn_reg,
+	const float* __restrict__ w, const double* __restrict__ acc, float fn_reg, int mode, float tau,
 	const float* __restrict__ gout, float* __restrict__ dc, float* __restrict__ dw)
 {
 	// out = [l_v + fn, l_v, fn], so each component's gradient feeds its terms.
@@ -136,8 +142,13 @@ __global__ void lossBackward(long long N, const float* __restrict__ c, const flo
 	     i += (long long)gridDim.x * blockDim.x) {
 		dc[i] = kv * (c[i] - g[i]);
 		// clamp_min's gradient passes where its input >= min (torch convention).
-		const bool on = (g[i] != -1.0f) && (w[i] > 0.0f) && (FN_THRESH - w[i] >= 0.0f);
-		dw[i] = on ? kf : 0.0f;
+		const bool m = (g[i] != -1.0f) && (w[i] > 0.0f);
+		if (mode == 0) {
+			dw[i] = (m && tau - w[i] >= 0.0f) ? kf : 0.0f;
+		} else {
+			const float d = w[i] + 0.01f * tau;           // d/dw log(tau/d) = -1/d
+			dw[i] = (m && logf(tau / d) >= 0.0f) ? kf / d : 0.0f;
+		}
 	}
 }
 
@@ -179,7 +190,8 @@ std::vector<torch::Tensor> fused_act_backward(torch::Tensor rs, torch::Tensor rq
 }
 
 // Returns (out[3] = [loss, l_v, fn], acc[3] doubles kept for the backward).
-std::vector<torch::Tensor> fused_loss_forward(torch::Tensor c, torch::Tensor g, torch::Tensor w, double fn_reg)
+std::vector<torch::Tensor> fused_loss_forward(torch::Tensor c, torch::Tensor g, torch::Tensor w, double fn_reg,
+                                              int64_t mode, double tau)
 {
 	check(c, "cells"); check(g, "gt"); check(w, "weights");
 	TORCH_CHECK(c.numel() == g.numel() && c.numel() == w.numel(), "fused_loss: size mismatch");
@@ -187,7 +199,7 @@ std::vector<torch::Tensor> fused_loss_forward(torch::Tensor c, torch::Tensor g, 
 	auto acc = torch::zeros({3}, c.options().dtype(torch::kFloat64));
 	auto out = torch::empty({3}, c.options());
 	const int blocks = (int)std::min<long long>((N + 255) / 256, 108 * 8);
-	lossReduce<<<blocks, 256>>>(N, c.data_ptr<float>(), g.data_ptr<float>(), w.data_ptr<float>(), acc.data_ptr<double>());
+	lossReduce<<<blocks, 256>>>(N, c.data_ptr<float>(), g.data_ptr<float>(), w.data_ptr<float>(), (int)mode, (float)tau, acc.data_ptr<double>());
 	C10_CUDA_KERNEL_LAUNCH_CHECK();
 	lossEpilogue<<<1, 1>>>(N, acc.data_ptr<double>(), (float)fn_reg, out.data_ptr<float>());
 	C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -195,14 +207,14 @@ std::vector<torch::Tensor> fused_loss_forward(torch::Tensor c, torch::Tensor g, 
 }
 
 std::vector<torch::Tensor> fused_loss_backward(torch::Tensor c, torch::Tensor g, torch::Tensor w,
-	torch::Tensor acc, double fn_reg, torch::Tensor gout)
+	torch::Tensor acc, double fn_reg, int64_t mode, double tau, torch::Tensor gout)
 {
 	check(c, "cells"); check(g, "gt"); check(w, "weights"); check(gout, "grad");
 	const long long N = c.numel();
 	auto dc = torch::empty_like(c), dw = torch::empty_like(w);
 	const int blocks = (int)std::min<long long>((N + 255) / 256, 108 * 16);
 	lossBackward<<<blocks, 256>>>(N, c.data_ptr<float>(), g.data_ptr<float>(), w.data_ptr<float>(),
-		acc.data_ptr<double>(), (float)fn_reg, gout.data_ptr<float>(), dc.data_ptr<float>(), dw.data_ptr<float>());
+		acc.data_ptr<double>(), (float)fn_reg, (int)mode, (float)tau, gout.data_ptr<float>(), dc.data_ptr<float>(), dw.data_ptr<float>());
 	C10_CUDA_KERNEL_LAUNCH_CHECK();
 	return {dc, dw};
 }

@@ -10,6 +10,7 @@ namespace cg = cooperative_groups;
 template<int C>
 __global__ void preprocessCUDA(int P,
 	const float trunc_frac,
+	const int gauss_cut,
 	const float* means3D,
 	const glm::vec3* scales,
 	const float scale_modifier,
@@ -41,14 +42,34 @@ __global__ void preprocessCUDA(int P,
 	blocks_touched[idx] = 0;
 	radii[idx] = 0;
 
+#if FUSE_ACT
+	glm::vec3 scale; glm::vec4 rot;
+	{
+		const float* rs = (const float*)scales;
+		const float* rq = (const float*)rotations;
+		const float M = scale_modifier;
+		const float s0 = expf(rs[3 * idx]), s1 = expf(rs[3 * idx + 1]), s2 = expf(rs[3 * idx + 2]);
+		const float r = sqrtf(s0 * s0 + s1 * s1 + s2 * s2) + ACT_CAP_EPS;
+		const float f = M * tanhf(r / M) / r;
+		scale = glm::vec3(s0 * f, s1 * f, s2 * f);
+		const float q0 = rq[4 * idx], q1 = rq[4 * idx + 1], q2 = rq[4 * idx + 2], q3 = rq[4 * idx + 3];
+		const float inv = 1.0f / fmaxf(sqrtf(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3), ACT_NORM_EPS);
+		rot = glm::vec4(q0 * inv, q1 * inv, q2 * inv, q3 * inv);
+	}
+	const float act_v = act_sigmoid(values[idx]), act_w = act_sigmoid(weights[idx]);
+	const float smod = 1.0f;
+#else
 	auto scale = scales[idx];
 	auto rot = rotations[idx];
+	const float act_v = values[idx], act_w = weights[idx];
+	const float smod = scale_modifier;
+#endif
 	
 	// Create scaling matrix
 	glm::mat3 S = glm::mat3(1.0f);
-	S[0][0] = scale_modifier * scale.x;
-	S[1][1] = scale_modifier * scale.y;
-	S[2][2] = scale_modifier * scale.z;
+	S[0][0] = smod * scale.x;
+	S[1][1] = smod * scale.y;
+	S[2][2] = smod * scale.z;
 
 	// Normalize quaternion to get valid rotation (commented out for some reason?)
 	glm::vec4 q = rot;// / glm::length(rot);
@@ -89,22 +110,28 @@ __global__ void preprocessCUDA(int P,
     const float f = cov[5]; // Sigma[2][2]
     const float det = a * (d * f - e * e) - b * (b * f - c * e) + c * (b * e - c * d);
     const float det_inv = 1.0 / det;
-    conic[idx * 6] = (d * f - e * e) * det_inv;
-    conic[idx * 6 + 1] = (c * e - b * f) * det_inv;
-    conic[idx * 6 + 2] = (b * e - c * d) * det_inv;
-    conic[idx * 6 + 3] = (a * f - c * c) * det_inv;
-    conic[idx * 6 + 4] = (b * c - a * e) * det_inv;
-    conic[idx * 6 + 5] = (a * d - b * b) * det_inv;
+	// Kept in registers: packed carries it to both renders and to backward preprocess.
+	const float cn[6] = {
+		(d * f - e * e) * (float)det_inv, (c * e - b * f) * (float)det_inv, (b * e - c * d) * (float)det_inv,
+		(a * f - c * c) * (float)det_inv, (b * c - a * e) * (float)det_inv, (a * d - b * b) * (float)det_inv };
 
 	// Number of std devs at which this Gaussian's contribution falls below the cutoff.
-	float m = sqrtf(-2 * logf((trunc_frac * WEIGHT_CUTOFF) / weights[idx]));
+	// GAUSS_CUTOFF env 2: weight-independent support, G >= T for every Gaussian (a fixed
+	// sqrt(2 ln(1/T)) sigmas), instead of the absolute w * G >= T.
+	float m = gauss_cut == 2 ? sqrtf(-2.0f * logf(trunc_frac * WEIGHT_CUTOFF))
+	                         : sqrtf(-2 * logf((trunc_frac * WEIGHT_CUTOFF) / act_w));
 
 	const float3 position = { means3D[3 * idx], means3D[3 * idx + 1], means3D[3 * idx + 2] };
-	means[idx] = position;
-	const float* cn = conic + idx * 6;
-	packed[3 * idx + 0] = make_float4(position.x, position.y, position.z, values[idx]);
-	packed[3 * idx + 1] = make_float4(weights[idx], cn[0], cn[1], cn[2]);
+	packed[3 * idx + 0] = make_float4(position.x, position.y, position.z, act_v);
+	packed[3 * idx + 1] = make_float4(act_w, cn[0], cn[1], cn[2]);
+#if GAUSS_CUTOFF
+	// Slot w carries the Gaussian's own cutoff qmax = m^2 (negative when w < T: no support),
+	// or the old blanket 28 when the GAUSS_CUTOFF env switch is 0.
+	packed[3 * idx + 2] = make_float4(cn[3], cn[4], cn[5],
+		gauss_cut ? m * m : 28.0f);
+#else
 	packed[3 * idx + 2] = make_float4(cn[3], cn[4], cn[5], 0.0f);
+#endif
 
 	// Tight axis-aligned bounds of the m-sigma ellipsoid {(x-u)^T Sigma^-1 (x-u) <= m^2},
 	// which is exactly the region the conic above is nonzero over: ext_d = m * sqrt(Sigma_dd).
@@ -154,10 +181,7 @@ __global__ void preprocessCUDA(int P,
 	// clamped[idx] = (values[idx] < 0.0f) || (values[idx] > 1.0f);
     // values_out[idx] = glm::clamp(values[idx], 0.0f, 1.0f); 
 	// weights_out[idx] = glm::clamp(weights[idx], 0.0f, 1.0f); 
-	clamped[idx] = false;
-    values_out[idx] = values[idx]; 
-	weights_out[idx] = weights[idx]; 
-    volumes[idx] = static_cast<float>(block_dims.x * block_dims.y * block_dims.z);
+	// means / values_out / weights_out / volumes / clamped / conic are never read: not written.
 }
 
 // Main rasterization method. Collaboratively works on one tile per
@@ -227,7 +251,7 @@ renderCUDA(
 			const float4 p1 = packed[3 * coll_id + 1], p2 = packed[3 * coll_id + 2];
 			collected[3 * rank + 0] = packed[3 * coll_id + 0];
 			collected[3 * rank + 1] = make_float4(p1.x, p1.y, 2.0f * p1.z, 2.0f * p1.w);
-			collected[3 * rank + 2] = make_float4(p2.x, 2.0f * p2.y, p2.z, 0.0f);
+			collected[3 * rank + 2] = make_float4(p2.x, 2.0f * p2.y, p2.z, p2.w);
 		}
 		block.sync();
 
@@ -241,7 +265,11 @@ renderCUDA(
 			const float t0 = fmaf(p1.w, dz, fmaf(p1.z, dy, p1.y * dx));
 			const float t1 = fmaf(p2.y, dz, p2.x * dy);
 			const float q  = fmaf(dx, t0, fmaf(dy, t1, p2.z * dz * dz));
+#if GAUSS_CUTOFF
+			if (!(q >= 0.0f && q <= p2.w)) continue;
+#else
 			if (!(q >= 0.0f && q <= 28.0f)) continue;
+#endif
 			const float weight = p1.x * __expf(-0.5f * q);
 			accumulated_value  += p0.w * weight;
 			accumulated_weight += weight;
@@ -341,9 +369,17 @@ void FORWARD::preprocess(int P,
 		trunc_frac = e ? (float)atof(e) : (float)TRUNC_FRAC;
 		if (e) printf("[rasterizer] TRUNC_FRAC override: %.3f\n", trunc_frac);
 	}
+	static int gauss_cut = -1;
+	if (gauss_cut < 0) {
+		const char* g = getenv("GAUSS_CUTOFF");
+		gauss_cut = g ? atoi(g) : 1;
+		printf("[rasterizer] per-Gaussian cutoff %s >= %.1e: %s\n", gauss_cut == 2 ? "G" : "w*G",
+		       trunc_frac * WEIGHT_CUTOFF, gauss_cut ? "on" : "off (blanket q <= 28 in each binned tile)");
+	}
 	preprocessCUDA<NUM_CHANNELS> <<<(P + 255) / 256, 256>>> (
 		P,
 		trunc_frac,
+		gauss_cut,
 		means3D,
 		scales,
 		scale_modifier,

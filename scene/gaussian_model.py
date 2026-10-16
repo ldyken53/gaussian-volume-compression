@@ -233,7 +233,10 @@ class GaussianModel:
             max_steps=training_args.position_lr_max_steps,
         )
 
-    def optimizer_step(self):
+    _EMA_ATTR = {"xyz": "_xyz", "weight": "_weight", "scaling": "_scaling",
+                 "rotation": "_rotation", "value": "_values"}
+
+    def optimizer_step(self, ema=None, ema_w=0.0):
         """optimizer.step(), but as ONE kernel over all five parameter tensors.
 
         torch's fused Adam launches once per param group with one block per 65536
@@ -271,11 +274,20 @@ class GaussianModel:
             return
         self._adam_t += 1
         b1, b2 = groups[0]["betas"]
-        _dgr_C.multi_adam_([p.data for p in ps], [p.grad for p in ps],
-                           [st["exp_avg"] for st in states], [st["exp_avg_sq"] for st in states],
-                           [float(g["lr"]) for g in groups], self._adam_t,
-                           float(b1), float(b2), float(groups[0]["eps"]))
+        args = ([p.data for p in ps], [p.grad for p in ps],
+                [st["exp_avg"] for st in states], [st["exp_avg_sq"] for st in states],
+                [float(g["lr"]) for g in groups], self._adam_t,
+                float(b1), float(b2), float(groups[0]["eps"]))
+        fused_ema = (ema is not None and len(groups) == len(opt.param_groups)
+                     and hasattr(_dgr_C, "multi_adam_ema_") and os.environ.get("FUSED_EMA", "1") != "0")
+        if fused_ema:
+            # The Polyak-average update rides along in the same pass over the parameters
+            # (saves a full extra read+write of every parameter and its average).
+            _dgr_C.multi_adam_ema_(*args, [ema[self._EMA_ATTR[g["name"]]] for g in groups], float(ema_w))
+        else:
+            _dgr_C.multi_adam_(*args)
         torch._foreach_add_([st["step"] for st in states], 1.0)
+        return fused_ema
 
     def update_learning_rate(self, iteration):
         """Learning rate scheduling per step"""
@@ -814,6 +826,8 @@ class GaussianModel:
         def full():
             return distCUDA2(torch.cat([old, new_pts], dim=0))[n_old:]
         if k == 0 or 8 * k > n_old:
+            # Large batches (the growth phase) are faster through the full pass: the
+            # chunked grid search measured 1.6-2.4 s vs 0.24-0.72 s at 3.3-3.5M queries.
             return full()
         dev = old.device
         pts = torch.cat([old, new_pts], dim=0)
@@ -832,32 +846,88 @@ class GaussianModel:
             order = torch.argsort(lin)
             counts = torch.bincount(lin, minlength=int(torch.prod(G)))
             starts = torch.cumsum(counts, 0) - counts
-            raw = c[n_old + todo][:, None, :] + offs[None]                     # (q, 27, 3)
-            # Out-of-grid neighbours must be dropped, not clamped: clamping maps two of a
-            # boundary cell's neighbours onto the same cell and counts its points twice.
-            inb = ((raw >= 0) & (raw < G)).all(-1)
-            qc = raw.clamp_min(0).minimum(G - 1)
-            nb = (qc[..., 2] * G[1] + qc[..., 1]) * G[0] + qc[..., 0]          # (q, 27)
-            cnt = counts[nb] * inb
-            M = int(cnt.max())
-            if M == 0:
-                continue
-            ar = torch.arange(M, device=dev)
-            slot = (starts[nb][..., None] + ar).clamp(max=P - 1)                # (q, 27, M)
-            idx = order[slot].reshape(todo.shape[0], -1)
-            valid = (ar < cnt[..., None]).reshape(todo.shape[0], -1)
-            valid &= idx != (n_old + todo)[:, None]                             # not itself
-            d2 = ((pts[idx] - new_pts[todo][:, None, :]) ** 2).sum(-1)
-            d2 = d2.masked_fill(~valid, float("inf"))
-            if d2.shape[1] < 3:
-                continue
-            best = torch.topk(d2, 3, dim=1, largest=False, sorted=True).values
-            ok = best[:, 2] <= R * R
-            out[todo[ok]] = (best[ok, 0] + best[ok, 1] + best[ok, 2]) / 3.0
-            todo = todo[~ok]
+            # Queries go in chunks sized to the densest cell, so a densification event that
+            # adds millions of points (64x growth phase) no longer falls back to the full
+            # O(P^2) pass: the (chunk, 27, M) candidate tensors stay under ~6e7 entries.
+            chunk = max(1024, int(6e7 // (27 * max(1, int(counts.max())))))
+            unresolved = []
+            for ch in torch.split(todo, chunk):
+                raw = c[n_old + ch][:, None, :] + offs[None]                       # (q, 27, 3)
+                # Out-of-grid neighbours must be dropped, not clamped: clamping maps two of a
+                # boundary cell's neighbours onto the same cell and counts its points twice.
+                inb = ((raw >= 0) & (raw < G)).all(-1)
+                qc = raw.clamp_min(0).minimum(G - 1)
+                nb = (qc[..., 2] * G[1] + qc[..., 1]) * G[0] + qc[..., 0]          # (q, 27)
+                cnt = counts[nb] * inb
+                M = int(cnt.max())
+                if M == 0:
+                    unresolved.append(ch)
+                    continue
+                ar = torch.arange(M, device=dev)
+                slot = (starts[nb][..., None] + ar).clamp(max=P - 1)                # (q, 27, M)
+                idx = order[slot].reshape(ch.shape[0], -1)
+                valid = (ar < cnt[..., None]).reshape(ch.shape[0], -1)
+                valid &= idx != (n_old + ch)[:, None]                               # not itself
+                d2 = ((pts[idx] - new_pts[ch][:, None, :]) ** 2).sum(-1)
+                d2 = d2.masked_fill(~valid, float("inf"))
+                if d2.shape[1] < 3:
+                    unresolved.append(ch)
+                    continue
+                best = torch.topk(d2, 3, dim=1, largest=False, sorted=True).values
+                ok = best[:, 2] <= R * R
+                out[ch[ok]] = (best[ok, 0] + best[ok, 1] + best[ok, 2]) / 3.0
+                unresolved.append(ch[~ok])
+            todo = torch.cat(unresolved)
             if todo.numel() == 0:
                 return out
-        return full()
+        out[todo] = full()[todo]
+        return out
+
+    def _write_rows(self, idx, d):
+        """Overwrite rows idx of every parameter in place with d[group name], zero their Adam
+        moments and restart their EMA. Clears all grads, so this iteration's Adam step is
+        skipped -- as it is after prune/cat, which hands Adam fresh grad-less Parameters."""
+        with torch.no_grad():
+            for group in self.optimizer.param_groups:
+                p = group["params"][0]
+                p.data[idx] = d[group["name"]].to(p.dtype)
+                st = self.optimizer.state.get(p, None)
+                if st:
+                    st["exp_avg"][idx] = 0.0
+                    st["exp_avg_sq"][idx] = 0.0
+                p.grad = None
+        self._ema_reset(idx)
+
+    def densify_in_place(self, empty_points, empty_values, new_scale, new_weight, min_weight):
+        """densify_in_empty + prune, but new Gaussians take the dead Gaussians' rows instead
+        of being appended after a full-size prune. Once the budget is full every event
+        replaces exactly as many as it prunes, and prune/cat copied all ~10M rows of the five
+        parameters, their Adam moments and EMA (~75 ms/event at richtmyer 64x); this writes
+        only the replaced rows. Only the order of the Gaussians differs."""
+        d = self._new_gaussians(empty_points, empty_values, new_weight)
+        k = empty_points.shape[0]
+        slots = torch.nonzero((self.get_weight <= min_weight).squeeze(-1)).squeeze(-1)
+        m = min(k, slots.numel())
+        if m > 0:
+            self._write_rows(slots[:m], {n: v[:m] for n, v in d.items()})
+        if k > m:
+            self.densification_postfix(*(d[n][m:] for n in ("xyz", "weight", "scaling", "rotation", "value")))
+        elif slots.numel() > m:
+            mask = torch.zeros(self._xyz.shape[0], dtype=torch.bool, device=self._xyz.device)
+            mask[slots[m:]] = True
+            self.prune_points(mask)
+
+    def _new_gaussians(self, empty_points, empty_values, new_weight):
+        dist2 = torch.clamp_min(self._new_point_knn(empty_points) * 0.1, 0.0000001)
+        n = empty_points.shape[0]
+        rot = torch.zeros((n, 4), device="cuda"); rot[:, 0] = 1
+        return {
+            "xyz": empty_points,
+            "weight": self.inverse_weight_activation(new_weight * torch.ones((n, 1), dtype=torch.float, device="cuda")),
+            "scaling": self.inverse_scaling_activation(torch.sqrt(dist2))[..., None].repeat(1, 3),
+            "rotation": rot,
+            "value": self.inverse_value_activation(torch.clamp(empty_values, VALUE_EPS, 1.0 - VALUE_EPS)),
+        }
 
     def densify_in_empty(self, empty_points, empty_values, new_scale, new_weight):
         dist2 = torch.clamp_min(self._new_point_knn(empty_points) * 0.1, 0.0000001)
@@ -934,6 +1004,9 @@ class GaussianModel:
                     if remaining is None or remaining > 0:
                         self.densify_and_split(
                             xyz_grads, max_grad, 1.0, max_new_points=remaining)
+            elif os.environ.get("DENSIFY_INPLACE", "1") != "0":
+                self.densify_in_place(empty_points, empty_values, new_scale, new_weight, min_weight)
+                return
             else:
                 self.densify_in_empty(empty_points, empty_values, new_scale, new_weight)
 

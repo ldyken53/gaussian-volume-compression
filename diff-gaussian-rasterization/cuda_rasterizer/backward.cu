@@ -19,20 +19,55 @@ __global__ void preprocessCUDA(
 	const float scale_modifier,
 	const float* dL_dconics,
 	glm::vec3* dL_dscales,
-	glm::vec4* dL_drots)
+	glm::vec4* dL_drots,
+	const float* __restrict__ values,
+	const float* __restrict__ weights,
+	float* __restrict__ dL_dmeans,
+	float* __restrict__ dL_dvalues,
+	float* __restrict__ dL_dweights)
 {
 	auto idx = cg::this_grid().thread_rank();
-	if (idx >= P || !(radii[idx] > 0))
+	if (idx >= P)
 		return;
+	if (!(radii[idx] > 0)) {
+		// The outputs are allocated uninitialised, so culled Gaussians write their zeros.
+		dL_dscales[idx] = glm::vec3(0.0f);
+		dL_drots[idx] = glm::vec4(0.0f);
+#if FUSE_ACT
+		dL_dmeans[3 * idx] = dL_dmeans[3 * idx + 1] = dL_dmeans[3 * idx + 2] = 0.0f;
+		dL_dvalues[idx] = 0.0f;
+		dL_dweights[idx] = 0.0f;
+#endif
+		return;
+	}
 
+#if FUSE_ACT
+	// Recompute the activations exactly as forward preprocess did.
+	const float* rs = (const float*)scales;
+	const float* rq = (const float*)rotations;
+	const float Mcap = scale_modifier;
+	const float es0 = expf(rs[3 * idx]), es1 = expf(rs[3 * idx + 1]), es2 = expf(rs[3 * idx + 2]);
+	const float s_nrm = sqrtf(es0 * es0 + es1 * es1 + es2 * es2);
+	const float s_r = s_nrm + ACT_CAP_EPS;
+	const float s_t = tanhf(s_r / Mcap);
+	const float s_f = Mcap * s_t / s_r;
+	const glm::vec3 scale(es0 * s_f, es1 * s_f, es2 * s_f);
+	const float qx0 = rq[4 * idx], qx1 = rq[4 * idx + 1], qx2 = rq[4 * idx + 2], qx3 = rq[4 * idx + 3];
+	const float q_n = sqrtf(qx0 * qx0 + qx1 * qx1 + qx2 * qx2 + qx3 * qx3);
+	const float q_inv_f = 1.0f / fmaxf(q_n, ACT_NORM_EPS);
+	const glm::vec4 rot(qx0 * q_inv_f, qx1 * q_inv_f, qx2 * q_inv_f, qx3 * q_inv_f);
+	const float smod = 1.0f;
+#else
 	auto scale = scales[idx];
 	auto rot = rotations[idx];
+	const float smod = scale_modifier;
+#endif
 	
 	// Create scaling matrix
 	glm::mat3 S = glm::mat3(1.0f);
-	S[0][0] = scale_modifier * scale.x;
-	S[1][1] = scale_modifier * scale.y;
-	S[2][2] = scale_modifier * scale.z;
+	S[0][0] = smod * scale.x;
+	S[1][1] = smod * scale.y;
+	S[2][2] = smod * scale.z;
 
 	// Normalize quaternion to get valid rotation (commented out for some reason?)
 	glm::vec4 q = rot;// / glm::length(rot);
@@ -53,21 +88,27 @@ __global__ void preprocessCUDA(
 	// Compute 3D world covariance matrix Sigma
 	glm::mat3 Sigma = glm::transpose(M) * M;
 
+	// conics is the packed render record: (mean, value), (weight, cxx, cxy, cxz), (cyy, cyz, czz, -).
 	float conic[6] = {
-		conics[6 * idx],
-		conics[6 * idx + 1],
-		conics[6 * idx + 2],
-		conics[6 * idx + 3],
-		conics[6 * idx + 4],
-		conics[6 * idx + 5],
+		conics[12 * idx + 5],
+		conics[12 * idx + 6],
+		conics[12 * idx + 7],
+		conics[12 * idx + 8],
+		conics[12 * idx + 9],
+		conics[12 * idx + 10],
 	};
+#if PACKED_GRAD
+	const int gs = 12;
+#else
+	const int gs = 6;
+#endif
 	float dL_dconic[6] = {
-		dL_dconics[6 * idx],
-		dL_dconics[6 * idx + 1],
-		dL_dconics[6 * idx + 2],
-		dL_dconics[6 * idx + 3],
-		dL_dconics[6 * idx + 4],
-		dL_dconics[6 * idx + 5],
+		dL_dconics[gs * idx],
+		dL_dconics[gs * idx + 1],
+		dL_dconics[gs * idx + 2],
+		dL_dconics[gs * idx + 3],
+		dL_dconics[gs * idx + 4],
+		dL_dconics[gs * idx + 5],
 	};
 
 	// // Compute dL_dcov as -conic * dL_dconic * conic
@@ -135,13 +176,27 @@ __global__ void preprocessCUDA(
 
 	// Gradients of loss w.r.t. scale
 	glm::vec3* dL_dscale = dL_dscales + idx;
-	dL_dscale->x = scale_modifier * glm::dot(Rt[0], dL_dMt[0]);
-	dL_dscale->y = scale_modifier * glm::dot(Rt[1], dL_dMt[1]);
-	dL_dscale->z = scale_modifier * glm::dot(Rt[2], dL_dMt[2]);
+	const float gsx = smod * glm::dot(Rt[0], dL_dMt[0]);
+	const float gsy = smod * glm::dot(Rt[1], dL_dMt[1]);
+	const float gsz = smod * glm::dot(Rt[2], dL_dMt[2]);
+#if FUSE_ACT
+	{
+		// Soft cap + exp chain rule (fused_ops.cu actBackward).
+		const float fp = ((1.0f - s_t * s_t) * s_r - Mcap * s_t) / (s_r * s_r);
+		const float c = (s_nrm > 0.0f) ? (gsx * es0 + gsy * es1 + gsz * es2) * fp / s_nrm : 0.0f;
+		dL_dscale->x = (gsx * s_f + c * es0) * es0;
+		dL_dscale->y = (gsy * s_f + c * es1) * es1;
+		dL_dscale->z = (gsz * s_f + c * es2) * es2;
+	}
+#else
+	dL_dscale->x = gsx;
+	dL_dscale->y = gsy;
+	dL_dscale->z = gsz;
+#endif
 
-	dL_dMt[0] *= scale_modifier * scale.x;
-	dL_dMt[1] *= scale_modifier * scale.y;
-	dL_dMt[2] *= scale_modifier * scale.z;
+	dL_dMt[0] *= smod * scale.x;
+	dL_dMt[1] *= smod * scale.y;
+	dL_dMt[2] *= smod * scale.z;
 	glm::vec4 dL_dq;
 	dL_dq.x = 2 * z * (dL_dMt[0][1] - dL_dMt[1][0]) + 2 * y * (dL_dMt[2][0] - dL_dMt[0][2]) + 2 * x * (dL_dMt[1][2] - dL_dMt[2][1]);
 	dL_dq.y = 2 * y * (dL_dMt[1][0] + dL_dMt[0][1]) + 2 * z * (dL_dMt[2][0] + dL_dMt[0][2]) + 2 * r * (dL_dMt[1][2] - dL_dMt[2][1]) - 4 * x * (dL_dMt[2][2] + dL_dMt[1][1]);
@@ -149,7 +204,27 @@ __global__ void preprocessCUDA(
 	dL_dq.w = 2 * r * (dL_dMt[0][1] - dL_dMt[1][0]) + 2 * x * (dL_dMt[2][0] + dL_dMt[0][2]) + 2 * y * (dL_dMt[1][2] + dL_dMt[2][1]) - 4 * z * (dL_dMt[1][1] + dL_dMt[0][0]);
 	// Gradients of loss w.r.t. unnormalized quaternion
 	float4* dL_drot = (float4*)(dL_drots + idx);
-	*dL_drot = float4{ dL_dq.x, dL_dq.y, dL_dq.z, dL_dq.w };//dnormvdv(float4{ rot.x, rot.y, rot.z, rot.w }, float4{ dL_dq.x, dL_dq.y, dL_dq.z, dL_dq.w });
+#if FUSE_ACT
+	// Normalise chain rule, then the sigmoids, then the mean / value / weight gradients
+	// straight out of the packed row (conic[6], mean[3], value, weight, pad).
+	if (q_n >= ACT_NORM_EPS) {
+		const float inv = 1.0f / q_n;
+		const float y0 = qx0 * inv, y1 = qx1 * inv, y2 = qx2 * inv, y3 = qx3 * inv;
+		const float yg = y0 * dL_dq.x + y1 * dL_dq.y + y2 * dL_dq.z + y3 * dL_dq.w;
+		*dL_drot = float4{ (dL_dq.x - y0 * yg) * inv, (dL_dq.y - y1 * yg) * inv,
+		                   (dL_dq.z - y2 * yg) * inv, (dL_dq.w - y3 * yg) * inv };
+	} else {
+		const float inv = 1.0f / ACT_NORM_EPS;
+		*dL_drot = float4{ dL_dq.x * inv, dL_dq.y * inv, dL_dq.z * inv, dL_dq.w * inv };
+	}
+	const float* gr = dL_dconics + 12 * idx;
+	dL_dmeans[3 * idx] = gr[6]; dL_dmeans[3 * idx + 1] = gr[7]; dL_dmeans[3 * idx + 2] = gr[8];
+	const float v = act_sigmoid(values[idx]), w = act_sigmoid(weights[idx]);
+	dL_dvalues[idx] = gr[9] * v * (1.0f - v);
+	dL_dweights[idx] = gr[10] * w * (1.0f - w);
+#else
+	*dL_drot = float4{ dL_dq.x, dL_dq.y, dL_dq.z, dL_dq.w };
+#endif//dnormvdv(float4{ rot.x, rot.y, rot.z, rot.w }, float4{ dL_dq.x, dL_dq.y, dL_dq.z, dL_dq.w });
 }
 
 // Backward version of the rendering procedure.
@@ -235,6 +310,7 @@ __global__ void renderCUDA(
 		int point_idx = point_list[range.x + g];
 
 		const float4 p0 = packed[3 * point_idx], p1 = packed[3 * point_idx + 1], p2 = packed[3 * point_idx + 2];
+		const float qmax = p2.w;
 		const float3 mean = make_float3(p0.x, p0.y, p0.z);
 		const float value = p0.w, w = p1.x;
 		const float con_xx = p1.y, con_xy = p1.z, con_xz = p1.w;
@@ -246,6 +322,7 @@ __global__ void renderCUDA(
 		// -1/2 are applied once after the loop.
 		float s_v = 0.0f, s_q = 0.0f, Gx = 0.0f, Gy = 0.0f, Gz = 0.0f;
 		float xx = 0.0f, xy = 0.0f, xz = 0.0f, yy = 0.0f, yz = 0.0f, zz = 0.0f;
+		bool hit = false;
 		for (uint32_t c = 0; c < num_cells_in_block; c++)
 		{
 			const float4 cp = s_cell[c];
@@ -253,8 +330,13 @@ __global__ void renderCUDA(
 			const float t0 = fmaf(c2xz, dz, fmaf(c2xy, dy, con_xx * dx));
 			const float t1 = fmaf(c2yz, dz, con_yy * dy);
 			const float q  = fmaf(dx, t0, fmaf(dy, t1, con_zz * dz * dz));
+#if GAUSS_CUTOFF
+			if (!(q >= 0.0f && q <= qmax)) continue;
+#else
 			if (!(q >= 0.0f && q <= 28.0f)) continue;
+#endif
 			const float e = __expf(-0.5f * q);
+			hit = true;
 			s_v = fmaf(cp.w, e, s_v);
 			const float qe = fmaf(cp.w, value, s_fc[c]) * e;
 			s_q += qe;
@@ -277,6 +359,23 @@ __global__ void renderCUDA(
 		const float dL_dmean_y = w * (con_xy * Gx + con_yy * Gy + con_yz * Gz);
 		const float dL_dmean_z = w * (con_xz * Gx + con_yz * Gy + con_zz * Gz);
 
+#if SKIP_EMPTY
+		if (!hit) continue;
+#endif
+#if PACKED_GRAD
+		float* gr = dL_dconic + 12 * point_idx;
+		atomicAdd(gr + 0, acc_dL_dxx);
+		atomicAdd(gr + 1, acc_dL_dxy);
+		atomicAdd(gr + 2, acc_dL_dxz);
+		atomicAdd(gr + 3, acc_dL_dyy);
+		atomicAdd(gr + 4, acc_dL_dyz);
+		atomicAdd(gr + 5, acc_dL_dzz);
+		atomicAdd(gr + 6, dL_dmean_x);
+		atomicAdd(gr + 7, dL_dmean_y);
+		atomicAdd(gr + 8, dL_dmean_z);
+		atomicAdd(gr + 9, acc_dL_dvalue);
+		atomicAdd(gr + 10, acc_dL_dw);
+#else
 		// Single atomic write per Gaussian — all cell contributions already accumulated
 		atomicAdd(&dL_dvalues[point_idx], acc_dL_dvalue);
 		atomicAdd(&dL_dweights[point_idx], acc_dL_dw);
@@ -291,6 +390,7 @@ __global__ void renderCUDA(
 		atomicAdd(&dL_dconic[point_idx * 6 + 3], acc_dL_dyy);
 		atomicAdd(&dL_dconic[point_idx * 6 + 4], acc_dL_dyz);
 		atomicAdd(&dL_dconic[point_idx * 6 + 5], acc_dL_dzz);
+#endif
 	}
 }
 
@@ -303,7 +403,12 @@ void BACKWARD::preprocess(
 	const float scale_modifier,
 	const float* dL_dconic,
 	glm::vec3* dL_dscale,
-	glm::vec4* dL_drot)
+	glm::vec4* dL_drot,
+	const float* values,
+	const float* weights,
+	float* dL_dmeans,
+	float* dL_dvalues,
+	float* dL_dweights)
 {
 	// Propagate gradients for remaining steps: using dL_dconics
 	// propagate back to scales and rotations
@@ -316,7 +421,12 @@ void BACKWARD::preprocess(
 		scale_modifier,
 		dL_dconic,
 		dL_dscale,
-		dL_drot);
+		dL_drot,
+		values,
+		weights,
+		dL_dmeans,
+		dL_dvalues,
+		dL_dweights);
 }
 
 void BACKWARD::render(
@@ -341,7 +451,7 @@ void BACKWARD::render(
 	float* dL_dweights
 )
 {
-	renderCUDA<NUM_CHANNELS> << <grid, 128 >> >(
+	renderCUDA<NUM_CHANNELS> << <grid, BWD_THREADS >> >(
 		grid,
 		ranges,
 		point_list,

@@ -11,20 +11,27 @@
 
 #include <torch/extension.h>
 #include "rasterize_points.h"
+#include "cuda_rasterizer/config.h"
+#define FUSE_ACT_FLAG FUSE_ACT
 #include <vector>
 void multi_adam_(std::vector<torch::Tensor>, std::vector<torch::Tensor>, std::vector<torch::Tensor>,
                  std::vector<torch::Tensor>, std::vector<double>, int64_t, double, double, double);
+void multi_adam_ema_(std::vector<torch::Tensor>, std::vector<torch::Tensor>, std::vector<torch::Tensor>,
+                     std::vector<torch::Tensor>, std::vector<double>, int64_t, double, double, double,
+                     std::vector<torch::Tensor>, double);
 std::vector<torch::Tensor> fused_act_forward(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double);
 std::vector<torch::Tensor> fused_act_backward(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double,
                                               torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor);
-std::vector<torch::Tensor> fused_loss_forward(torch::Tensor, torch::Tensor, torch::Tensor, double);
-std::vector<torch::Tensor> fused_loss_backward(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor);
+std::vector<torch::Tensor> fused_loss_forward(torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, double);
+std::vector<torch::Tensor> fused_loss_backward(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, double, torch::Tensor);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("rasterize_gaussians", &RasterizeGaussiansCUDA);
   m.def("rasterize_gaussians_backward", &RasterizeGaussiansBackwardCUDA);
   m.def("compute_relocation", &ComputeRelocationCUDA);
   m.def("multi_adam_", &multi_adam_);
+  m.attr("RAW_ACTIVATIONS") = (bool)FUSE_ACT_FLAG;
+  m.def("multi_adam_ema_", &multi_adam_ema_);
   m.def("fused_act_forward", &fused_act_forward);
   m.def("fused_act_backward", &fused_act_backward);
   m.def("fused_loss_forward", &fused_loss_forward);

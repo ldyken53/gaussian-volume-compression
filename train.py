@@ -191,6 +191,18 @@ def training(
     log_data = []
     first_iter = 0
     prepare_output(dataset)
+    if args.max_scale_k > 0:
+        # cap grows with the Gaussian spacing N^(-1/3); --max_scale is the floor
+        n_final = args.cap_max + 1000
+        args.max_scale = max(args.max_scale, args.max_scale_k * n_final ** (-1.0 / 3.0))
+        print(f"max_scale {args.max_scale:.4f} (k={args.max_scale_k}, N={n_final})")
+    with open(os.path.join(dataset.model_path, "max_scale"), "w") as _msf:
+        _msf.write(f"{args.max_scale}\n")
+    # The support rule the model was trained under; full_psnr.py restores it.
+    with open(os.path.join(dataset.model_path, "raster_env"), "w") as _ref:
+        for _k in ("TRUNC_FRAC", "GAUSS_CUTOFF"):
+            if _k in os.environ:
+                _ref.write(f"{_k}={os.environ[_k]}\n")
     gaussians = GaussianModel()
     gaussians.max_scale = args.max_scale
     scene = Scene(
@@ -198,7 +210,8 @@ def training(
         gaussians, 
         load_iteration=0 if args.model_path else None, 
         normalized=is_scaled, 
-        fraction=fraction)
+        fraction=fraction,
+        max_init=(args.init_share_max * (args.cap_max + 1000)) if args.init_share_max > 0 else None)
     gaussians.training_setup(opt)
     scene.save(0)
     if checkpoint:
@@ -382,10 +395,10 @@ def training(
         _nv(); _nv("loss")
         # l1_lv = l1_loss(cells, gt)
         # PSNR is MSE-based, so L2 optimises the reported metric directly.
-        if _fused_loss is not None and args.loss == "l2" and args.fn_mode == "abs" \
+        if _fused_loss is not None and args.loss == "l2" and args.fn_mode in ("abs", "log") \
                 and os.environ.get("FUSED", "1") != "0":
             # Same loss as the branch below, as 3 kernels instead of ~15 (+ ~12 backward).
-            _lo = _fused_loss(cells, gt, weights, args.fn_reg)
+            _lo = _fused_loss(cells, gt, weights, args.fn_reg, args.fn_mode, args.fn_thresh)
             loss, l1_lv, false_negative = _lo[0], _lo[1], _lo[2]
         else:
             err = (cells - gt) ** 2 if args.loss == "l2" else torch.abs(cells - gt)
@@ -411,7 +424,14 @@ def training(
             # and skips them in the backward pass, so they carry no gradient and would
             # only dilute the mean, weakening the push on the cells still recoverable.
             fn_mask = torch.logical_and(gt != -1, weights > 0.0)
-            fn_vals = torch.clamp(0.011 - weights, min=0) * fn_mask
+            if args.fn_mode == "log":
+                # Log barrier: push grows as 1/aw, so it is negligible for healthy cells and
+                # strongest where a cell is about to die -- the only failure left once every
+                # covered cell renders and has a gradient. eps caps it at 100/fn_thresh.
+                eps = 0.01 * args.fn_thresh
+                fn_vals = torch.clamp(torch.log(args.fn_thresh / (weights + eps)), min=0) * fn_mask
+            else:
+                fn_vals = torch.clamp(args.fn_thresh - weights, min=0) * fn_mask
             # "rel": fn_reg multiplies the current data loss instead of being an absolute
             # weight, so the FN term keeps a fixed ratio to the data term regardless of the
             # PSNR regime the dataset sits in. Ported from gaussian-volume to test whether a
@@ -578,7 +598,10 @@ def training(
             # Optimizer step
             _nv(); _nv("adam+ema")
             if iteration < opt.iterations:
-                gaussians.optimizer_step()
+                ema_ready = (args.ema > 0 and iteration >= args.ema_from and ema_params is not None
+                             and ema_params["_xyz"].shape[0] == gaussians._xyz.shape[0])
+                ema_done = gaussians.optimizer_step(ema=ema_params if ema_ready else None,
+                                                    ema_w=1.0 - args.ema)
                 gaussians.optimizer.zero_grad(set_to_none=True)
 
                 if args.ema > 0 and iteration >= args.ema_from:
@@ -595,7 +618,7 @@ def training(
                                   f"restarting the average")
                         ema_params = {n: cur[n].detach().clone() for n in ema_names}
                         gaussians.ema_buffers = ema_params
-                    else:
+                    elif not ema_done:
                         with torch.no_grad():
                             # One fused kernel for all five tensors: the per-group
                             # mul_/add_ pair was 10 launches and cost ~0.3s over a
@@ -720,6 +743,16 @@ def prepare_output(args):
     with open(os.path.join(args.model_path, "cfg_args"), "w") as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(args))))
 
+def vtk_node_count(path):
+    """Node count of a legacy structured-points .vtk, from its text header."""
+    with open(path, "rb") as f:
+        for _ in range(32):
+            tok = f.readline().decode("ascii", "replace").split()
+            if tok and tok[0].upper() == "DIMENSIONS":
+                return int(tok[1]) * int(tok[2]) * int(tok[3])
+    raise SystemExit(f"{path}: no DIMENSIONS line in the header; pass --cap_max")
+
+
 if __name__ == "__main__":
     window = create_window()
     # Set up command line argument parser
@@ -728,8 +761,16 @@ if __name__ == "__main__":
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
     parser.add_argument("--debug_from", type=int, default=-1)
-    parser.add_argument("--fraction", type=float, default=0.01)
+    parser.add_argument("--ratio", type=float, default=0.0,
+        help="compression ratio: sets --cap_max so training ends with nodes / (12 * ratio) Gaussians "
+             "(12 floats per Gaussian against one float per volume node)")
+    parser.add_argument("--fraction", type=float, default=0.00002)
     parser.add_argument("--min_weight", type=float, default=0.005)
+    parser.add_argument("--init_share_max", type=float, default=0.25,
+        help="cap the initial Gaussian count at this share of the final count (cap_max + 1000); "
+             "0 = no cap")
+    parser.add_argument("--fn_thresh", type=float, default=0.002,
+        help="tau: accumulated weight below which the FN barrier pushes a cell up")
     parser.add_argument("--detect_anomaly", action="store_true", default=False)
     parser.add_argument("--is_scaled", action="store_true")
     # parser.add_argument(
@@ -755,7 +796,7 @@ if __name__ == "__main__":
     # 9 configs tested, the rest a wash) and up to 1.9 dB worse against the raw voxel
     # array, and it spends 41-55 s probing at startup.
     parser.add_argument("--probe_gt", action="store_true")
-    parser.add_argument("--jitter_gt", type=int, default=0,
+    parser.add_argument("--jitter_gt", type=int, default=400,
         help="precompute this many continuous-jittered GT sets (trilinear interpolant at "
              "subgrid nodes + U(-.5,.5)-cell jitter, fresh integer offset per set) and "
              "train on those instead of native nodes; 0 = plain node sampling")
@@ -771,9 +812,17 @@ if __name__ == "__main__":
     # positive value to restore the old fixed-batch behaviour.
     parser.add_argument("--densify_batch", type=int, default=0)
     parser.add_argument("--max_scale", type=float, default=0.02)
+    parser.add_argument("--trunc_frac", type=float, default=0.01,
+                        help="sets TRUNC_FRAC: Gaussians are truncated at w*G = trunc_frac * 0.01 (0 = leave the env alone)")
+    parser.add_argument("--gauss_cutoff", type=int, default=1,
+                        help="sets GAUSS_CUTOFF for rasterizer builds that have it: 1 = each Gaussian's "
+                             "support is exactly its w*G >= T ellipsoid, 0 = the blanket q <= 28 per tile")
+    parser.add_argument("--max_scale_k", type=float, default=0.89,
+                        help="if > 0, max_scale = max(--max_scale, k * N^(-1/3)) with N the final "
+                             "Gaussian count (cap_max + 1000); written to <model>/max_scale")
     parser.add_argument("--densify_events", type=int, default=3)
-    parser.add_argument("--densify_alpha", type=float, default=1.5)
-    parser.add_argument("--ema", type=float, default=0.0,
+    parser.add_argument("--densify_alpha", type=float, default=2.5)
+    parser.add_argument("--ema", type=float, default=0.995,
                         help="Polyak-average the parameters and SHIP THE AVERAGE: keep an "
                              "EMA of all five parameter groups with this decay (0 = off, "
                              "try 0.999) and write it, not the last iterate, at save time. "
@@ -786,12 +835,25 @@ if __name__ == "__main__":
                              "the buffers never need remapping). Restarted automatically "
                              "if the Gaussian count changes after it began.")
     parser.add_argument("--loss", type=str, default="l2", choices=["l1","l2"])
-    parser.add_argument("--fn_mode", type=str, default="abs", choices=["abs", "rel"],
+    parser.add_argument("--fn_mode", type=str, default="log", choices=["abs", "rel", "log"],
                         help="abs: fn_reg is an absolute weight. rel: fn_reg multiplies "
-                             "the data loss.")
+                             "the data loss. log: log barrier log(fn_thresh / aw) instead of "
+                             "the linear hinge.")
     parser.add_argument("--fn_debug", type=int, default=0,
                         help="print dead/near-cutoff cell counts every N iterations (0 = off)")
     args = parser.parse_args(sys.argv[1:])
+    if args.ratio > 0 and args.cap_max < 0:
+        # training always ends 1000 Gaussians over cap_max
+        args.cap_max = vtk_node_count(args.source_path) // int(round(12 * args.ratio)) - 1000
+        print(f"ratio {args.ratio:g}: cap_max {args.cap_max} ({args.cap_max + 1000} Gaussians)")
+    if args.cap_max < 0:
+        parser.error("give --ratio (or --cap_max)")
+    # Rasterizer support rule, read once by the extension at its first launch, so it must
+    # be in the environment before anything renders.
+    if args.trunc_frac > 0:
+        os.environ["TRUNC_FRAC"] = repr(args.trunc_frac)
+    if args.gauss_cutoff >= 0:
+        os.environ["GAUSS_CUTOFF"] = str(args.gauss_cutoff)
     args.save_iterations.append(args.iterations)
 
     print("Optimizing " + args.model_path)

@@ -123,12 +123,29 @@ RasterizeGaussiansBackwardCUDA(
 	);  
 	int M = 0;
 
+#if PACKED_GRAD
+	torch::Tensor dL_dmeans3D = torch::empty({P, 3}, means3D.options());  // replaced by the unpack below
+#else
 	torch::Tensor dL_dmeans3D = torch::zeros({P, 3}, means3D.options());
+#endif
+#if PACKED_GRAD
+	// One row per Gaussian: conic[6], mean[3], value, weight, pad. Unpacked below.
+	torch::Tensor dL_dconic = torch::zeros({P, 12}, means3D.options());
+#else
 	torch::Tensor dL_dconic = torch::zeros({P, 6}, means3D.options());
+#endif
+#if PACKED_GRAD
+	torch::Tensor dL_dweights = torch::empty({P, 1}, means3D.options());  // replaced by the unpack below
+#else
 	torch::Tensor dL_dweights = torch::zeros({P, 1}, means3D.options());
-	torch::Tensor dL_dscales = torch::zeros({P, 3}, means3D.options());
-	torch::Tensor dL_drotations = torch::zeros({P, 4}, means3D.options());
+#endif
+	torch::Tensor dL_dscales = torch::empty({P, 3}, means3D.options());  // every row written by backward preprocess
+	torch::Tensor dL_drotations = torch::empty({P, 4}, means3D.options());
+#if PACKED_GRAD
+	torch::Tensor dL_dvalues = torch::empty({P, 1}, means3D.options());  // replaced by the unpack below
+#else
 	torch::Tensor dL_dvalues = torch::zeros({P, 1}, means3D.options());
+#endif
 
 	if(P != 0)
 	{  
@@ -160,6 +177,11 @@ RasterizeGaussiansBackwardCUDA(
 		debug);
 	}
 
+#if PACKED_GRAD && !FUSE_ACT
+	dL_dmeans3D = dL_dconic.narrow(1, 6, 3).contiguous();
+	dL_dvalues = dL_dconic.narrow(1, 9, 1).contiguous();
+	dL_dweights = dL_dconic.narrow(1, 10, 1).contiguous();
+#endif
 	return std::make_tuple(dL_dmeans3D, dL_dscales, dL_drotations, dL_dvalues, dL_dweights);
 }
 
