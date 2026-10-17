@@ -3,6 +3,7 @@ import sys
 import uuid
 import json
 import time
+import math
 from argparse import ArgumentParser, Namespace
 from random import randint
 import numpy as np
@@ -230,9 +231,17 @@ def training(
         lattice = 128 ** 3
         growth = max(0, args.cap_max - gaussians.get_xyz.shape[0])
         latest = max(3, (opt.iterations // 2 - opt.densify_from_iter) // opt.densification_interval)
-        args.densify_events = int(min(latest, max(3, -(-growth // int(args.densify_fill * lattice)))))
-        print(f"densify_events auto: {args.densify_events} (growth {growth:,} Gaussians, "
-              f"{args.densify_fill:g} x {lattice:,} lattice cells per event, at most {latest})")
+        if args.densify_growth > 1.0:
+            # Geometric: each event grows the model by about densify_growth.
+            n0 = max(1, gaussians.get_xyz.shape[0])
+            want = math.ceil(math.log(max(args.cap_max, n0) / n0) / math.log(args.densify_growth))
+            args.densify_events = int(min(latest, max(3, want)))
+            print(f"densify_events auto: {args.densify_events} ({n0:,} -> {args.cap_max:,} Gaussians at "
+                  f"x{args.densify_growth:g} per event, at most {latest})")
+        else:
+            args.densify_events = int(min(latest, max(3, -(-growth // int(args.densify_fill * lattice)))))
+            print(f"densify_events auto: {args.densify_events} (growth {growth:,} Gaussians, "
+                  f"{args.densify_fill:g} x {lattice:,} lattice cells per event, at most {latest})")
     scene.save(0)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -784,7 +793,7 @@ if __name__ == "__main__":
     parser.add_argument("--ratio", type=float, default=0.0,
         help="compression ratio: sets --cap_max so training ends with nodes / (12 * ratio) Gaussians "
              "(12 floats per Gaussian against one float per volume node)")
-    parser.add_argument("--fraction", type=float, default=0.00002)
+    parser.add_argument("--fraction", type=float, default=0.000005)
     parser.add_argument("--min_weight", type=float, default=0.005)
     parser.add_argument("--init_share_max", type=float, default=0.25,
         help="cap the initial Gaussian count at this share of the final count (cap_max); "
@@ -843,14 +852,17 @@ if __name__ == "__main__":
     parser.add_argument("--gauss_cutoff", type=int, default=1,
                         help="sets GAUSS_CUTOFF for rasterizer builds that have it: 1 = each Gaussian's "
                              "support is exactly its w*G >= T ellipsoid, 0 = the blanket q <= 28 per tile")
-    parser.add_argument("--max_scale_k", type=float, default=0.89,
+    parser.add_argument("--max_scale_k", type=float, default=1.25,
                         help="if > 0, max_scale = max(--max_scale, k * N^(-1/3)) with N the final "
                              "Gaussian count (cap_max); written to <model>/max_scale")
     parser.add_argument("--densify_events", type=int, default=0,
                         help="growth events to spread the budget over; 0 = auto (see --densify_fill)")
+    parser.add_argument("--densify_growth", type=float, default=1.5,
+                        help="auto densify_events, geometric: events so each grows the model by about this "
+                             "factor (> 1); 0 = use --densify_fill")
     parser.add_argument("--densify_fill", type=float, default=0.1,
                         help="auto densify_events: at most this share of the training lattice's cells per event")
-    parser.add_argument("--densify_alpha", type=float, default=1.5)
+    parser.add_argument("--densify_alpha", type=float, default=2.5)
     parser.add_argument("--ema", type=float, default=0.995,
                         help="Polyak-average the parameters and SHIP THE AVERAGE: keep an "
                              "EMA of all five parameter groups with this decay (0 = off, "
