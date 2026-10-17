@@ -4,31 +4,35 @@
 #define NUM_CHANNELS 3 // Default 3, RGB
 #define OPACITY 0.01
 
-// Cells whose total accumulated weight falls below this are treated as empty
-// (written as -1.0) and contribute no gradient. This is a semantic threshold:
-// it defines what the model considers covered, so changing it changes results.
-#define WEIGHT_CUTOFF 1e-2
+// Two independent thresholds (they used to be one WEIGHT_CUTOFF constant, with the
+// support expressed as TRUNC_FRAC * WEIGHT_CUTOFF):
+//
+// DENOM_FLOOR: a cell renders accumulated_value / max(aw, DENOM_FLOOR) (SOFT_DENOM below),
+// so a weakly covered cell fades toward 0 instead of dividing by a tiny aw. It does NOT
+// decide coverage under SOFT_CUTOFF 1: any aw > 0 is covered, only aw == 0 is -1. (Under
+// SOFT_CUTOFF 0 it is also the hard coverage threshold.) Only 0.01 and no floor have been
+// tested: no floor is +0.01..+0.24 dB on 5 cells but loses richtmyer 1024x coverage without
+// the log barrier; rendering a floor-trained model without it is free (+-0.01 dB).
+#define DENOM_FLOOR 1e-2   // runtime override: DENOM_FLOOR env
 
-// Where a single Gaussian's own contribution is considered to have died out,
-// as a fraction of WEIGHT_CUTOFF. Sets the truncation radius m in forward.cu:
-// m = sqrt(-2 ln(TRUNC_FRAC * WEIGHT_CUTOFF / w)), and per-Gaussian cost goes
-// as m^3. Under SOFT_CUTOFF this is NOT only a speed/quality dial: a cell is
-// written -1 exactly when no Gaussian's truncated support reaches it, so raising
-// TRUNC_FRAC shrinks coverage too. Overridable at runtime via the TRUNC_FRAC env
-// var; a model must be rendered at the value it was trained with.
-// 0.01 (T = w*G >= 1e-4) since the per-Gaussian cutoff: with GAUSS_CUTOFF on, 1e-3 cost
-// 7.6 dB summed over the 14 benchmark cells (miranda 64x -5.4: its points carry little
-// accumulated weight, so an absolute 1e-3 cut drops a large share of it) and 1e-4 matched
-// the old q <= 28-per-tile rule's speed at +3.0 dB. Models trained before carry no
-// raster_env file and full_psnr.py evaluates them under the old rule (0.1, GAUSS_CUTOFF=0).
-#define TRUNC_FRAC 0.01
+// SUPPORT_T: a Gaussian contributes to a cell only where w * exp(-q/2) >= SUPPORT_T
+// (GAUSS_CUTOFF 1), i.e. within its own m = sqrt(2 ln(w / SUPPORT_T)) sigma ellipsoid, and
+// is binned into the tiles that ellipsoid's AABB touches. Runtime override: SUPPORT_T env
+// (legacy: the old TRUNC_FRAC env, read as SUPPORT_T = TRUNC_FRAC * 0.01). A model must be
+// rendered at the value it was trained with; train.py records it in <model>/raster_env.
+// 1e-4 since the per-Gaussian cutoff: 1e-3 cost 7.6 dB summed over the 14 benchmark cells
+// (miranda 64x -5.4: its points carry little accumulated weight, so an absolute 1e-3 cut
+// drops a large share of it) and 1e-4 matched the old q <= 28-per-tile rule's speed at
+// +3.0 dB. Models with no raster_env predate it: full_psnr.py evaluates them at 1e-3 with
+// GAUSS_CUTOFF=0.
+#define SUPPORT_T 1e-4
 
-// 0 = hard cutoff (original): a cell whose accumulated weight is under WEIGHT_CUTOFF is
+// 0 = hard cutoff (original): a cell whose accumulated weight is under DENOM_FLOOR is
 // declared empty, written as -1.0, reports weight 0, and receives no gradient. The FN
 // barrier in train.py exists purely to compensate for that missing gradient.
 // 1 = clamped denominator: any cell reached by at least one Gaussian renders
-// accumulated_value / max(aw, WEIGHT_CUTOFF). The 1/aw blow-up that the threshold was
-// guarding against is bounded at 1/WEIGHT_CUTOFF instead of being cut off, so weakly
+// accumulated_value / max(aw, DENOM_FLOOR). The 1/aw blow-up that the threshold was
+// guarding against is bounded at 1/DENOM_FLOOR instead of being cut off, so weakly
 // covered cells stay differentiable and render a small bounded value rather than the -1
 // sentinel. -1.0 then means only "no Gaussian reaches this cell", where no gradient
 // exists to give anyway.
@@ -46,13 +50,15 @@
 
 // Denominator floor under SOFT_CUTOFF. Two alternatives were built and measured worse
 // (2026-09-04, 4000 iterations), so neither is kept:
-// - aw + WEIGHT_CUTOFF (smooth, no kink at the cutoff): enlarges EVERY cell's
+// - aw + DENOM_FLOOR (smooth, no kink at the floor): enlarges EVERY cell's
 //   denominator, so every value is biased low.
 // - The exact adjoint of max(): below the cutoff D is constant, so dR/dw_i = v_i/D and
 //   the backward's -R term should be dropped there (see backward.cu). It costs 0.2-0.8 dB:
 //   m64 52.615 vs 53.371, m1k 34.765 vs 35.297, r1k 29.726 vs 29.935, c64 49.386 vs 49.396.
 // The shipped backward is therefore deliberately inexact below the cutoff. Do not "fix" it.
-#define SOFT_DENOM(aw) (max((aw), (float)WEIGHT_CUTOFF))
+// The floor is a kernel argument: DENOM_FLOOR is the default, the DENOM_FLOOR env overrides
+// it (runtime_denom_floor() in auxiliary.h, read once per process; 0 = no floor).
+#define SOFT_DENOM(aw, fl) (max((aw), (fl)))
 
 // Backward-render speed switches (results unchanged up to float summation order).
 // SKIP_EMPTY: a (Gaussian, tile) pair whose support reaches no cell of the tile skips its
@@ -70,9 +76,9 @@
 // forward preprocess, and their chain rule in backward preprocess, which also writes the
 // mean / value / weight gradients straight from the packed row. Same float expressions as
 // fused_ops.cu's actForward / actBackward; removes those two kernels and their tensors.
-// GAUSS_CUTOFF: each Gaussian contributes to a cell only where w * exp(-q/2) >= T with
-// T = TRUNC_FRAC * WEIGHT_CUTOFF (1e-3 by default, TRUNC_FRAC env overrides), i.e.
-// q <= qmax = 2 ln(w / T) -- exactly the ellipsoid the tile AABB is built from. Without it
+// GAUSS_CUTOFF (runtime env, default 1): each Gaussian contributes to a cell only where
+// w * exp(-q/2) >= T = SUPPORT_T, i.e. q <= qmax = 2 ln(w / T) -- exactly the ellipsoid the
+// tile AABB is built from. 2 = weight-independent, G >= T. 0 = the old rule. Without it
 // the per-cell test is the blanket q <= 28, so a Gaussian reaches out to 5.3 sigma inside
 // any tile its 1e-3 ellipsoid touches and its support depends on tile alignment; with it
 // the support is a per-Gaussian ellipsoid a renderer can reproduce exactly.

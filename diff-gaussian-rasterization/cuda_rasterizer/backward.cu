@@ -248,7 +248,8 @@ __global__ void renderCUDA(
 	float3* __restrict__ dL_dmeans,
 	float* __restrict__ dL_dconic,
 	float* __restrict__ dL_dvalues,
-	float* __restrict__ dL_dweights
+	float* __restrict__ dL_dweights,
+	const float denom_floor
 )
 {
 	// Block tile boundaries in cell space
@@ -276,12 +277,12 @@ __global__ void renderCUDA(
 
 		float aw = accumulated_weights[cell_id];
 #if SOFT_CUTOFF
-		// Bounded at 1/WEIGHT_CUTOFF instead of cut to zero, so weakly covered cells emit a
+		// Bounded at 1/DENOM_FLOOR instead of cut to zero, so weakly covered cells emit a
 		// gradient without the 1/aw amplification the threshold was there to prevent.
 		const bool covered = aw > 0.0f;
-		float inv_aw = covered ? 1.0f / SOFT_DENOM(aw) : 0.0f;
+		float inv_aw = covered ? 1.0f / SOFT_DENOM(aw, denom_floor) : 0.0f;
 #else
-		const bool covered = aw > WEIGHT_CUTOFF;
+		const bool covered = aw > denom_floor;
 		float inv_aw = covered ? 1.0f / aw : 0.0f;
 #endif
 		// dR/dw_i = (v_i - R * dD/daw) / D. Above the cutoff dD/daw == 1 and this is exact.
@@ -467,6 +468,7 @@ void BACKWARD::render(
 		dL_dmean3D,
 		dL_dconic,
 		dL_dvalue,
-		dL_dweights
+		dL_dweights,
+		runtime_denom_floor()
 	);
 }

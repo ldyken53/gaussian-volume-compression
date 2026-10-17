@@ -200,7 +200,7 @@ def training(
         _msf.write(f"{args.max_scale}\n")
     # The support rule the model was trained under; full_psnr.py restores it.
     with open(os.path.join(dataset.model_path, "raster_env"), "w") as _ref:
-        for _k in ("TRUNC_FRAC", "GAUSS_CUTOFF"):
+        for _k in ("SUPPORT_T", "GAUSS_CUTOFF", "DENOM_FLOOR"):
             if _k in os.environ:
                 _ref.write(f"{_k}={os.environ[_k]}\n")
     gaussians = GaussianModel()
@@ -812,8 +812,14 @@ if __name__ == "__main__":
     # positive value to restore the old fixed-batch behaviour.
     parser.add_argument("--densify_batch", type=int, default=0)
     parser.add_argument("--max_scale", type=float, default=0.02)
-    parser.add_argument("--trunc_frac", type=float, default=0.01,
-                        help="sets TRUNC_FRAC: Gaussians are truncated at w*G = trunc_frac * 0.01 (0 = leave the env alone)")
+    parser.add_argument("--support_t", type=float, default=1e-4,
+                        help="per-Gaussian support threshold: a Gaussian reaches only where w * G >= support_t "
+                             "(sets the SUPPORT_T env the rasterizer reads; 0 = leave the env alone)")
+    parser.add_argument("--denom_floor", type=float, default=0.01,
+                        help="blend floor: a cell renders S / max(aw, denom_floor); 0 = no floor "
+                             "(sets the DENOM_FLOOR env the rasterizer reads; < 0 = leave the env alone)")
+    parser.add_argument("--trunc_frac", type=float, default=0.0,
+                        help="deprecated: --support_t = trunc_frac * 0.01")
     parser.add_argument("--gauss_cutoff", type=int, default=1,
                         help="sets GAUSS_CUTOFF for rasterizer builds that have it: 1 = each Gaussian's "
                              "support is exactly its w*G >= T ellipsoid, 0 = the blanket q <= 28 per tile")
@@ -842,16 +848,22 @@ if __name__ == "__main__":
     parser.add_argument("--fn_debug", type=int, default=0,
                         help="print dead/near-cutoff cell counts every N iterations (0 = off)")
     args = parser.parse_args(sys.argv[1:])
-    if args.ratio > 0 and args.cap_max < 0:
-        # training always ends 1000 Gaussians over cap_max
+    if args.ratio > 0:
+        # Training always ends 1000 Gaussians over cap_max, so cap_max is negative at extreme
+        # ratios (vertebra 16384x ends with 682); only the default -1 means "not given".
         args.cap_max = vtk_node_count(args.source_path) // int(round(12 * args.ratio)) - 1000
         print(f"ratio {args.ratio:g}: cap_max {args.cap_max} ({args.cap_max + 1000} Gaussians)")
-    if args.cap_max < 0:
+    elif args.cap_max == -1:
         parser.error("give --ratio (or --cap_max)")
     # Rasterizer support rule, read once by the extension at its first launch, so it must
     # be in the environment before anything renders.
     if args.trunc_frac > 0:
-        os.environ["TRUNC_FRAC"] = repr(args.trunc_frac)
+        args.support_t = args.trunc_frac * 0.01
+    if args.support_t > 0:
+        os.environ["SUPPORT_T"] = repr(args.support_t)
+        os.environ.pop("TRUNC_FRAC", None)
+    if args.denom_floor >= 0:
+        os.environ["DENOM_FLOOR"] = repr(args.denom_floor)
     if args.gauss_cutoff >= 0:
         os.environ["GAUSS_CUTOFF"] = str(args.gauss_cutoff)
     args.save_iterations.append(args.iterations)

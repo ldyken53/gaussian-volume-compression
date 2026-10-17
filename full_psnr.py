@@ -156,13 +156,17 @@ def main():
         envs.add(open(ef).read() if os.path.exists(ef) else "")
     if len(envs) > 1:
         raise SystemExit(f"models were trained under different rasterizer env settings: {envs}")
-    # A key a model does not record predates it: no raster_env at all (or no TRUNC_FRAC in
-    # it) means the model was trained under the old rule, TRUNC_FRAC 0.1 and the blanket
-    # q <= 28 per tile, which is no longer the build default.
+    # A key a model does not record predates it: no raster_env at all means the model was
+    # trained under the old rule (support 1e-3 with the blanket q <= 28 per tile), which is no
+    # longer the build default. Records from before the SUPPORT_T rename carry TRUNC_FRAC
+    # (SUPPORT_T = TRUNC_FRAC * 0.01) or, when trained at the old default, neither.
     rec = dict(line.split("=", 1) for line in envs.pop().split())
-    for k, legacy in (("TRUNC_FRAC", "0.1"), ("GAUSS_CUTOFF", "0")):
+    if "SUPPORT_T" not in rec:
+        rec["SUPPORT_T"] = repr(float(rec.get("TRUNC_FRAC", "0.1")) * 0.01)
+    for k, legacy in (("SUPPORT_T", None), ("GAUSS_CUTOFF", "0"), ("DENOM_FLOOR", "0.01")):
         if k not in os.environ:
             os.environ[k] = rec.get(k, legacy)
+    os.environ.pop("TRUNC_FRAC", None)
 
     t0 = time.time()
     mesh = pv.read(args.source_path)

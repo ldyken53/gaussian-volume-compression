@@ -117,4 +117,17 @@ throw std::runtime_error(cudaGetErrorString(ret)); \
 #define ACT_NORM_EPS 1e-12f
 __device__ __forceinline__ float act_sigmoid(float x) { return 1.0f / (1.0f + expf(-x)); }
 
+#include <cstdlib>
+#include <cstdio>
+// The blend floor in use (DENOM_FLOOR env, else the config.h default), read once.
+inline float runtime_denom_floor() {
+	static float f = -1.0f;
+	if (f < 0.0f) {
+		const char* e = getenv("DENOM_FLOOR");
+		f = e ? (float)atof(e) : (float)DENOM_FLOOR;
+		if (e) printf("[rasterizer] DENOM_FLOOR override: %g\n", f);
+	}
+	return f;
+}
+
 #endif

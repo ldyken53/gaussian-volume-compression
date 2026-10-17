@@ -9,7 +9,7 @@ namespace cg = cooperative_groups;
 // Perform initial steps for each Gaussian prior to rasterization.
 template<int C>
 __global__ void preprocessCUDA(int P,
-	const float trunc_frac,
+	const float support_t,
 	const int gauss_cut,
 	const float* means3D,
 	const glm::vec3* scales,
@@ -118,8 +118,8 @@ __global__ void preprocessCUDA(int P,
 	// Number of std devs at which this Gaussian's contribution falls below the cutoff.
 	// GAUSS_CUTOFF env 2: weight-independent support, G >= T for every Gaussian (a fixed
 	// sqrt(2 ln(1/T)) sigmas), instead of the absolute w * G >= T.
-	float m = gauss_cut == 2 ? sqrtf(-2.0f * logf(trunc_frac * WEIGHT_CUTOFF))
-	                         : sqrtf(-2 * logf((trunc_frac * WEIGHT_CUTOFF) / act_w));
+	float m = gauss_cut == 2 ? sqrtf(-2.0f * logf(support_t))
+	                         : sqrtf(-2 * logf(support_t / act_w));
 
 	const float3 position = { means3D[3 * idx], means3D[3 * idx + 1], means3D[3 * idx + 2] };
 	packed[3 * idx + 0] = make_float4(position.x, position.y, position.z, act_v);
@@ -200,7 +200,8 @@ renderCUDA(
 	const float4* __restrict__ packed,
 	float* __restrict__ accumulated_weights,
 	uint32_t* __restrict__ n_contrib,
-	float* __restrict__ out_cells)
+	float* __restrict__ out_cells,
+	const float denom_floor)
 {
 	// Identify current tile and associated min/max pixel range.
 	auto block = cg::this_thread_block();
@@ -287,7 +288,7 @@ renderCUDA(
 		// 1/aw blow-up is what the cutoff guarded against) and the cell stays differentiable.
 		// aw == 0 means no Gaussian reaches the cell, so there is nothing to differentiate.
 		if (accumulated_weight > 0.0f) {
-			out_cells[cell_id] = accumulated_value / SOFT_DENOM(accumulated_weight);
+			out_cells[cell_id] = accumulated_value / SOFT_DENOM(accumulated_weight, denom_floor);
 			accumulated_weights[cell_id] = accumulated_weight;
 		} else {
 			out_cells[cell_id] = -1.0;
@@ -295,7 +296,7 @@ renderCUDA(
 		}
 		n_contrib[cell_id] = 0;
 #else
-		if (accumulated_weight > WEIGHT_CUTOFF) {
+		if (accumulated_weight > denom_floor) {
 			out_cells[cell_id] = accumulated_value / accumulated_weight;
 			accumulated_weights[cell_id] = accumulated_weight;
 			n_contrib[cell_id] = 0;
@@ -333,7 +334,8 @@ void FORWARD::render(
 		packed,
 		accumulated_weights,
 		n_contrib,
-		out_cells);
+		out_cells,
+		runtime_denom_floor());
 }
 
 void FORWARD::preprocess(int P,
@@ -359,26 +361,26 @@ void FORWARD::preprocess(int P,
 	const dim3 grid,
 	uint32_t* blocks_touched)
 {
-	// Runtime override of the truncation radius, a pure speed/quality dial
-	// (per-Gaussian cost ~ (scale*m)^3; coverage semantics live in WEIGHT_CUTOFF,
-	// untouched). Read once per process: TRUNC_FRAC=0.3 env doubles down on speed
-	// for cells with PSNR margin to spend; unset = the config.h default.
-	static float trunc_frac = -1.0f;
-	if (trunc_frac < 0.0f) {
-		const char* e = getenv("TRUNC_FRAC");
-		trunc_frac = e ? (float)atof(e) : (float)TRUNC_FRAC;
-		if (e) printf("[rasterizer] TRUNC_FRAC override: %.3f\n", trunc_frac);
+	// Runtime override of the support threshold (per-Gaussian cost ~ m^3; a model must be
+	// rendered at the value it was trained with). Read once per process: SUPPORT_T env, else
+	// the legacy TRUNC_FRAC env as SUPPORT_T = TRUNC_FRAC * 0.01, else the config.h default.
+	static float support_t = -1.0f;
+	if (support_t < 0.0f) {
+		const char* e = getenv("SUPPORT_T");
+		const char* legacy = getenv("TRUNC_FRAC");
+		support_t = e ? (float)atof(e) : legacy ? (float)atof(legacy) * 0.01f : (float)SUPPORT_T;
+		if (e || legacy) printf("[rasterizer] SUPPORT_T override: %.1e%s\n", support_t, e ? "" : " (from TRUNC_FRAC)");
 	}
 	static int gauss_cut = -1;
 	if (gauss_cut < 0) {
 		const char* g = getenv("GAUSS_CUTOFF");
 		gauss_cut = g ? atoi(g) : 1;
 		printf("[rasterizer] per-Gaussian cutoff %s >= %.1e: %s\n", gauss_cut == 2 ? "G" : "w*G",
-		       trunc_frac * WEIGHT_CUTOFF, gauss_cut ? "on" : "off (blanket q <= 28 in each binned tile)");
+		       support_t, gauss_cut ? "on" : "off (blanket q <= 28 in each binned tile)");
 	}
 	preprocessCUDA<NUM_CHANNELS> <<<(P + 255) / 256, 256>>> (
 		P,
-		trunc_frac,
+		support_t,
 		gauss_cut,
 		means3D,
 		scales,
