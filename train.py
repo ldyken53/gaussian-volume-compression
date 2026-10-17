@@ -148,6 +148,7 @@ class NodeSampler:
               f"volume ({vol_gb:.1f} GB) released")
 
     def draw_jit(self, idx):
+        self.cur_jit = idx
         return self.jit_gt[idx].float(), self.jit_jitter[idx].float()
 
     def bounds(self):
@@ -165,7 +166,13 @@ class NodeSampler:
         node = torch.stack([c, b, a], dim=1).float()
         t = lambda v: torch.tensor(v, dtype=torch.float, device=idx.device)
         if getattr(self, "jit_full", False):
-            return t(self.lo) + node * t(self.jit_step) * t(self.d)
+            # The jittered sample of the current set -- where this iteration's GT, and so the
+            # error that chose these cells, was evaluated. Returning the bare lattice node
+            # (5c98a13 to 2026-10-17) stacked every growth event's Gaussians onto the same
+            # nodes when an event fills every cell (richtmyer 64x); they started near-zero
+            # scale, could not reach a jittered sample, and never trained.
+            jit = self.jit_jitter[getattr(self, "cur_jit", 0)].float().view(-1, 3)[idx]
+            return t(self.lo) + node * t(self.jit_step) * t(self.d) + jit
         return t(self.lo) + (t(self.off) + node * t(self.stride)) * t(self.d)
 
 
