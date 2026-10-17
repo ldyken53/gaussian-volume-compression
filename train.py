@@ -193,7 +193,7 @@ def training(
     prepare_output(dataset)
     if args.max_scale_k > 0:
         # cap grows with the Gaussian spacing N^(-1/3); --max_scale is the floor
-        n_final = args.cap_max + 1000
+        n_final = args.cap_max
         args.max_scale = max(args.max_scale, args.max_scale_k * n_final ** (-1.0 / 3.0))
         print(f"max_scale {args.max_scale:.4f} (k={args.max_scale_k}, N={n_final})")
     with open(os.path.join(dataset.model_path, "max_scale"), "w") as _msf:
@@ -211,7 +211,7 @@ def training(
         load_iteration=0 if args.model_path else None, 
         normalized=is_scaled, 
         fraction=fraction,
-        max_init=(args.init_share_max * (args.cap_max + 1000)) if args.init_share_max > 0 else None)
+        max_init=(args.init_share_max * args.cap_max) if args.init_share_max > 0 else None)
     gaussians.training_setup(opt)
     scene.save(0)
     if checkpoint:
@@ -549,7 +549,7 @@ def training(
                 else:
                     err_flat = torch.abs(cells.ravel() - gt.ravel())
                     budget = int(args.cap_max - gaussians.get_values.shape[0]
-                                 + torch.count_nonzero(gaussians.get_weight <= min_weight) + 1000)
+                                 + torch.count_nonzero(gaussians.get_weight <= min_weight))
                     if args.densify_batch > 0:
                         k = min(args.densify_batch, budget)
                     else:
@@ -767,7 +767,7 @@ if __name__ == "__main__":
     parser.add_argument("--fraction", type=float, default=0.00002)
     parser.add_argument("--min_weight", type=float, default=0.005)
     parser.add_argument("--init_share_max", type=float, default=0.25,
-        help="cap the initial Gaussian count at this share of the final count (cap_max + 1000); "
+        help="cap the initial Gaussian count at this share of the final count (cap_max); "
              "0 = no cap")
     parser.add_argument("--fn_thresh", type=float, default=0.002,
         help="tau: accumulated weight below which the FN barrier pushes a cell up")
@@ -825,9 +825,9 @@ if __name__ == "__main__":
                              "support is exactly its w*G >= T ellipsoid, 0 = the blanket q <= 28 per tile")
     parser.add_argument("--max_scale_k", type=float, default=0.89,
                         help="if > 0, max_scale = max(--max_scale, k * N^(-1/3)) with N the final "
-                             "Gaussian count (cap_max + 1000); written to <model>/max_scale")
+                             "Gaussian count (cap_max); written to <model>/max_scale")
     parser.add_argument("--densify_events", type=int, default=3)
-    parser.add_argument("--densify_alpha", type=float, default=2.5)
+    parser.add_argument("--densify_alpha", type=float, default=1.5)
     parser.add_argument("--ema", type=float, default=0.995,
                         help="Polyak-average the parameters and SHIP THE AVERAGE: keep an "
                              "EMA of all five parameter groups with this decay (0 = off, "
@@ -849,12 +849,10 @@ if __name__ == "__main__":
                         help="print dead/near-cutoff cell counts every N iterations (0 = off)")
     args = parser.parse_args(sys.argv[1:])
     if args.ratio > 0:
-        # Training always ends 1000 Gaussians over cap_max, so cap_max is negative at extreme
-        # ratios (vertebra 16384x ends with 682); only the default -1 means "not given".
-        args.cap_max = vtk_node_count(args.source_path) // int(round(12 * args.ratio)) - 1000
-        print(f"ratio {args.ratio:g}: cap_max {args.cap_max} ({args.cap_max + 1000} Gaussians)")
-    elif args.cap_max == -1:
-        parser.error("give --ratio (or --cap_max)")
+        args.cap_max = vtk_node_count(args.source_path) // int(round(12 * args.ratio))
+        print(f"ratio {args.ratio:g}: cap_max {args.cap_max} Gaussians")
+    elif args.cap_max <= 0:
+        parser.error("give --ratio, or --cap_max (the final Gaussian count)")
     # Rasterizer support rule, read once by the extension at its first launch, so it must
     # be in the environment before anything renders.
     if args.trunc_frac > 0:
