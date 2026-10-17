@@ -220,6 +220,19 @@ def training(
         fraction=fraction,
         max_init=(args.init_share_max * args.cap_max) if args.init_share_max > 0 else None)
     gaussians.training_setup(opt)
+    if args.densify_events <= 0:
+        # Auto: enough growth events that none places more than densify_fill of the training
+        # lattice's cells, so placement stays error-weighted instead of filling every cell
+        # (which stacks Gaussians that then never train), but at least 3 and finished by
+        # half-way so the last ones still train. 2026-10-17: richtmyer 64x 3 -> 20 events
+        # +0.55 dB and faster, richtmyer 256x 3 -> 10 +0.64, miranda 64x 3 -> 10 +0.42; small
+        # models lose with more events (1024x cells -0.05..-0.19 at 10), and they stay at 3.
+        lattice = 128 ** 3
+        growth = max(0, args.cap_max - gaussians.get_xyz.shape[0])
+        latest = max(3, (opt.iterations // 2 - opt.densify_from_iter) // opt.densification_interval)
+        args.densify_events = int(min(latest, max(3, -(-growth // int(args.densify_fill * lattice)))))
+        print(f"densify_events auto: {args.densify_events} (growth {growth:,} Gaussians, "
+              f"{args.densify_fill:g} x {lattice:,} lattice cells per event, at most {latest})")
     scene.save(0)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -833,7 +846,10 @@ if __name__ == "__main__":
     parser.add_argument("--max_scale_k", type=float, default=0.89,
                         help="if > 0, max_scale = max(--max_scale, k * N^(-1/3)) with N the final "
                              "Gaussian count (cap_max); written to <model>/max_scale")
-    parser.add_argument("--densify_events", type=int, default=3)
+    parser.add_argument("--densify_events", type=int, default=0,
+                        help="growth events to spread the budget over; 0 = auto (see --densify_fill)")
+    parser.add_argument("--densify_fill", type=float, default=0.1,
+                        help="auto densify_events: at most this share of the training lattice's cells per event")
     parser.add_argument("--densify_alpha", type=float, default=1.5)
     parser.add_argument("--ema", type=float, default=0.995,
                         help="Polyak-average the parameters and SHIP THE AVERAGE: keep an "
