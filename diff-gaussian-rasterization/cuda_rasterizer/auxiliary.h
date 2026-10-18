@@ -129,5 +129,32 @@ inline float runtime_denom_floor() {
 	}
 	return f;
 }
+// Occupancy threshold (from the unstructured sibling): a cell renders empty (-1) iff aw <= OCC_T.
+// Default 0 on the soft build (empty only when no support reaches the cell, as before) and the
+// blend floor on the hard build. OCC_KEEP_AW=1: an empty cell keeps its true aw instead of 0, and
+// backward passes its weight adjoint (not a value one), so the FN barrier still sees the cells
+// just under the threshold.
+inline float runtime_occ_t() {
+	static float t = -2.0f;
+	if (t < -1.0f) {
+		const char* e = getenv("OCC_T");
+#if SOFT_CUTOFF
+		t = e ? (float)atof(e) : 0.0f;
+#else
+		t = e ? (float)atof(e) : runtime_denom_floor();
+#endif
+		if (e) printf("[rasterizer] OCC_T override: %g\n", t);
+	}
+	return t;
+}
+inline int runtime_occ_keep() {
+	static int k = -1;
+	if (k < 0) {
+		const char* e = getenv("OCC_KEEP_AW");
+		k = (e && atoi(e)) ? 1 : 0;
+		if (k) printf("[rasterizer] OCC_KEEP_AW on\n");
+	}
+	return k;
+}
 
 #endif

@@ -249,7 +249,9 @@ __global__ void renderCUDA(
 	float* __restrict__ dL_dconic,
 	float* __restrict__ dL_dvalues,
 	float* __restrict__ dL_dweights,
-	const float denom_floor
+	const float denom_floor,
+	const float occ_t,
+	const int occ_keep
 )
 {
 	// Block tile boundaries in cell space
@@ -279,10 +281,10 @@ __global__ void renderCUDA(
 #if SOFT_CUTOFF
 		// Bounded at 1/DENOM_FLOOR instead of cut to zero, so weakly covered cells emit a
 		// gradient without the 1/aw amplification the threshold was there to prevent.
-		const bool covered = aw > 0.0f;
+		const bool covered = aw > occ_t;
 		float inv_aw = covered ? 1.0f / SOFT_DENOM(aw, denom_floor) : 0.0f;
 #else
-		const bool covered = aw > denom_floor;
+		const bool covered = aw > occ_t;
 		float inv_aw = covered ? 1.0f / aw : 0.0f;
 #endif
 		// dR/dw_i = (v_i - R * dD/daw) / D. Above the cutoff dD/daw == 1 and this is exact.
@@ -297,7 +299,10 @@ __global__ void renderCUDA(
 			static_cast<float>(cell.y) * cell_size.y + volume_mins.y + jitter[cell_id * 3 + 1],
 			static_cast<float>(cell.z) * cell_size.z + volume_mins.z + jitter[cell_id * 3 + 2],
 			dvo);
-		s_fc[idx] = covered ? dL_dcell_weights[cell_id] - dvo * r_term : 0.0f;
+		// An empty cell under OCC_KEEP_AW keeps its weight adjoint (the FN barrier acting on it),
+		// but has no value adjoint.
+		s_fc[idx] = covered ? dL_dcell_weights[cell_id] - dvo * r_term
+		                    : ((occ_keep && aw > 0.0f) ? dL_dcell_weights[cell_id] : 0.0f);
 	}
 	__syncthreads();
 
@@ -469,6 +474,8 @@ void BACKWARD::render(
 		dL_dconic,
 		dL_dvalue,
 		dL_dweights,
-		runtime_denom_floor()
+		runtime_denom_floor(),
+		runtime_occ_t(),
+		runtime_occ_keep()
 	);
 }

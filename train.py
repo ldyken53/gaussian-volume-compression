@@ -208,11 +208,12 @@ def training(
         _msf.write(f"{args.max_scale}\n")
     # The support rule the model was trained under; full_psnr.py restores it.
     with open(os.path.join(dataset.model_path, "raster_env"), "w") as _ref:
-        for _k in ("SUPPORT_T", "GAUSS_CUTOFF", "DENOM_FLOOR"):
+        for _k in ("SUPPORT_T", "GAUSS_CUTOFF", "DENOM_FLOOR", "OCC_T", "OCC_KEEP_AW"):
             if _k in os.environ:
                 _ref.write(f"{_k}={os.environ[_k]}\n")
     gaussians = GaussianModel()
     gaussians.max_scale = args.max_scale
+    gaussians.init_weight = args.init_weight
     scene = Scene(
         dataset, 
         gaussians, 
@@ -847,6 +848,11 @@ if __name__ == "__main__":
     parser.add_argument("--denom_floor", type=float, default=0.01,
                         help="blend floor: a cell renders S / max(aw, denom_floor); 0 = no floor "
                              "(sets the DENOM_FLOOR env the rasterizer reads; < 0 = leave the env alone)")
+    parser.add_argument("--occ_t", type=float, default=-1.0,
+                        help="occupancy threshold: a cell with aw <= occ_t renders empty (-1); sets the OCC_T env "
+                             "(< 0 = build default: 0 soft, the blend floor hard)")
+    parser.add_argument("--occ_keep_aw", type=int, default=-1,
+                        help="1 = an empty cell keeps its true aw and its weight adjoint (OCC_KEEP_AW env)")
     parser.add_argument("--trunc_frac", type=float, default=0.0,
                         help="deprecated: --support_t = trunc_frac * 0.01")
     parser.add_argument("--gauss_cutoff", type=int, default=1,
@@ -855,6 +861,8 @@ if __name__ == "__main__":
     parser.add_argument("--max_scale_k", type=float, default=1.25,
                         help="if > 0, max_scale = max(--max_scale, k * N^(-1/3)) with N the final "
                              "Gaussian count (cap_max); written to <model>/max_scale")
+    parser.add_argument("--init_weight", type=float, default=0.01,
+                        help="weight of the initial Gaussians (create_from_pcd); densified ones start at 0.01")
     parser.add_argument("--densify_events", type=int, default=0,
                         help="growth events to spread the budget over; 0 = auto (see --densify_fill)")
     parser.add_argument("--densify_growth", type=float, default=1.5,
@@ -897,6 +905,10 @@ if __name__ == "__main__":
         os.environ.pop("TRUNC_FRAC", None)
     if args.denom_floor >= 0:
         os.environ["DENOM_FLOOR"] = repr(args.denom_floor)
+    if args.occ_t >= 0:
+        os.environ["OCC_T"] = repr(args.occ_t)
+    if args.occ_keep_aw >= 0:
+        os.environ["OCC_KEEP_AW"] = str(args.occ_keep_aw)
     if args.gauss_cutoff >= 0:
         os.environ["GAUSS_CUTOFF"] = str(args.gauss_cutoff)
     args.save_iterations.append(args.iterations)

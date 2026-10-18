@@ -166,6 +166,9 @@ def main():
     for k, legacy in (("SUPPORT_T", None), ("GAUSS_CUTOFF", "0"), ("DENOM_FLOOR", "0.01")):
         if k not in os.environ:
             os.environ[k] = rec.get(k, legacy)
+    for k in ("OCC_T", "OCC_KEEP_AW"):           # absent = the build default
+        if k in rec and k not in os.environ:
+            os.environ[k] = rec[k]
     os.environ.pop("TRUNC_FRAC", None)
 
     t0 = time.time()

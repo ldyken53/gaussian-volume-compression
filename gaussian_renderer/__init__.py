@@ -47,7 +47,10 @@ def render(
 
     """
 
-    raw = _RAW_ACT and os.environ.get("FUSED", "1") != "0"
+    # A FUSE_ACT build always takes raw parameters: FUSED=0 only switches the torch-side
+    # activations of builds that do not apply them (it used to hand a raw build activated
+    # values, which it then activated a second time).
+    raw = _RAW_ACT
     if raw and scaling_modifier != 1.0:
         raise ValueError("a FUSE_ACT rasterizer build uses scale_modifier for max_scale")
     raster_settings = GaussianRasterizationSettings(

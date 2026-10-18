@@ -163,7 +163,7 @@ class GaussianModel:
         rots[:, 0] = 1
 
         weights = self.inverse_weight_activation(
-            (0.01)
+            getattr(self, "init_weight", 0.01)
             * torch.ones(
                 (fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"
             )

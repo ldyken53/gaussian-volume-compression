@@ -201,7 +201,9 @@ renderCUDA(
 	float* __restrict__ accumulated_weights,
 	uint32_t* __restrict__ n_contrib,
 	float* __restrict__ out_cells,
-	const float denom_floor)
+	const float denom_floor,
+	const float occ_t,
+	const int occ_keep)
 {
 	// Identify current tile and associated min/max pixel range.
 	auto block = cg::this_thread_block();
@@ -287,23 +289,23 @@ renderCUDA(
 		// Clamp the denominator rather than thresholding it: the value stays bounded (the
 		// 1/aw blow-up is what the cutoff guarded against) and the cell stays differentiable.
 		// aw == 0 means no Gaussian reaches the cell, so there is nothing to differentiate.
-		if (accumulated_weight > 0.0f) {
+		if (accumulated_weight > occ_t) {
 			out_cells[cell_id] = accumulated_value / SOFT_DENOM(accumulated_weight, denom_floor);
 			accumulated_weights[cell_id] = accumulated_weight;
 		} else {
 			out_cells[cell_id] = -1.0;
-			accumulated_weights[cell_id] = 0.0;
+			accumulated_weights[cell_id] = occ_keep ? accumulated_weight : 0.0f;
 		}
 		n_contrib[cell_id] = 0;
 #else
-		if (accumulated_weight > denom_floor) {
+		if (accumulated_weight > occ_t) {
 			out_cells[cell_id] = accumulated_value / accumulated_weight;
 			accumulated_weights[cell_id] = accumulated_weight;
 			n_contrib[cell_id] = 0;
 
 		} else {
 			out_cells[cell_id] = -1.0;
-			accumulated_weights[cell_id] = 0.0;
+			accumulated_weights[cell_id] = occ_keep ? accumulated_weight : 0.0f;
 			n_contrib[cell_id] = 0;
 		}
 #endif
@@ -335,7 +337,9 @@ void FORWARD::render(
 		accumulated_weights,
 		n_contrib,
 		out_cells,
-		runtime_denom_floor());
+		runtime_denom_floor(),
+		runtime_occ_t(),
+		runtime_occ_keep());
 }
 
 void FORWARD::preprocess(int P,
