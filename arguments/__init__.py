@@ -32,7 +32,7 @@ class ModelParams(ParamGroup):
     def __init__(self, parser):
         self._source_path = ""
         self._model_path = ""
-        # Densification ends at cap_max + 1000 Gaussians.
+        # Final Gaussian count.
         self.cap_max = -1
         super().__init__(parser, "Loading Parameters")
 

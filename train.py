@@ -149,7 +149,7 @@ def training(dataset, opt, args):
     os.makedirs(dataset.model_path, exist_ok=True)
     with open(os.path.join(dataset.model_path, "cfg_args"), "w") as f:
         f.write(str(args))
-    n_final = args.cap_max + 1000
+    n_final = args.cap_max
     surface = args.encode_surface
 
     gaussians = GaussianModel()

@@ -10,7 +10,7 @@ A=/lus/eagle/projects/dist_relational_alg/ldyken53
 U=/lus/eagle/projects/UIC-HPC/ldyken53
 declare -A SRC=([mito]=$A/mito.vtu [sf1]=$A/sf1.vtu [valley]=$U/valley.vtu [rbl]=$U/rbl.vtu
                 [eq]=$A/earthquakenorm.vtu)
-# cap_max per ratio 1024x / 256x / 64x (training ends at cap_max + 1000 Gaussians).
+# Final Gaussian count per ratio 1024x / 256x / 64x: storage / (ratio x 48 bytes).
 declare -A CAP=([mito]="5015 20058 80232" [sf1]="12663 50653 202611" [valley]="23925 95700 382800"
                 [rbl]="3539 14157 56628" [eq]="87659 350636 1402545")
 mkdir -p bench_logs

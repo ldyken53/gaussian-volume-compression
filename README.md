@@ -23,7 +23,7 @@ python train.py -s mesh.vtu --cap_max 5015 -m output/model --encode_surface
 python eval_final.py -s mesh.vtu --models output/model [--surface output/model]
 ```
 
-`--cap_max` sets the final Gaussian count (training ends at cap_max + 1000). The defaults are
+`--cap_max` is the final Gaussian count: storage / (ratio x 48 bytes). The defaults are
 the final configurations; `run_final.sh` trains and evaluates every final model.
 
 Meshes too large to triangulate on the GPU train on precomputed samples
