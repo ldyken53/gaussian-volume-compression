@@ -40,15 +40,11 @@ SUPPORT_T = 1e-4
 DEAD_WEIGHT = 0.005
 
 # Per-mode defaults for flags left unset.
-INTERIOR_DEFAULTS = dict(
-    fn_mode="log", fn_reg=0.0001, fp_reg=0.0, sample_frac=1.0, samples_per_node=0.25
-)
+INTERIOR_DEFAULTS = dict(fn_mode="log", fn_reg=0.0001, fp_reg=0.0)
 SURFACE_DEFAULTS = dict(
     fn_mode="abs",
     fn_reg=300.0,
     fp_reg=3.0,
-    sample_frac=0.5,
-    samples_per_node=0.0,
     fp_mode="hinge",
     fp_margin=0.2,
     fn_margin=0.05,
@@ -512,10 +508,16 @@ def parse_args(argv):
         "--interior_skin", type=float, help="surface: share sampled just inside"
     )
     parser.add_argument(
-        "--sample_frac", type=float, help="share of each batch rendered per step"
+        "--sample_frac",
+        type=float,
+        default=1.0,
+        help="share of each batch rendered per step (overrides --samples_per_node)",
     )
     parser.add_argument(
-        "--samples_per_node", type=float, help="sample_frac from the node count"
+        "--samples_per_node",
+        type=float,
+        default=0.25,
+        help="render about this many samples per mesh node per step",
     )
     parser.add_argument(
         "--sample_mode", default="stratified", choices=["stratified", "random"]
@@ -556,9 +558,9 @@ def parse_args(argv):
     defaults = SURFACE_DEFAULTS if args.encode_surface else INTERIOR_DEFAULTS
     for k, v in defaults.items():
         if k not in given:
-            if k == "samples_per_node" and "sample_frac" in given:
-                v = 0.0
             setattr(args, k, v)
+    if "sample_frac" in given and "samples_per_node" not in given:
+        args.samples_per_node = 0.0
     if args.interior_skin is None:
         args.interior_skin = 0.0
     if (args.use_mcmc or args.densify_3dgs) and args.ema > 0:
