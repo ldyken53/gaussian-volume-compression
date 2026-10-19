@@ -8,9 +8,14 @@
 #define OPACITY 0.01
 #define WEIGHT_CUTOFF 1e-2
 
-// Truncation radius as a fraction of WEIGHT_CUTOFF: m = sqrt(-2 ln(TRUNC_FRAC *
-// WEIGHT_CUTOFF / w)). Purely a speed/quality dial; per-Gaussian cost goes as m^3.
-#define TRUNC_FRAC 0.1
+// SUPPORT_T: a Gaussian contributes to a sample only where w * exp(-q/2) >= SUPPORT_T, i.e.
+// within its own m = sqrt(2 ln(w / SUPPORT_T)) sigma ellipsoid, and its BVH box is the tight
+// AABB of that same ellipsoid (ported from struct f3cc97d / 4e1c7ce). Before, the box ended at
+// the 1e-3 (TRUNC_FRAC * WEIGHT_CUTOFF) ellipsoid while the per-sample test accepted any q <= 28
+// in whatever BVH leaves the box touched, so the support depended on leaf geometry. 1e-4 was
+// +3.0 dB summed over struct's 14 cells at the old speed. Runtime override: SUPPORT_T env, read
+// once per process. A model must be rendered at the value it was trained with.
+#define SUPPORT_T 1e-4
 
 // 0 = hard cutoff (original): a cell whose accumulated weight is under WEIGHT_CUTOFF is
 // declared empty, written as -1.0, reports weight 0, and receives no gradient. The FN
@@ -31,6 +36,6 @@
 // Keep struct's measured choices: max() denominator (aw + c biases every cell low), and
 // the deliberately mismatched adjoint below the cutoff -- the "consistent" v_i/D form
 // measured 0.2-0.8 dB WORSE in struct (see gaussian-volume-soft-cutoff). Do not "fix".
-#define SOFT_DENOM(aw) (max((aw), (float)WEIGHT_CUTOFF))
+#define SOFT_DENOM(aw) (max((aw), c_denom_floor))   // floor: DENOM_FLOOR env, see auxiliary.h
 
 #endif

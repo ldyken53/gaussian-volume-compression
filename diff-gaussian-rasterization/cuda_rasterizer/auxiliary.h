@@ -14,6 +14,7 @@
 
 #include "config.h"
 #include "stdio.h"
+#include <cstdlib>
 #include <glm/glm.hpp>
 #include <cuBQL/bvh.h>
 
@@ -59,19 +60,71 @@ __forceinline__ __device__ void computeCov3D(const glm::vec3 scale, const float 
 	cov[5] = Sigma[2][2] + epsilon;
 }
 
-// Number of std devs at which a Gaussian of weight w falls to TRUNC_FRAC * WEIGHT_CUTOFF.
-// Clamped at 0: for w below that level the log is positive and the sqrt would be NaN. The
-// old corner box swallowed the NaN (min/max against the position drop it, leaving a
-// zero-size box), but a NaN fed into the tight box makes a box that never rejects, so the
-// BVH query visits every sample. m = 0 keeps the old behaviour: such a Gaussian never
-// reaches the truncation level, so it gets an empty box.
+// Per-Gaussian support threshold T (see SUPPORT_T in config.h). Each compiled file holds its
+// own copy in constant memory; ensureSupportT() fills it once per process from the SUPPORT_T env
+// (else the config.h default), so forward and backward always agree.
+static __constant__ float c_support_t = (float)SUPPORT_T;
+// Blend floor of the SOFT_CUTOFF render: cells render S / max(aw, floor). DENOM_FLOOR env
+// overrides WEIGHT_CUTOFF (0 = no floor). From struct 4e1c7ce: training with the floor and
+// rendering without it was free there (+-0.01 dB).
+static __constant__ float c_denom_floor = (float)WEIGHT_CUTOFF;
+// Occupancy threshold: a cell is empty (-1) iff its accumulated weight aw <= c_occ_t. OCC_T env
+// overrides the build default -- WEIGHT_CUTOFF for the hard cutoff, 0 for SOFT_CUTOFF (empty
+// only when no support reaches the cell). Separate from the blend floor and SUPPORT_T so a
+// surface model can put its inside/outside boundary at an iso-level of aw of its choosing.
+#if SOFT_CUTOFF
+static __constant__ float c_occ_t = 0.0f;
+#else
+static __constant__ float c_occ_t = (float)WEIGHT_CUTOFF;
+#endif
+// OCC_KEEP_AW=1: an empty cell still reports its true aw (instead of 0) and passes the weight
+// gradient (not the value gradient) back, so the FN/FP terms keep acting on cells just under
+// the occupancy threshold -- a margin classifier on aw rather than a cliff at it.
+static __constant__ int c_occ_keep = 0;
+static inline float ensureSupportT()
+{
+	static float t = -1.0f;
+	if (t < 0.0f) {
+		const char* e = getenv("SUPPORT_T");
+		t = e ? (float)atof(e) : (float)SUPPORT_T;
+		cudaMemcpyToSymbol(c_support_t, &t, sizeof(float));
+		if (e) printf("[rasterizer] SUPPORT_T override: %.1e\n", t);
+		const char* o = getenv("OCC_T");
+		if (o) {
+			const float ot = (float)atof(o);
+			cudaMemcpyToSymbol(c_occ_t, &ot, sizeof(float));
+			printf("[rasterizer] OCC_T override: %.1e\n", ot);
+		}
+		if (getenv("OCC_KEEP_AW") && atoi(getenv("OCC_KEEP_AW"))) {
+			const int one = 1;
+			cudaMemcpyToSymbol(c_occ_keep, &one, sizeof(int));
+			printf("[rasterizer] OCC_KEEP_AW on\n");
+		}
+		const char* f = getenv("DENOM_FLOOR");
+		const float fl = f ? (float)atof(f) : (float)WEIGHT_CUTOFF;
+		cudaMemcpyToSymbol(c_denom_floor, &fl, sizeof(float));
+		if (f) printf("[rasterizer] DENOM_FLOOR override: %.1e\n", fl);
+	}
+	return t;
+}
+
+// Squared support radius of a Gaussian of weight w: it contributes where q <= qmax, i.e.
+// w * exp(-q/2) >= T. Negative when w < T (no support at all).
+__forceinline__ __device__ float supportQmax(const float w)
+{
+	return 2.0f * logf(w / c_support_t);
+}
+
+// Support radius in sigmas, clamped at 0 for w < T: the old corner box swallowed the NaN this
+// would otherwise be (min/max against the position drop it, leaving a zero-size box), but a NaN
+// fed into the tight box makes a box that never rejects, so the BVH query visits every sample.
 __forceinline__ __device__ float truncationRadius(const float w)
 {
-	return sqrtf(fmaxf(0.0f, -2 * logf((TRUNC_FRAC * WEIGHT_CUTOFF) / w)));
+	return sqrtf(fmaxf(0.0f, supportQmax(w)));
 }
 
 // Tight axis-aligned bounds of the m-sigma ellipsoid {(x-p)^T cov^-1 (x-p) <= m^2}, the
-// region where the conic keeps a Gaussian's contribution above TRUNC_FRAC*WEIGHT_CUTOFF:
+// region where the conic keeps a Gaussian's contribution above SUPPORT_T:
 // half-width m * sqrt(cov_dd) on each axis. This is the smallest AABB containing the
 // ellipsoid (it touches it on all six faces). It replaces the AABB of the ellipsoid's
 // oriented box, whose per-axis half-width is the L1 sum m * sum_k |R_dk| s_k -- up to

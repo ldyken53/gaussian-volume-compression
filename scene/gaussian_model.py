@@ -14,6 +14,10 @@ import pyvista as pv
 import torch
 from plyfile import PlyData, PlyElement
 from simple_knn._C import distCUDA2
+try:
+    from bvh_diff_gaussian_rasterization import _C as _dgr_C
+except ImportError:
+    _dgr_C = None
 from torch import nn
 import torch.nn.functional as F
 
@@ -69,6 +73,7 @@ class GaussianModel:
         self.should_interpolate = False
         self.mesh = None
         self.max_scale = 0.02
+        self.init_weight = 0.1  # struct initialises at 0.01; train.py --init_weight
         self.setup_functions()
 
     def _apply_cap(self, s):
@@ -184,7 +189,7 @@ class GaussianModel:
         rots[:, 0] = 1
 
         weights = self.inverse_weight_activation(
-            (0.1)
+            (self.init_weight)
             * torch.ones(
                 (fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"
             )
@@ -260,6 +265,63 @@ class GaussianModel:
             lr_delay_mult=training_args.position_lr_delay_mult,
             max_steps=training_args.position_lr_max_steps,
         )
+
+    _EMA_ATTR = {"xyz": "_xyz", "weight": "_weight", "scaling": "_scaling",
+                 "rotation": "_rotation", "value": "_values"}
+
+    def optimizer_step(self, ema=None, ema_w=0.0):
+        """optimizer.step(), but as ONE kernel over all five parameter tensors.
+
+        torch's fused Adam launches once per param group with one block per 65536
+        elements, so on small models each launch runs 1-3 blocks and is latency-bound
+        (~0.26 ms/iteration of GPU time at 44k Gaussians for ~10 us of traffic). Same
+        update, same state tensors (densification edits exp_avg/exp_avg_sq in place, which
+        this reads), so torch keeps owning the state. The first step goes through torch to
+        create that state.
+        """
+        opt = self.optimizer
+        if (getattr(self, "_adam_torch_only", False) or _dgr_C is None
+                or not hasattr(_dgr_C, "multi_adam_") or os.environ.get("MULTI_ADAM", "1") == "0"):
+            opt.step()
+            return False
+        groups = [g for g in opt.param_groups if g["params"][0].grad is not None]
+        if not groups:
+            # Densification just replaced every parameter, so none has a gradient yet;
+            # torch's step is a no-op here (no state change, no step increment).
+            return False
+        states = [opt.state.get(g["params"][0]) for g in groups]
+        if (len(groups) != len(opt.param_groups) or not all(states)
+                or getattr(self, "_adam_t", None) is None):
+            # First step (creates the state), or a partial step: let torch do it, then
+            # re-read the shared step count once. Per-group counts that ever diverge
+            # cannot share one bias correction, so stay on torch from then on.
+            opt.step()
+            steps = {int(st["step"]) for st in (opt.state[g["params"][0]] for g in opt.param_groups)
+                     if st}
+            self._adam_t = steps.pop() if len(steps) == 1 else None
+            self._adam_torch_only = self._adam_t is None
+            return False
+        ps = [g["params"][0] for g in groups]
+        if not all(p.grad.is_contiguous() for p in ps):
+            opt.step()
+            self._adam_t += 1
+            return False
+        self._adam_t += 1
+        b1, b2 = groups[0]["betas"]
+        args = ([p.data for p in ps], [p.grad for p in ps],
+                [st["exp_avg"] for st in states], [st["exp_avg_sq"] for st in states],
+                [float(g["lr"]) for g in groups], self._adam_t,
+                float(b1), float(b2), float(groups[0]["eps"]))
+        fused_ema = (ema is not None and len(groups) == len(opt.param_groups)
+                     and hasattr(_dgr_C, "multi_adam_ema_") and os.environ.get("FUSED_EMA", "1") != "0")
+        if fused_ema:
+            # The Polyak-average update rides along in the same pass over the parameters
+            # (saves a full extra read+write of every parameter and its average).
+            _dgr_C.multi_adam_ema_(*args, [ema[self._EMA_ATTR[g["name"]]] for g in groups], float(ema_w))
+        else:
+            _dgr_C.multi_adam_(*args)
+        torch._foreach_add_([st["step"] for st in states], 1.0)
+        return fused_ema
 
     def update_learning_rate(self, iteration):
         """Learning rate scheduling per step"""
@@ -564,8 +626,44 @@ class GaussianModel:
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
 
+    # ---- Parameter-EMA row bookkeeping -------------------------------------
+    # train.py installs `ema_buffers` (name -> tensor, one row per Gaussian). Any
+    # operation that reorders, drops or appends rows must apply the same change to
+    # them, or the average is taken over unrelated Gaussians -- a failure that is
+    # invisible during training and only corrupts the saved model. Routing this
+    # through prune_points/densification_postfix covers every densification path
+    # (error-based, 3DGS clone/split, MCMC add) with no per-path journal.
+    EMA_NAMES = ("_xyz", "_scaling", "_rotation", "_weight", "_values")
+
+    def _ema_prune(self, valid_points_mask):
+        if getattr(self, "ema_buffers", None) is None:
+            return
+        for n in self.EMA_NAMES:
+            self.ema_buffers[n] = self.ema_buffers[n][valid_points_mask]
+
+    def _ema_extend(self, n_new):
+        if getattr(self, "ema_buffers", None) is None or n_new <= 0:
+            return
+        for n in self.EMA_NAMES:
+            # A freshly created Gaussian has no history: its average starts at its
+            # current value.
+            self.ema_buffers[n] = torch.cat(
+                (self.ema_buffers[n], getattr(self, n)[-n_new:].detach().clone()), dim=0)
+
+    def _ema_reset(self, idx):
+        """Restart the average for rows whose parameters were overwritten in place.
+
+        Mirrors replace_tensors_to_optimizer: wherever the Adam moments are reset
+        because the row now holds a different Gaussian, the EMA must restart too.
+        """
+        if getattr(self, "ema_buffers", None) is None or idx is None or idx.numel() == 0:
+            return
+        for n in self.EMA_NAMES:
+            self.ema_buffers[n][idx] = getattr(self, n)[idx].detach().clone()
+
     def prune_points(self, mask):
         valid_points_mask = ~mask
+        self._ema_prune(valid_points_mask)
         optimizable_tensors = self._prune_optimizer(valid_points_mask)
 
         self._xyz = optimizable_tensors["xyz"]
@@ -631,6 +729,7 @@ class GaussianModel:
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
         self._values = optimizable_tensors["value"]
+        self._ema_extend(new_xyz.shape[0])
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2, max_new_points=None):
         n_points = self.get_xyz.shape[0]
@@ -745,14 +844,131 @@ class GaussianModel:
         )
         return num_added
 
+    def _new_point_knn(self, new_pts):
+        """distCUDA2 (mean squared distance to the 3 nearest other points) for the new
+        points only, against existing + new points.
+
+        distCUDA2 scans every box per point, O(P^2/1024), plus ~10 ms of fixed sort /
+        malloc / free per call: 60-135 ms per densification event at 1.4M-2.6M Gaussians
+        and 36 events per run, although after the growth phase an event adds only the
+        tens to a few hundred Gaussians pruning freed. Instead, bin all points into a grid
+        of cell size R and compare each new point only with the points in its 27 nearby
+        cells, which contain every point within distance R. When the three nearest found
+        all lie within R they are the global three nearest, so the result matches
+        distCUDA2 to float rounding; queries that miss retry once at 2R, and anything
+        still unresolved, or a large batch, falls back to the full pass.
+        """
+        old = self._xyz.detach()
+        n_old, k = old.shape[0], new_pts.shape[0]
+        def full():
+            return distCUDA2(torch.cat([old, new_pts], dim=0))[n_old:]
+        if k == 0 or 8 * k > n_old:
+            # Large batches (the growth phase) are faster through the full pass: the
+            # chunked grid search measured 1.6-2.4 s vs 0.24-0.72 s at 3.3-3.5M queries.
+            return full()
+        dev = old.device
+        pts = torch.cat([old, new_pts], dim=0)
+        P = pts.shape[0]
+        lo = pts.min(dim=0).values
+        ext = (pts.max(dim=0).values - lo).clamp_min(1e-12)
+        spacing = float((torch.prod(ext) / P) ** (1.0 / 3.0))
+        offs = torch.stack(torch.meshgrid(*[torch.arange(-1, 2, device=dev)] * 3,
+                                          indexing="ij"), -1).reshape(-1, 3)
+        out = torch.empty(k, device=dev)
+        todo = torch.arange(k, device=dev)
+        for R in (2.0 * spacing, 4.0 * spacing):
+            G = (ext / R).floor().long() + 1
+            c = ((pts - lo) / R).floor().long().clamp_min(0).minimum(G - 1)
+            lin = (c[:, 2] * G[1] + c[:, 1]) * G[0] + c[:, 0]
+            order = torch.argsort(lin)
+            counts = torch.bincount(lin, minlength=int(torch.prod(G)))
+            starts = torch.cumsum(counts, 0) - counts
+            # Queries go in chunks sized to the densest cell, so a densification event that
+            # adds millions of points (64x growth phase) no longer falls back to the full
+            # O(P^2) pass: the (chunk, 27, M) candidate tensors stay under ~6e7 entries.
+            chunk = max(1024, int(6e7 // (27 * max(1, int(counts.max())))))
+            unresolved = []
+            for ch in torch.split(todo, chunk):
+                raw = c[n_old + ch][:, None, :] + offs[None]                       # (q, 27, 3)
+                # Out-of-grid neighbours must be dropped, not clamped: clamping maps two of a
+                # boundary cell's neighbours onto the same cell and counts its points twice.
+                inb = ((raw >= 0) & (raw < G)).all(-1)
+                qc = raw.clamp_min(0).minimum(G - 1)
+                nb = (qc[..., 2] * G[1] + qc[..., 1]) * G[0] + qc[..., 0]          # (q, 27)
+                cnt = counts[nb] * inb
+                M = int(cnt.max())
+                if M == 0:
+                    unresolved.append(ch)
+                    continue
+                ar = torch.arange(M, device=dev)
+                slot = (starts[nb][..., None] + ar).clamp(max=P - 1)                # (q, 27, M)
+                idx = order[slot].reshape(ch.shape[0], -1)
+                valid = (ar < cnt[..., None]).reshape(ch.shape[0], -1)
+                valid &= idx != (n_old + ch)[:, None]                               # not itself
+                d2 = ((pts[idx] - new_pts[ch][:, None, :]) ** 2).sum(-1)
+                d2 = d2.masked_fill(~valid, float("inf"))
+                if d2.shape[1] < 3:
+                    unresolved.append(ch)
+                    continue
+                best = torch.topk(d2, 3, dim=1, largest=False, sorted=True).values
+                ok = best[:, 2] <= R * R
+                out[ch[ok]] = (best[ok, 0] + best[ok, 1] + best[ok, 2]) / 3.0
+                unresolved.append(ch[~ok])
+            todo = torch.cat(unresolved)
+            if todo.numel() == 0:
+                return out
+        out[todo] = full()[todo]
+        return out
+
+    def _write_rows(self, idx, d):
+        """Overwrite rows idx of every parameter in place with d[group name], zero their Adam
+        moments and restart their EMA. Clears all grads, so this iteration's Adam step is
+        skipped -- as it is after prune/cat, which hands Adam fresh grad-less Parameters."""
+        with torch.no_grad():
+            for group in self.optimizer.param_groups:
+                p = group["params"][0]
+                p.data[idx] = d[group["name"]].to(p.dtype)
+                st = self.optimizer.state.get(p, None)
+                if st:
+                    st["exp_avg"][idx] = 0.0
+                    st["exp_avg_sq"][idx] = 0.0
+                p.grad = None
+        self._ema_reset(idx)
+
+    def densify_in_place(self, empty_points, empty_values, min_weight, new_weight=0.01):
+        """densify_in_empty + prune, but new Gaussians take the dead Gaussians' rows instead
+        of being appended after a full-size prune. Once the budget is full every event
+        replaces exactly as many as it prunes, and prune/cat copied all ~10M rows of the five
+        parameters, their Adam moments and EMA (~75 ms/event at richtmyer 64x); this writes
+        only the replaced rows. Only the order of the Gaussians differs."""
+        d = self._new_gaussians(empty_points, empty_values, new_weight)
+        k = empty_points.shape[0]
+        # Same dead test as densify_and_prune's prune (strict <).
+        slots = torch.nonzero((self.get_weight < min_weight).squeeze(-1)).squeeze(-1)
+        m = min(k, slots.numel())
+        if m > 0:
+            self._write_rows(slots[:m], {n: v[:m] for n, v in d.items()})
+        if k > m:
+            self.densification_postfix(*(d[n][m:] for n in ("xyz", "weight", "scaling", "rotation", "value")))
+        elif slots.numel() > m:
+            mask = torch.zeros(self._xyz.shape[0], dtype=torch.bool, device=self._xyz.device)
+            mask[slots[m:]] = True
+            self.prune_points(mask)
+
+    def _new_gaussians(self, empty_points, empty_values, new_weight=0.01):
+        dist2 = torch.clamp_min(self._new_point_knn(empty_points) * 0.1, 0.0000001)
+        n = empty_points.shape[0]
+        rot = torch.zeros((n, 4), device="cuda"); rot[:, 0] = 1
+        return {
+            "xyz": empty_points,
+            "weight": self.inverse_weight_activation(new_weight * torch.ones((n, 1), dtype=torch.float, device="cuda")),
+            "scaling": self.inverse_scaling_activation(torch.sqrt(dist2))[..., None].repeat(1, 3),
+            "rotation": rot,
+            "value": self.inverse_value_activation(torch.clamp(empty_values, VALUE_EPS, 1.0 - VALUE_EPS)),
+        }
+
     def densify_in_empty(self, empty_points, empty_values, new_scale):
-        # Concatenate existing and new points for distance computation
-        all_points = torch.cat([self.get_xyz, empty_points], dim=0)
-        all_dist2 = torch.clamp_min(
-            distCUDA2(all_points) * 0.1,
-            0.0000001,
-        )
-        dist2 = all_dist2[len(self.get_xyz):]
+        dist2 = torch.clamp_min(self._new_point_knn(empty_points) * 0.1, 0.0000001)
         new_scaling = self.inverse_scaling_activation(torch.sqrt(dist2))[..., None].repeat(1, 3)
         # new_scaling = self.inverse_scaling_activation(
         #     (new_scale) # Slightly bigger than 1 cell in 100^3 grid
@@ -807,15 +1023,12 @@ class GaussianModel:
         #             remaining -= added
 
 
-        n_before = self._xyz.shape[0]
+        if os.environ.get("DENSIFY_INPLACE", "1") != "0":
+            self.densify_in_place(empty_points, empty_values, min_weight)
+            return
         self.densify_in_empty(empty_points, empty_values, new_scale)
 
         prune_mask = (self.get_weight < min_weight).squeeze()
-        # Journal of this event's topology change, for the parameter EMA in
-        # train.py: the event appends rows then drops prune_mask rows, and the EMA
-        # buffers must be remapped identically or they average unrelated Gaussians
-        # (count can stay constant while ORDER shifts: prune k, add k).
-        self.ema_journal = (n_before, prune_mask.detach().clone())
 
         # scales = self.get_scaling  # (N, 3)
         # max_axis_scale = torch.min(scales, dim=1).values  # (N,)
@@ -824,8 +1037,6 @@ class GaussianModel:
 
         # print(f"Number of Gaussians pruned: {torch.count_nonzero(prune_mask)}")
         self.prune_points(prune_mask)
-
-        torch.cuda.empty_cache()
 
     def convert_ply_to_ascii(self, binary_ply_file_path):
         ascii_ply_file_path = binary_ply_file_path.replace(".ply", "_ascii.ply")

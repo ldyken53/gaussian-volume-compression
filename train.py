@@ -14,7 +14,7 @@ from tqdm import tqdm
 import pyvista as pv
 
 from arguments import ModelParams, OptimizationParams, PipelineParams
-from gaussian_renderer import init_rasterizer, render, build_bvh
+from gaussian_renderer import init_rasterizer, render, build_bvh, build_bvh_cached, sample_bvh_prim_ids, margin_set_exterior, margin_fp
 from gpu_mesh_sampling import gpu_sample, gpu_sampleu
 from scene import GaussianModel, Scene
 from utils.debug_utils import tensor_to_vtk, analyze_array
@@ -31,6 +31,11 @@ except ImportError:
 
 DEBUG = True
 
+try:
+    from bvh_diff_gaussian_rasterization.fused import fused_volume_loss as _fused_loss
+except ImportError:  # a rasterizer build without fused_ops.cu
+    _fused_loss = None
+
 # Fixed seed for the sample points, so the cached ground truth stays valid and every
 # run sees the same points.
 SAMPLE_SEED = 20260903
@@ -42,6 +47,8 @@ def sample_cache_path(cache_dir, source_path, cell_count, num_batches, encode_su
         return None
     stem = os.path.splitext(os.path.basename(source_path))[0]
     tag = f"{stem}_c{cell_count}_b{num_batches}_s{int(bool(encode_surface))}"
+    if encode_surface and args.interior_skin > 0:
+        tag += f"_skin{args.interior_skin:g}"
     return os.path.join(cache_dir, tag + "_gt.npy")
 
 
@@ -74,7 +81,7 @@ def sample_mesh_points(mesh, num_batches, batch_size, device="cuda"):
 
     return samples.reshape(num_batches, batch_size, 3)
 
-def sample_exterior_points(mesh, num_batches, batch_size, offset=0.01, device="cuda"):
+def sample_exterior_points(mesh, num_batches, batch_size, offset=0.01, device="cuda", inward=False):
     """Sample points just outside the mesh surface using properly oriented normals."""
     surf = mesh.extract_surface().triangulate().compute_normals(cell_normals=True, point_normals=False)
     print(surf.faces.shape)
@@ -101,7 +108,9 @@ def sample_exterior_points(mesh, num_batches, batch_size, offset=0.01, device="c
     normals = face_normals[face_idx]
 
     dist = torch.rand(total, 1, device=device) * offset
-    samples = surf_pts + normals * dist
+    # inward=True mirrors the exterior band just inside the surface (the probe labels any
+    # point that a flipped normal or a concavity puts outside as exterior anyway).
+    samples = surf_pts + normals * (-dist if inward else dist)
 
     return samples.reshape(num_batches, batch_size, 3)
 
@@ -131,11 +140,38 @@ def training(
     log_data = []
     first_iter = 0
     prepare_output(dataset)
+    # Densification here has always ended at cap_max + 1000; --cap_exact makes cap_max the
+    # final count, as struct d92929a does.
+    n_final = args.cap_max if args.cap_exact else args.cap_max + 1000
     gaussians = GaussianModel()
+    gaussians.init_weight = args.init_weight
+    scene = Scene(dataset, gaussians, normalized=is_scaled, fraction=fraction,
+                  max_init=_max_init(args, n_final))
+    if args.max_scale_k > 0:
+        # From struct (f3cc97d/5312eee): the scale cap grows with the Gaussian spacing
+        # N^(-1/3); --max_scale is the floor. That spacing assumes the data fills the unit
+        # cube, as struct's volumes do. A mesh normalised into it can fill far less (sf1's
+        # bounding box is 10% of it, mito's 15%), so --max_scale_vol uses the spacing
+        # (V_bbox / N)^(1/3) instead; identical when the box is the whole cube.
+        vol = 1.0
+        if args.max_scale_vol:
+            vol = float(np.prod(np.array(gaussians.maxes) - np.array(gaussians.mins)))
+        args.max_scale = max(args.max_scale, args.max_scale_k * (vol / n_final) ** (1.0 / 3.0))
+        print(f"max_scale {args.max_scale:.4f} (k={args.max_scale_k}, N={n_final}, V={vol:.3f})")
+    with open(os.path.join(dataset.model_path, "max_scale"), "w") as _msf:
+        _msf.write(f"{args.max_scale}\n")
     gaussians.max_scale = args.max_scale
-    scene = Scene(dataset, gaussians, normalized=is_scaled, fraction=fraction)
     struct = dataset.source_path.lower().endswith('.vtk')
     gaussians.training_setup(opt)
+    if args.densify_growth > 1.0:
+        # From struct 5312eee: enough growth events that each grows the model by about
+        # densify_growth, at least 3 and finished by half-way so the last ones still train.
+        n0 = max(1, gaussians.get_xyz.shape[0])
+        latest = max(3, (opt.iterations // 2 - opt.densify_from_iter) // opt.densification_interval)
+        want = math.ceil(math.log(max(n_final, n0) / n0) / math.log(args.densify_growth))
+        args.densify_events = int(min(latest, max(3, want)))
+        print(f"densify_events auto: {args.densify_events} ({n0:,} -> {n_final:,} Gaussians at "
+              f"x{args.densify_growth:g} per event, at most {latest})")
     print("Before save")
     scene.save(0)
     if checkpoint:
@@ -291,11 +327,20 @@ def training(
         t0 = time.time()
         torch.manual_seed(SAMPLE_SEED)
         if encode_surface:
-            size1 = int(math.ceil(size * 0.8))
             size2 = int(math.floor(size * 0.2))
+            # --interior_skin: a share of the batch sampled in a band just INSIDE the surface,
+            # mirroring the exterior band, so both sides of the boundary are sampled at the
+            # same density per unit area. Otherwise the inside of the boundary only gets the
+            # few uniform-volume samples that happen to land there -- a share set by the
+            # domain's surface-to-volume ratio -- and the FN/FP balance shifts per dataset.
+            size3 = int(math.floor(size * args.interior_skin))
+            size1 = size - size2 - size3
             big_samples = sample_mesh_points(gaussians.mesh, 100, size1).cpu().numpy()
             big_samples2 = sample_exterior_points(gaussians.mesh, 100, size2).cpu().numpy()
-            big_samples = np.concatenate([big_samples, big_samples2], axis=1)
+            parts = [big_samples, big_samples2]
+            if size3 > 0:
+                parts.append(sample_exterior_points(gaussians.mesh, 100, size3, inward=True).cpu().numpy())
+            big_samples = np.concatenate(parts, axis=1)
         else:
             big_samples = sample_mesh_points(gaussians.mesh, 100, size).cpu().numpy()
         print(f"sample_mesh_points: {time.time() - t0:.1f}s")
@@ -443,7 +488,53 @@ def training(
         cell_count,
         use_gaussian_bvh=use_gaussian_bvh
     )
+    if args.samples_per_node > 0:
+        # Rule: render about this many samples per MESH NODE per iteration, never more than the
+        # whole batch. The fixed 128^3 = 2.1M batch oversamples small meshes (mito 0.97M nodes,
+        # rbl 0.73M) and undersamples big ones (valley 18.3M, earthquake 51M), which is why
+        # mito/rbl lose nothing at 1/8 batches while valley/earthquake lose 0.8-1.6 dB at 1/2.
+        n_nodes = int(gaussians.mesh.n_points)
+        args.sample_frac = min(1.0, args.samples_per_node * n_nodes / size)
+        print(f"samples_per_node {args.samples_per_node:g}: {n_nodes} nodes -> sample_frac {args.sample_frac:.4f}", flush=True)
+    if args.samples_per_gaussian > 0:
+        # Rule instead of a per-dataset --sample_frac: render about this many samples per
+        # final Gaussian per iteration, never more than the whole batch. The subsampled
+        # configs only lost nothing because they had samples to spare (mito 1024x 350 per
+        # Gaussian at full batch, sf1 154); valley 64x has 5.5 and loses 1.6 dB at half.
+        args.sample_frac = min(1.0, args.samples_per_gaussian * n_final / size)
+        print(f"samples_per_gaussian {args.samples_per_gaussian:g}: sample_frac {args.sample_frac:.4f}", flush=True)
+    from bvh_diff_gaussian_rasterization import _C as _rast_C
+    if not hasattr(_rast_C, "build_bvh_cached"):
+        # An older rasterizer build without these entry points: run without them.
+        args.leaf_order = args.bvh_cache = 0
+    if args.leaf_order and not stream_samples and not use_gaussian_bvh:
+        # Put every batch in sample-BVH leaf order, once: cuBQL re-sorts the (Morton-sorted)
+        # points by its own codes, so primIDs is a scattered permutation and every per-sample
+        # load in the render kernels is a gather. After this, rebuilding on the permuted batch
+        # gives near-identity primIDs. Preprocessing, like the Morton sort above (untimed).
+        t0 = time.time()
+        for _b in range(num_batches):
+            build_bvh(big_samples_cuda[_b], False, use_gaussian_bvh)
+            _perm = sample_bvh_prim_ids().long()
+            big_samples_cuda[_b] = big_samples_cuda[_b][_perm]
+            big_gt_cuda[_b] = big_gt_cuda[_b][_perm]
+            if args.bvh_cache and not (0.0 < args.sample_frac < 1.0):
+                # Prebuild the cached BVH of the permuted batch (sample preparation, like the
+                # sort and the GT probe, so outside the timed loop).
+                build_bvh_cached(big_samples_cuda[_b], _b)
+        torch.cuda.synchronize()
+        print(f"leaf order: {num_batches} batches permuted in {time.time() - t0:.1f}s", flush=True)
     build_bvh(big_samples_cuda[0], pipe.debug, use_gaussian_bvh)
+    margin_n_ext = None
+    if encode_surface and args.fp_mode == "margin" and not stream_samples:
+        # One exterior set per batch (the FULL batch's gt == -1 samples, whatever
+        # --sample_frac draws), each with its own cached BVH; preprocessing, untimed.
+        margin_n_ext = []
+        for _b in range(num_batches):
+            _ext = big_samples_cuda[_b][big_gt_cuda[_b] == -1]
+            margin_set_exterior(_ext, _b)
+            margin_n_ext.append(max(1, int(_ext.shape[0])))
+        print(f"margin FP: {num_batches} exterior sets, mean {np.mean(margin_n_ext):.0f} samples", flush=True)
 
     # loss_idx = (gt == 2)
     # loss_samples = big_samples_cuda[0][loss_idx]
@@ -456,9 +547,17 @@ def training(
     save_seconds = 0.0
     # PROFILE_ITERS=N: profile iterations 1000..1000+N and dump the per-kernel table.
     # Diagnostic only -- unset, this costs nothing.
+    # PROFILE_MODE=nsys instead opens a cudaProfilerApi capture range over the same
+    # iterations (run under `nsys profile --capture-range=cudaProfilerApi`), with NVTX
+    # ranges around each phase (struct d0b03fb).
     _prof_n = int(os.environ.get("PROFILE_ITERS", 0))
     _prof = None
-    if _prof_n:
+    _nsys = _prof_n > 0 and os.environ.get("PROFILE_MODE") == "nsys"
+    _nv_on = False
+    def _nv(name=None):
+        if _nv_on:
+            torch.cuda.nvtx.range_pop() if name is None else torch.cuda.nvtx.range_push(name)
+    if _prof_n and not _nsys:
         from torch.profiler import profile, ProfilerActivity
         _prof = profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA])
     sub_k = 0
@@ -479,6 +578,7 @@ def training(
     # --ema state: dict of buffers, (re)built lazily so densification cannot desync it.
     ema_params = None
     ema_names = ["_xyz", "_scaling", "_rotation", "_weight", "_values"]
+    hinge_frozen, hinge_lv_sum, hinge_lv_n = None, 0.0, 0
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):
@@ -516,6 +616,14 @@ def training(
                 sub_idx = torch.randint(0, size, (sub_k,), device="cuda").sort().values
             gt = gt[sub_idx]
             current_samples = current_samples[sub_idx]
+        if _nsys:
+            if iteration == 1000:
+                torch.cuda.synchronize(); torch.cuda.cudart().cudaProfilerStart(); _nv_on = True
+            elif iteration == 1000 + _prof_n:
+                torch.cuda.synchronize(); _nv_on = False; torch.cuda.cudart().cudaProfilerStop()
+                print(f"NSYS window done ({_prof_n} iterations)", flush=True)
+                return
+        _nv("iter")
         if _prof is not None:
             if iteration == 1000:
                 torch.cuda.synchronize(); _prof.__enter__()
@@ -526,10 +634,16 @@ def training(
                 print(f"PROFILED {_prof_n} iterations", flush=True)
                 return
         iter_start.record()
-        build_bvh(current_samples, deb, use_gaussian_bvh)
+        _nv("bvh")
+        if args.bvh_cache and sub_k == 0 and not use_gaussian_bvh and not stream_samples:
+            build_bvh_cached(current_samples, jit_idx)
+        else:
+            build_bvh(current_samples, deb, use_gaussian_bvh)
+        _nv()
         xyz_lr = gaussians.update_learning_rate(iteration)
 
         # Render
+        _nv("render+loss")
         render_pkg = render(
             gaussians,
             deb
@@ -546,89 +660,154 @@ def training(
         #     intersect_pkg["intersections"],
         #     intersect_pkg["intersection_weight"]
         # )
-        overlap_loss = torch.tensor(0, device="cuda")
+        # (An unused `overlap_loss = torch.tensor(0, device="cuda")` stood here: a pageable
+        # host-to-device copy that blocked the CPU on the forward render every iteration.)
         # overlap_loss = torch.mean(torch.pow(10, 100 * intersection_weights) - 1)
         # overlap_loss = torch.mean(intersection_weights)
-        recon_mask = torch.logical_and(gt != -1, cells != -1)
-        # l1_lv = l1_loss(cells[recon_mask], gt[recon_mask])
-        # PSNR is MSE-based, so L2 optimises the reported metric directly.
-        if encode_surface:
-            if args.loss == "l2":
-                l1_lv = torch.mean((cells - gt) ** 2)
+        # Hinge FN target just above the occupancy threshold (OCC_T env, default the hard
+        # cutoff's 0.01): (1 + --fn_margin) above it for surface models, 10% for interior.
+        # Keep it symmetric with --fp_margin: the dead band between the two hinge targets
+        # decides where the boundary settles, and centred below OCC_T it leaves FNs.
+        fn_cut = ((1.0 + args.fn_margin) if encode_surface else 1.1) * float(os.environ.get("OCC_T", "0.01"))
+        fn_tau = args.fn_thresh if args.fn_mode == "log" else fn_cut
+        # FP threshold: log -> the per-Gaussian support threshold (any covered cell has aw >=
+        # it); hinge -> a margin below the occupancy threshold OCC_T.
+        if args.fp_mode == "hinge":
+            fp_t = (1.0 - args.fp_margin) * float(os.environ.get("OCC_T", "0.01"))
+        else:
+            fp_t = float(os.environ.get("SUPPORT_T", "1e-4"))
+        if _fused_loss is not None and os.environ.get("FUSED", "1") != "0":
+            # Same loss as the torch branch below in 3 kernels instead of ~20 (+ ~15
+            # backward); struct d0b03fb. FUSED=0 restores the torch branch.
+            # --hinge_freeze F: RMSE-relative hinge weights until iteration F, then fixed at
+            # the weights the mean data loss of iterations F-50..F gives (one host read).
+            hw_fn, hw_fp, hw_rel = args.fn_reg, args.fp_reg, args.hinge_rel_pow
+            if hinge_frozen is not None:
+                hw_fn, hw_fp, hw_rel = args.fn_reg * hinge_frozen, args.fp_reg * hinge_frozen, 0.0
+            _lo = _fused_loss(cells, gt, weights, l1=args.loss == "l1",
+                              masked=(not encode_surface) or args.surf_mask_data,
+                              fn_mode=args.fn_mode, fn_thresh=fn_tau, fn_reg=hw_fn,
+                              fp_reg=hw_fp if (encode_surface and args.fp_mode != "margin") else 0.0,
+                              fn_rel=args.fn_rel,
+                              # only when used, so builds predating the log FP term still run
+                              **({"fp_t": fp_t, "fp_mode": args.fp_mode}
+                                 if args.fp_mode in ("log", "hinge") else {}),
+                              **({"norm_all": True} if args.fnfp_norm == "all" else {}),
+                              **({"rel_pow": hw_rel} if hw_rel > 0 else {}))
+            loss, l1_lv, false_negative, false_positive = _lo[0], _lo[1], _lo[2], _lo[3]
+            if args.hinge_freeze > 0 and args.hinge_rel_pow > 0 and hinge_frozen is None:
+                if iteration > args.hinge_freeze - 50:
+                    hinge_lv_sum = hinge_lv_sum + l1_lv.detach()
+                    hinge_lv_n += 1
+                if iteration >= args.hinge_freeze:
+                    hinge_frozen = float(hinge_lv_sum / max(hinge_lv_n, 1)) ** args.hinge_rel_pow
+                    print(f"hinge weights frozen at iteration {iteration}: scale {hinge_frozen:.3e} -> "
+                          f"fn {args.fn_reg * hinge_frozen:.4g} fp {args.fp_reg * hinge_frozen:.4g}", flush=True)
+            fn_vals = None  # computed only when a log line needs it
+        else:
+            recon_mask = torch.logical_and(gt != -1, cells != -1)
+            # l1_lv = l1_loss(cells[recon_mask], gt[recon_mask])
+            # PSNR is MSE-based, so L2 optimises the reported metric directly.
+            if encode_surface and not args.surf_mask_data:
+                if args.loss == "l2":
+                    l1_lv = torch.mean((cells - gt) ** 2)
+                else:
+                    l1_lv = torch.abs(cells - gt).mean()
             else:
-                l1_lv = torch.abs(cells - gt).mean()
-        else:
-            # Masked mean written as a multiply: boolean indexing (cells[recon_mask])
-            # launches nonzero(), whose data-dependent output size forces a device
-            # sync every iteration. Mathematically identical.
-            denom = recon_mask.sum().clamp_min(1)
-            if args.loss == "l2":
-                l1_lv = (((cells - gt) ** 2) * recon_mask).sum() / denom
+                # Masked mean written as a multiply: boolean indexing (cells[recon_mask])
+                # launches nonzero(), whose data-dependent output size forces a device
+                # sync every iteration. Mathematically identical.
+                denom = recon_mask.sum().clamp_min(1)
+                if args.loss == "l2":
+                    l1_lv = (((cells - gt) ** 2) * recon_mask).sum() / denom
+                else:
+                    l1_lv = ((cells - gt).abs() * recon_mask).sum() / denom
+            # l1_lv = ((cells[recon_mask] - gt[recon_mask]) ** 2).mean()
+            # TODO: FIX FP AND FN FOR CHANGING CELL COUNTS
+            k = 600  # Adjust this to control decay rate
+            # fn_mask = torch.logical_and(gt != -1, weights < 0.03)
+            # false_negative = torch.exp(-k * weights[fn_mask])
+            # false_negative = false_negative[false_negative > 0].mean()
+            # Cells at W == 0 are excluded: the rasterizer zeroes them and skips them in the
+            # backward pass, so they carry no gradient and would only dilute the mean.
+            # Written as a multiply, not boolean indexing -- identical maths, but indexing's
+            # data-dependent output shape forces a GPU sync every iteration.
+            fn_mask = torch.logical_and(gt != -1, weights > 0.0)
+            if args.fn_mode == "log":
+                # Log barrier from struct (f3cc97d): log(fn_thresh / aw) for covered cells below
+                # fn_thresh. Only meaningful with SOFT_CUTOFF 1, where weakly covered cells keep
+                # their true aw (under the hard cutoff every masked cell has aw > 0.01 > fn_thresh).
+                # eps caps the penalty at log(100) where aw -> 0.
+                eps = 0.01 * args.fn_thresh
+                fn_vals = torch.clamp(torch.log(args.fn_thresh / (weights + eps)), min=0) * fn_mask
             else:
-                l1_lv = ((cells - gt).abs() * recon_mask).sum() / denom
-        # l1_lv = ((cells[recon_mask] - gt[recon_mask]) ** 2).mean()
-        # TODO: FIX FP AND FN FOR CHANGING CELL COUNTS
-        k = 600  # Adjust this to control decay rate
-        # fn_mask = torch.logical_and(gt != -1, weights < 0.03)
-        # false_negative = torch.exp(-k * weights[fn_mask])
-        # false_negative = false_negative[false_negative > 0].mean()
-        # Cells at W == 0 are excluded: the rasterizer zeroes them and skips them in the
-        # backward pass, so they carry no gradient and would only dilute the mean.
-        # Written as a multiply, not boolean indexing -- identical maths, but indexing's
-        # data-dependent output shape forces a GPU sync every iteration.
-        fn_cut = 0.0105 if encode_surface else 0.011
-        fn_mask = torch.logical_and(gt != -1, weights > 0.0)
-        fn_vals = torch.clamp(fn_cut - weights, min=0) * fn_mask
-        fn_count = (fn_vals > 0).sum().float()
-        # The FN penalty is an absolute quantity (at most fn_reg * fn_cut) while the data
-        # loss varies by ~100x across datasets: mito sits at 1e-4..1e-3 where struct sits
-        # at 3e-3..3e-2. So a single absolute fn_reg cannot be right for both. In "rel"
-        # mode fn_reg is a multiple of the current data loss instead, which self-calibrates.
-        fn_scale = args.fn_reg * l1_lv.detach() if args.fn_mode == "rel" else args.fn_reg
-        false_negative = fn_scale * fn_vals.sum() / (fn_count + 1e-8)
-        # false_negative = args.fn_reg * fn_vals.mean()
+                fn_vals = torch.clamp(fn_cut - weights, min=0) * fn_mask
+            fn_count = (fn_vals > 0).sum().float()
+            # The FN penalty is an absolute quantity (at most fn_reg * fn_cut) while the data
+            # loss varies by ~100x across datasets: mito sits at 1e-4..1e-3 where struct sits
+            # at 3e-3..3e-2. So a single absolute fn_reg cannot be right for both. In "rel"
+            # mode fn_reg is a multiple of the current data loss instead, which self-calibrates.
+            fn_rel = args.fn_mode == "rel" or args.fn_rel
+            fn_scale = args.fn_reg * l1_lv.detach() if fn_rel else args.fn_reg
+            if args.fnfp_norm == "all":
+                fn_count = (gt != -1).sum().float()
+            false_negative = fn_scale * fn_vals.sum() / (fn_count + 1e-8)
+            # false_negative = args.fn_reg * fn_vals.mean()
 
-        # Multiply form for the same reason as above; and with encode_surface off the
-        # fp term never enters the loss, so skip computing it entirely.
-        if encode_surface:
-            fp_mask = torch.logical_and(gt == -1, weights > 0.0)
-            fp_vals = weights * fp_mask
-            false_positive = args.fp_reg * fp_vals.sum() / ((fp_vals > 0).sum().float() + 1e-8)
-        else:
-            false_positive = torch.zeros((), device="cuda")
+            # Multiply form for the same reason as above; and with encode_surface off the
+            # fp term never enters the loss, so skip computing it entirely.
+            if encode_surface and args.fp_mode != "margin":
+                fp_mask = torch.logical_and(gt == -1, weights > 0.0)
+                if args.fp_mode == "log":
+                    fp_vals = torch.clamp(torch.log(torch.clamp_min(weights, 1e-30) / fp_t), min=0) * fp_mask
+                elif args.fp_mode == "hinge":
+                    fp_vals = torch.clamp(weights - fp_t, min=0) * fp_mask
+                    fp_mask = fp_vals > 0   # mean over violators, like the FN hinge
+                else:
+                    fp_vals = weights * fp_mask
+                fp_den = (gt == -1).sum().float() if args.fnfp_norm == "all" else fp_mask.sum().float()
+                false_positive = args.fp_reg * fp_vals.sum() / (fp_den + 1e-8)
+            else:
+                false_positive = torch.zeros((), device="cuda")
 
-        # t = 0.01
-        # delta = 0.002
-        # # fn_mask = (gt != -1)
-        # if fn_mask.any():
-        #     false_negative = torch.exp(-k * weights[fn_mask])
-        #     # false_negative = torch.exp(-k * torch.clamp(weights[fn_mask] - 0.01, 0.0))
-        #     # false_negative = torch.clamp(0.015 - weights[fn_mask], min=0)
-        #     # false_negative = 0.01 * (torch.clamp((t + delta - weights[fn_mask]) / delta, min=0.0) ** 2).mean()
-        #     # false_negative = (torch.pow(10, -1000 * (weights[fn_mask] - 0.01))).mean()
-        #     mean_mask = (false_negative > 0.0)
-        #     if mean_mask.any():
-        #         false_negative = false_negative[mean_mask].mean()
-        #     else:
-        #         false_negative = torch.tensor(0., device="cuda")
-        # else:
-        #     false_negative = torch.tensor(0., device="cuda")
-        # mask = torch.logical_and(gt == -1, weights > 0)
-        # if mask.any() and not struct:
-        #     false_positive = (1 * (1 - torch.exp(-k * weights[mask]))).mean()
-        # else:
-        #     false_positive = torch.tensor(0., device="cuda")
-        if encode_surface:
-            loss = l1_lv + false_negative + false_positive
-        else:
-            loss = l1_lv + false_negative
-        if gaussians.get_values.shape[0] > args.cap_max:
+            # t = 0.01
+            # delta = 0.002
+            # # fn_mask = (gt != -1)
+            # if fn_mask.any():
+            #     false_negative = torch.exp(-k * weights[fn_mask])
+            #     # false_negative = torch.exp(-k * torch.clamp(weights[fn_mask] - 0.01, 0.0))
+            #     # false_negative = torch.clamp(0.015 - weights[fn_mask], min=0)
+            #     # false_negative = 0.01 * (torch.clamp((t + delta - weights[fn_mask]) / delta, min=0.0) ** 2).mean()
+            #     # false_negative = (torch.pow(10, -1000 * (weights[fn_mask] - 0.01))).mean()
+            #     mean_mask = (false_negative > 0.0)
+            #     if mean_mask.any():
+            #         false_negative = false_negative[mean_mask].mean()
+            #     else:
+            #         false_negative = torch.tensor(0., device="cuda")
+            # else:
+            #     false_negative = torch.tensor(0., device="cuda")
+            # mask = torch.logical_and(gt == -1, weights > 0)
+            # if mask.any() and not struct:
+            #     false_positive = (1 * (1 - torch.exp(-k * weights[mask]))).mean()
+            # else:
+            #     false_positive = torch.tensor(0., device="cuda")
+            if encode_surface:
+                loss = l1_lv + false_negative + false_positive
+            else:
+                loss = l1_lv + false_negative
+        if margin_n_ext is not None:
+            # Support-margin FP (margin.cu), mean over the batch's exterior samples.
+            false_positive = args.fp_reg * margin_fp(gaussians, jit_idx, fp_t) / margin_n_ext[jit_idx]
+            loss = loss + false_positive
+        if gaussians._values.shape[0] > args.cap_max:
             n = True
         if use_mcmc:
             loss = loss + args.weight_reg * torch.abs(gaussians.get_weight).mean()
             loss = loss + args.scale_reg * torch.abs(gaussians.get_scaling).mean()
 
+        _nv(); _nv("backward")
         loss.backward()
+        _nv()
         iter_end.record()
 
         with torch.no_grad():
@@ -653,6 +832,18 @@ def training(
                 #     error_thresh *= 0.9
                 #     print(f"Lossy samples low, new error thresh: {error_thresh}")
 
+            def _fn_count():
+                # Cells the FN term is active on (logging only; the fused loss does not
+                # materialise fn_vals).
+                if fn_vals is not None:
+                    return int((fn_vals > 0).sum())
+                m = torch.logical_and(gt != -1, weights > 0.0)
+                if args.fn_mode == "log":
+                    m = torch.logical_and(m, weights + 0.01 * fn_tau < fn_tau)
+                else:
+                    m = torch.logical_and(m, weights < fn_tau)
+                return int(m.sum())
+
             # Logging
             if log_to_file and iteration % 20 == 0:
                 # (cells.cpu() used to be pulled here for a tensor_to_vtk dump that is
@@ -671,7 +862,7 @@ def training(
                     "iteration": iteration,
                     "loss": loss.item(),
                     "l_v": l1_lv.item(),
-                    "fn_cells": int(fn_count),
+                    "fn_cells": _fn_count(),
                     "fn_loss": float(false_negative),
                     "dead_cells": int((weights == 0).sum()),
                     "w_lt_002": int(torch.logical_and(weights > 0, weights < 0.02).sum()),
@@ -722,7 +913,7 @@ def training(
                 # print(f"0 cells: {torch.count_nonzero(cells == 0).cpu().numpy()}, -1: {torch.count_nonzero(cells == -1).cpu().numpy()}")
                 print(f"False negative: {torch.count_nonzero(torch.logical_and(cells== -1, gt != -1))}, false positive: {torch.count_nonzero(torch.logical_and(cells != -1, gt == -1))}")
                 print(f"Num Gaussians: {gaussians.get_values.shape[0]}, psnr: {psnr}, psnr2: {psnr2}, weight: {torch.mean(weights)}")
-                print(f"False negative mask: {torch.count_nonzero((fn_vals > 0))}, false negative {false_negative.item()}, false positive {false_positive.item()}")
+                print(f"False negative mask: {_fn_count()}, false negative {false_negative.item()}, false positive {false_positive.item()}")
                 print(f"Weight loss: {args.weight_reg * torch.abs(gaussians.get_weight).mean()}")
                 # print(f"loss_samples.shape: {loss_samples.shape[0]}")
                 # print(f"Overlap loss: {overlap_loss} mean {torch.mean(intersection_weights)} max: {torch.max(intersection_weights)} median: {torch.median(intersection_weights)} intersections: {torch.mean(intersections)}, max: {torch.max(intersections)}")
@@ -805,6 +996,7 @@ def training(
             #         "time": float(saving_iterations.index(iteration))
             #     })
 
+            _nv("densify")
             # Densification
             if (iteration <= opt.densify_until_iter and
                 iteration >= opt.densify_from_iter and
@@ -825,7 +1017,7 @@ def training(
                     budget = int(
                         args.cap_max - gaussians.get_values.shape[0]
                         + torch.count_nonzero(gaussians.get_weight <= 0.005)
-                        + 1000
+                        + (n_final - args.cap_max)
                     )
                     if args.densify_batch > 0:
                         k3 = min(args.densify_batch, budget)
@@ -857,7 +1049,7 @@ def training(
                     budget = int(
                         args.cap_max - gaussians.get_values.shape[0]
                         + torch.count_nonzero(gaussians.get_weight <= 0.005)
-                        + 1000
+                        + (n_final - args.cap_max)
                     )
                     if args.densify_batch > 0:
                         k = min(args.densify_batch, budget)
@@ -898,40 +1090,43 @@ def training(
                           gt[loss_idx].reshape(-1, 1),
                           k
                       )
-                      if ema_params is not None:
-                          # Replay the event's append+prune on the EMA buffers. After
-                          # P = cat(old, new)[keep], the first keep_old.sum() rows of
-                          # the live tensors are surviving OLD rows (order preserved)
-                          # and the rest are freshly added ones, whose EMA starts at
-                          # their current value.
-                          n_before, mask_j = gaussians.ema_journal
-                          keep_old = ~mask_j[:n_before]
-                          k_old = int(keep_old.sum())
-                          for n in ema_names:
-                              cur = getattr(gaussians, n).detach()
-                              buf = cur.clone()
-                              buf[:k_old] = ema_params[n][keep_old]
-                              ema_params[n] = buf
+                      # The EMA buffers (gaussians.ema_buffers) follow every row
+                      # mutation through GaussianModel's _ema_prune / _ema_extend /
+                      # _ema_reset hooks (struct de47fcd), so nothing to replay here.
                 densifies += 1
 
+            _nv(); _nv("adam+ema")
             # Optimizer step
             if iteration < opt.iterations:
-                gaussians.optimizer.step()
+                # One Adam launch over all five tensors, with the Polyak-average update
+                # riding along in the same pass once the EMA is live (struct d0b03fb /
+                # f3cc97d). MULTI_ADAM=0 / FUSED_EMA=0 restore the torch paths.
+                ema_ready = (args.ema > 0 and iteration >= args.ema_from and ema_params is not None
+                             and ema_params["_xyz"].shape[0] == gaussians._xyz.shape[0])
+                ema_done = gaussians.optimizer_step(ema=ema_params if ema_ready else None,
+                                                    ema_w=1.0 - args.ema)
                 gaussians.optimizer.zero_grad(set_to_none=True)
 
                 if args.ema > 0 and iteration >= args.ema_from:
                     cur = {nm: getattr(gaussians, nm) for nm in ema_names}
                     if (ema_params is None
                             or ema_params["_xyz"].shape[0] != cur["_xyz"].shape[0]):
-                        # (Re)start on first use or on a topology change the journal
-                        # replay did not cover -- safe, just shortens the window.
+                        # First use. A shape mismatch means a row mutation bypassed the
+                        # hooks; restarting is safe but shortens the window, so say so.
+                        if ema_params is not None:
+                            print(f"[ema] buffer desync at iter {iteration}: "
+                                  f"{ema_params['_xyz'].shape[0]} -> {cur['_xyz'].shape[0]}; "
+                                  f"restarting the average")
                         ema_params = {nm: cur[nm].detach().clone() for nm in ema_names}
-                    else:
+                        gaussians.ema_buffers = ema_params
+                    elif not ema_done:
                         # One fused kernel for all five tensors.
                         torch._foreach_lerp_(
                             [ema_params[nm] for nm in ema_names],
                             [cur[nm].detach() for nm in ema_names],
                             1.0 - args.ema)
+                    # The hooks replace buffer tensors (prune/cat), so re-read them.
+                    ema_params = gaussians.ema_buffers
 
                 if use_mcmc:
                     L = build_scaling_rotation(gaussians.get_scaling, gaussians.get_rotation)
@@ -945,6 +1140,7 @@ def training(
                     gaussians._xyz.add_(noise)
 
 
+            _nv(); _nv()  # adam+ema, iter
             if iteration in checkpoint_iterations:
                 print(f"\n[ITER {iteration}] Saving Checkpoint")
                 torch.save(
@@ -976,6 +1172,17 @@ def training(
         with open(log_file_path, 'w') as log_file:
             json.dump(log_data, log_file, indent=4)
 
+
+
+def _max_init(args, n_final):
+    """Cap on the initial Gaussian count: --init_share_max of the final count and/or an
+    absolute --init_max (both 0 = no cap)."""
+    caps = []
+    if args.init_share_max > 0:
+        caps.append(args.init_share_max * n_final)
+    if args.init_max > 0:
+        caps.append(args.init_max)
+    return min(caps) if caps else None
 
 
 def prepare_output(args):
@@ -1045,8 +1252,32 @@ if __name__ == "__main__":
     # quantity. "random" is the plain i.i.d. draw, kept for comparison.
     parser.add_argument("--sample_mode", type=str, default="stratified",
                         choices=["stratified", "random"])
-    parser.add_argument("--fn_mode", type=str, default="abs", choices=["abs", "rel"],
-                        help="abs: fn_reg is an absolute weight. rel: fn_reg multiplies the data loss.")
+    parser.add_argument("--fn_mode", type=str, default="abs", choices=["abs", "rel", "log"],
+                        help="abs: fn_reg is an absolute weight. rel: fn_reg multiplies the data loss. "
+                             "log: log barrier log(fn_thresh / aw) (use with a SOFT_CUTOFF 1 build).")
+    parser.add_argument("--hinge_freeze", type=int, default=0,
+                        help="with --hinge_rel_pow: freeze the relative hinge scale at this iteration (0 = never)")
+    parser.add_argument("--hinge_rel_pow", type=float, default=0.0,
+                        help="if > 0: FN and FP hinge weights x (detached data loss)^p; 0.5 with --loss l2 = RMSE scaling")
+    parser.add_argument("--fnfp_norm", type=str, default="viol", choices=["viol", "all"],
+                        help="FN/FP sums divided by their violators (viol) or by all interior/exterior cells (all)")
+    parser.add_argument("--interior_skin", type=float, default=0.0,
+                        help="--encode_surface: share of each batch sampled in a band just inside the surface")
+    parser.add_argument("--fn_margin", type=float, default=0.05,
+                        help="--encode_surface FN hinge target (1 + fn_margin) * OCC_T")
+    parser.add_argument("--fp_margin", type=float, default=0.05,
+                        help="--fp_mode hinge: penalise exterior aw above (1 - fp_margin) * OCC_T")
+    parser.add_argument("--fp_mode", type=str, default="lin", choices=["lin", "log", "margin", "hinge"],
+                        help="--encode_surface FP term per covered exterior cell: lin = its weight, "
+                             "log = log(weight / SUPPORT_T) (zero at the edge of coverage, 1/w gradient), "
+                             "margin = sum over Gaussians reaching it of qmax - q (margin.cu)")
+    parser.add_argument("--surf_mask_data", action="store_true",
+                        help="--encode_surface: data term over interior cells only (exterior handled by the FP term)")
+    parser.add_argument("--fn_rel", action="store_true",
+                        help="scale fn_reg by the (detached) data loss for any --fn_mode, as rel does "
+                             "for the hinge: keeps the FN/data ratio fixed across PSNR regimes")
+    parser.add_argument("--fn_thresh", type=float, default=0.002,
+                        help="Accumulated-weight threshold of the --fn_mode log barrier.")
     # Default 0 = auto: spread the budget over --densify_events events instead of a
     # fixed count per event (struct c159f17). A fixed cap silently becomes
     # all-at-once at high compression. Pass a positive value for fixed batches.
@@ -1057,9 +1288,9 @@ if __name__ == "__main__":
     #   --densify_alpha 0  -> error-based, plain top-k
     #   --use_mcmc         -> MCMC relocate/add (relocate_gs + add_new_gs + xyz noise)
     #   --densify_3dgs     -> 3DGS clone/split on position gradients
-    # NOTE: EMA bookkeeping here is the ema_journal, which is written ONLY in
-    # densify_and_prune. MCMC and 3DGS mutate rows without journaling, so EMA would
-    # average unrelated Gaussians. Both flags force --ema 0 and say so.
+    # NOTE: the EMA buffers follow rows through prune_points / densification_postfix /
+    # _write_rows, but MCMC's relocate overwrites rows without restarting their average,
+    # and these ablations were run without EMA. Both flags force --ema 0 and say so.
     parser.add_argument("--use_mcmc", action="store_true",
                         help="MCMC relocate/add densification instead of error-based.")
     parser.add_argument("--densify_3dgs", action="store_true",
@@ -1077,6 +1308,28 @@ if __name__ == "__main__":
     parser.add_argument("--densify_events", type=int, default=3,
                         help="With --densify_batch 0, spread the budget over this many events.")
     parser.add_argument("--max_scale", type=float, default=0.02)
+    parser.add_argument("--max_scale_k", type=float, default=0.0,
+                        help="if > 0: max_scale = max(--max_scale, k * N^(-1/3)), N the final Gaussian count")
+    parser.add_argument("--cap_exact", action="store_true",
+                        help="end densification at exactly cap_max Gaussians (struct) instead of cap_max + 1000")
+    parser.add_argument("--init_share_max", type=float, default=0.0,
+                        help="if > 0: cap the initial Gaussian count at this share of the final count (struct: 0.25)")
+    parser.add_argument("--samples_per_node", type=float, default=0.0,
+                        help="if > 0: sample_frac = min(1, this * mesh node count / batch size)")
+    parser.add_argument("--samples_per_gaussian", type=float, default=0.0,
+                        help="if > 0: sample_frac = min(1, this * final Gaussian count / batch size)")
+    parser.add_argument("--init_max", type=int, default=0,
+                        help="if > 0: cap the initial Gaussian count at this absolute number")
+    parser.add_argument("--init_weight", type=float, default=0.1,
+                        help="initial Gaussian weight (struct: 0.01)")
+    parser.add_argument("--bvh_cache", type=int, default=1,
+                        help="1: build each full batch's sample BVH once and reuse it (no per-iteration build)")
+    parser.add_argument("--leaf_order", type=int, default=1,
+                        help="1: permute each sample batch into BVH leaf order at startup (coalesced render loads)")
+    parser.add_argument("--max_scale_vol", action="store_true",
+                        help="--max_scale_k spacing from the mesh bounding-box volume, (V/N)^(1/3), not N^(-1/3)")
+    parser.add_argument("--densify_growth", type=float, default=0.0,
+                        help="if > 1: set --densify_events so each event grows the model by about this factor")
     parser.add_argument(
         "--sample_cache_dir", type=str,
         default="/home/ldyken53/gaussian-volume/sample_cache",

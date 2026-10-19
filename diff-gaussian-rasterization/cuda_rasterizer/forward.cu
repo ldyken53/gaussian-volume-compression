@@ -6,6 +6,20 @@ namespace cg = cooperative_groups;
 #include <cuBQL/bvh.h>
 #include <cuBQL/traversal/fixedBoxQuery.h>
 
+// Sample positions as (x, y, z, 0) float4s, written by BuildBVH (ext.cu) for every batch:
+// one aligned 16-byte load per lane instead of three 4-byte loads at a 12-byte stride
+// (ncu: 72% of the forward render's global sectors were excess before).
+const float4* gvSamplePos();
+
+#ifndef FWD_MIN_BLOCKS
+#define FWD_MIN_BLOCKS 0
+#endif
+#if FWD_MIN_BLOCKS > 0
+#define FWD_BOUNDS __launch_bounds__(256, FWD_MIN_BLOCKS)
+#else
+#define FWD_BOUNDS
+#endif
+
 // Perform initial steps for each Gaussian prior to rasterization.
 __global__ void preprocessCUDA(const int P,
 	const float* means3D,
@@ -45,11 +59,11 @@ __global__ void preprocessCUDA(const int P,
 	aabbs[idx] = tightGaussianBox(position, cov, m);
 }
 
-__global__ void renderCUDA(const int P,
+__global__ void FWD_BOUNDS renderCUDA(const int P,
 	const float* means3D,
 	const float* values,
 	const float* weights,
-	const float* samples,
+	const float4* __restrict__ sample_pos,
 	const float* conics,
 	const cuBQL::box3f* aabbs,
 	const cuBQL::bvh3f bvh,
@@ -82,6 +96,7 @@ __global__ void renderCUDA(const int P,
 	// the compiler otherwise reloads them every pair), with the off-diagonal conic terms
 	// doubled once so the quadratic form folds into 4 MUL + 5 FMA.
 	const float w = weights[idx], v = values[idx];
+	const float qmax = supportQmax(w);
 	const float cxx = conic[0], c2xy = 2.0f * conic[1], c2xz = 2.0f * conic[2];
 	const float cyy = conic[3], c2yz = 2.0f * conic[4], czz = conic[5];
 
@@ -91,14 +106,15 @@ __global__ void renderCUDA(const int P,
 		// Distribute primitives across threads in the warp
 		for (int i = thread_in_warp; i < count2; i += THREADS_PER_GAUSSIAN) {
 			uint primID = primIDs[i];
-			const float dx = samples[primID * 3] - position.x;
-			const float dy = samples[primID * 3 + 1] - position.y;
-			const float dz = samples[primID * 3 + 2] - position.z;
+			const float4 sp = sample_pos[primID];
+			const float dx = sp.x - position.x;
+			const float dy = sp.y - position.y;
+			const float dz = sp.z - position.z;
 			const float t0 = fmaf(c2xz, dz, fmaf(c2xy, dy, cxx * dx));
 			const float t1 = fmaf(c2yz, dz, cyy * dy);
 			const float q = fmaf(dx, t0, fmaf(dy, t1, czz * dz * dz));
-			// q in [0, 28] <=> power in [-14, 0]; also rejects NaN.
-			if (!(q >= 0.0f && q <= 28.0f)) continue;
+			// Exact per-Gaussian support w * G >= T (also rejects NaN).
+			if (!(q >= 0.0f && q <= qmax)) continue;
 			const float weight = w * expf(-0.5f * q);
 			atomicAdd(&out_testw[primID], weight);
 			atomicAdd(&out_test[primID], weight * v);
@@ -166,9 +182,10 @@ __global__ void sampleRenderCUDA(const int S,
 				d.y * (conic[1] * d.x + conic[3] * d.y + conic[4] * d.z) +
 				d.z * (conic[2] * d.x + conic[4] * d.y + conic[5] * d.z)
 			);
-			float power = -0.5 * quad_form;
-			if (power < -14.0 || power > 0.0) {return 0;};
-			float weight = weights[primID] * exp(power);
+			// Exact per-Gaussian support w * G >= T (also rejects NaN).
+			if (!(quad_form >= 0.0f && quad_form <= supportQmax(weights[primID]))) {return 0;};
+			float power = -0.5f * quad_form;
+			float weight = weights[primID] * expf(power);
 			acc_weight += weight;
 			acc_value += weight * values[primID];
 			count++;
@@ -183,7 +200,7 @@ __global__ void sampleRenderCUDA(const int S,
 	count = cg::reduce(warp, count, cg::plus<int>());
 	if (thread_in_warp == 0) {
 #if SOFT_CUTOFF
-		if (acc_weight <= 0.0f) {
+		if (acc_weight <= c_occ_t) {
 			out_test[idx] = -1.0;
 			out_testw[idx] = 0.0;
 		} else {
@@ -193,7 +210,7 @@ __global__ void sampleRenderCUDA(const int S,
 			out_testw[idx] = acc_weight;
 		}
 #else
-		if (acc_weight <= WEIGHT_CUTOFF) {
+		if (acc_weight <= c_occ_t) {
 			out_test[idx] = -1.0;
 			out_testw[idx] = 0.0;
 		} else {
@@ -213,16 +230,16 @@ __global__ void normalizeCUDA(const int S,
 	if (idx >= S)
 		return;
 #if SOFT_CUTOFF
-	if (out_testw[idx] <= 0.0f) {
+	if (out_testw[idx] <= c_occ_t) {
 		out_test[idx] = -1.0;
-		out_testw[idx] = 0.0;
+		if (!c_occ_keep) out_testw[idx] = 0.0;
 	} else {
 		out_test[idx] = out_test[idx] / SOFT_DENOM(out_testw[idx]);
 	}
 #else
-	if (out_testw[idx] <= WEIGHT_CUTOFF) {
+	if (out_testw[idx] <= c_occ_t) {
 		out_test[idx] = -1.0;
-		out_testw[idx] = 0.0;
+		if (!c_occ_keep) out_testw[idx] = 0.0;
 	} else {
 		out_test[idx] = out_test[idx] / out_testw[idx];
 	}
@@ -238,6 +255,7 @@ void FORWARD::preprocess(const int P,
 		float* conics,
 		cuBQL::box3f* aabbs)
 	{
+		ensureSupportT();
 		preprocessCUDA <<<(P + 255) / 256, 256>>> (
 			P,
 			means3D,
@@ -263,6 +281,7 @@ void FORWARD::render(const int P, const int S,
 	int* count_intersections,
 	const bool use_gaussian_bvh)
 	{
+		ensureSupportT();
 		if (use_gaussian_bvh) {
 			dim3 block(256);
 			dim3 grid((S + block.x - 1) / block.x); // 1 threads per sample
@@ -286,7 +305,7 @@ void FORWARD::render(const int P, const int S,
 				means3D,
 				values,
 				weights,
-				samples,
+				gvSamplePos(),
 				conics,
 				aabbs,
 				bvh,

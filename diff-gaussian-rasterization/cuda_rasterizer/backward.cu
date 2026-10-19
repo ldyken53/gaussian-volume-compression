@@ -129,7 +129,15 @@ __global__ void preprocessCUDA(int P,
 	*dL_drot = float4{ dL_dq.x, dL_dq.y, dL_dq.z, dL_dq.w };//dnormvdv(float4{ rot.x, rot.y, rot.z, rot.w }, float4{ dL_dq.x, dL_dq.y, dL_dq.z, dL_dq.w });
 }
 
-__global__ void renderCUDA(int P,
+#ifndef BWD_MIN_BLOCKS
+#define BWD_MIN_BLOCKS 0
+#endif
+#if BWD_MIN_BLOCKS > 0
+#define BWD_BOUNDS __launch_bounds__(256, BWD_MIN_BLOCKS)
+#else
+#define BWD_BOUNDS
+#endif
+__global__ void BWD_BOUNDS renderCUDA(int P,
 	const float* means3D,
 	const glm::vec3* scales,
 	const float scale_modifier,
@@ -188,6 +196,7 @@ __global__ void renderCUDA(int P,
 	// F = dvo * (v - R) + dL/dw_sample = dvo * v + fc, every per-pair term is built from e and
 	// qe = F * e; w and the -1/2 are applied once after the warp reduction.
 	const float w = weights[idx], v = values[idx];
+	const float qmax = supportQmax(w);
 	const float cxx = conic[0], cxy = conic[1], cxz = conic[2];
 	const float cyy = conic[3], cyz = conic[4], czz = conic[5];
 	const float c2xy = 2.0f * cxy, c2xz = 2.0f * cxz, c2yz = 2.0f * cyz;
@@ -204,8 +213,8 @@ __global__ void renderCUDA(int P,
 			const float t0 = fmaf(c2xz, dz, fmaf(c2xy, dy, cxx * dx));
 			const float t1 = fmaf(c2yz, dz, cyy * dy);
 			const float q = fmaf(dx, t0, fmaf(dy, t1, czz * dz * dz));
-			// q in [0, 28] <=> power in [-14, 0]; also rejects NaN.
-			if (!(q >= 0.0f && q <= 28.0f)) continue;
+			// Exact per-Gaussian support w * G >= T (also rejects NaN); same test as forward.
+			if (!(q >= 0.0f && q <= qmax)) continue;
 			const float e = expf(-0.5f * q);
 			s_v = fmaf(sp.w, e, s_v);
 			const float qe = fmaf(sp.w, v, sample_fc[primID]) * e;
@@ -245,12 +254,16 @@ __global__ void renderCUDA(int P,
 		dL_dmeans[idx * 3]     = w * (cxx * Gx + cxy * Gy + cxz * Gz);
 		dL_dmeans[idx * 3 + 1] = w * (cxy * Gx + cyy * Gy + cyz * Gz);
 		dL_dmeans[idx * 3 + 2] = w * (cxz * Gx + cyz * Gy + czz * Gz);
-		// Same convention as before: off-diagonals carry the 2 of the symmetric form.
+		// Per-matrix-entry convention: dL/dC_ij = sum(dL/dquad * d_i * d_j) for i != j too,
+		// NOT the parameter derivative 2 * sum(...). preprocessCUDA expands these into the
+		// symmetric matrix G and applies dL/dSigma = -C G C, which expects entry gradients,
+		// so the doubled off-diagonals stored from 9ea6ef7 (2025-12) until this fix made every
+		// scale and rotation gradient wrong once Gaussians were anisotropic.
 		dL_dconics[idx * 6 + 0] = h * xx;
-		dL_dconics[idx * 6 + 1] = 2.0f * h * xy;
-		dL_dconics[idx * 6 + 2] = 2.0f * h * xz;
+		dL_dconics[idx * 6 + 1] = h * xy;
+		dL_dconics[idx * 6 + 2] = h * xz;
 		dL_dconics[idx * 6 + 3] = h * yy;
-		dL_dconics[idx * 6 + 4] = 2.0f * h * yz;
+		dL_dconics[idx * 6 + 4] = h * yz;
 		dL_dconics[idx * 6 + 5] = h * zz;
 	}
 }
@@ -272,15 +285,17 @@ __global__ void samplePrepCUDA(const int S,
 	const float aw = out_weights[s];
 #if SOFT_CUTOFF
 	// Keeping the (v - R) adjoint below the cutoff is deliberate -- see config.h.
-	const bool covered = aw > 0.0f;
+	const bool covered = aw > c_occ_t;
 	const float denom = covered ? SOFT_DENOM(aw) : 1.0f;
 #else
-	const bool covered = aw > WEIGHT_CUTOFF;
+	const bool covered = aw > c_occ_t;
 	const float denom = covered ? aw : 1.0f;
 #endif
 	const float dvo = covered ? dL_dsamples[s] / denom : 0.0f;
 	sample_pack[s] = make_float4(samples[3 * s], samples[3 * s + 1], samples[3 * s + 2], dvo);
-	sample_fc[s] = covered ? dL_dsample_weights[s] - dvo * out_cells[s] : 0.0f;
+	// An empty cell under OCC_KEEP_AW still has a weight adjoint (its FN/FP terms), no value one.
+	sample_fc[s] = covered ? dL_dsample_weights[s] - dvo * out_cells[s]
+	             : ((c_occ_keep && aw > 0.0f) ? dL_dsample_weights[s] : 0.0f);
 }
 
 __global__ void sampleRenderCUDA(const int S,
@@ -321,10 +336,10 @@ __global__ void sampleRenderCUDA(const int S,
 	float dL_doutw = dL_dsample_weights[idx];
 	float acc_weight = out_weights[idx];
 #if SOFT_CUTOFF
-	if (acc_weight <= 0.0f) return;
+	if (acc_weight <= c_occ_t) return;
 	acc_weight = SOFT_DENOM(acc_weight);
 #else
-	if (acc_weight <= WEIGHT_CUTOFF) return;
+	if (acc_weight <= c_occ_t) return;
 #endif
 
 	cuBQL::fixedBoxQuery::forEachPrim<float,3>(
@@ -389,8 +404,9 @@ __global__ void sampleRenderCUDA(const int S,
 			d.y * (conic[1] * d.x + conic[3] * d.y + conic[4] * d.z) +
 			d.z * (conic[2] * d.x + conic[4] * d.y + conic[5] * d.z)
 		);
-		float power = -0.5 * quad_form;
-		if (power < -14.0 || power > 0.0) {return 0;};
+		// Exact per-Gaussian support w * G >= T (also rejects NaN); same test as forward.
+		if (!(quad_form >= 0.0f && quad_form <= supportQmax(weights[primID]))) {return 0;};
+		float power = -0.5f * quad_form;
 
 		float e = exp(power);
 		float weight = weights[primID] * e;
@@ -419,10 +435,10 @@ __global__ void sampleRenderCUDA(const int S,
 
 		// Gradients for conic
 		dL_dxx += dL_dquad * d.x * d.x;
-		dL_dxy += dL_dquad * 2.f * d.x * d.y;
-		dL_dxz += dL_dquad * 2.f * d.x * d.z;
+		dL_dxy += dL_dquad * d.x * d.y;  // entry convention, see renderCUDA
+		dL_dxz += dL_dquad * d.x * d.z;
 		dL_dyy += dL_dquad * d.y * d.y;
-		dL_dyz += dL_dquad * 2.f * d.y * d.z;
+		dL_dyz += dL_dquad * d.y * d.z;
 		dL_dzz += dL_dquad * d.z * d.z;
 
 		atomicAdd(&dL_dvalues[primID], dL_dvalue);
@@ -529,6 +545,7 @@ void BACKWARD::render(
 	int* count_intersections,
 	const bool use_gaussian_bvh)
 {
+	ensureSupportT();
 	if (use_gaussian_bvh) {
 		dim3 block(256);
 		dim3 grid((S + block.x - 1) / block.x); // 32 threads per sample

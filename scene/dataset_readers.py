@@ -5,7 +5,7 @@ import torch
 from scene.gaussian_model import BasicPointCloud
 from gpu_mesh_sampling import gpu_sample, gpu_sampleu
 
-def readData(path, fraction, normalized=False):
+def readData(path, fraction, normalized=False, max_points=None):
     mesh = pv.read(path)
     print("Mesh read")
 
@@ -31,6 +31,13 @@ def readData(path, fraction, normalized=False):
         ox, oy, oz = mesh.origin
         sx, sy, sz = mesh.spacing
         n_pts = mesh.n_points
+        if max_points is not None and fraction * n_pts > max_points:
+            # From struct f3cc97d (--init_share_max): cap the initial count at a share of
+            # the final model, or a fixed node fraction seeds nearly the whole budget at
+            # extreme ratios and leaves error-guided densification nothing to place.
+            print(f"init capped: fraction {fraction:g} -> {max_points / n_pts:g} "
+                  f"({int(max_points)} of {n_pts} nodes)")
+            fraction = max_points / n_pts
 
         mask = (torch.rand(n_pts) < fraction)
         idx = torch.nonzero(mask, as_tuple=False).squeeze(1)
@@ -103,7 +110,7 @@ def readData(path, fraction, normalized=False):
         return mesh, BasicPointCloud(points=None, values=None)
 
 
-def readDatau(path, fraction, normalized=False):
+def readDatau(path, fraction, normalized=False, max_points=None):
     mesh = pv.read(path)
     mesh = mesh.cell_data_to_point_data()
     values = mesh.get_array(mesh.array_names[0]).reshape(-1, 1)
@@ -125,6 +132,13 @@ def readDatau(path, fraction, normalized=False):
     if fraction != -1:
         num_points = mesh.points.shape[0]
         print(num_points)
+        if max_points is not None and fraction * num_points > max_points:
+            # From struct f3cc97d (--init_share_max): cap the initial count at a share of
+            # the final model, or a fixed node fraction seeds nearly the whole budget at
+            # extreme ratios and leaves error-guided densification nothing to place.
+            print(f"init capped: fraction {fraction:g} -> {max_points / num_points:g} "
+                  f"({int(max_points)} of {num_points} nodes)")
+            fraction = max_points / num_points
         indices = np.random.choice(num_points, size=int(num_points * fraction), replace=False)
         points_sampled = mesh.points[indices]
         values_sampled = values[indices]

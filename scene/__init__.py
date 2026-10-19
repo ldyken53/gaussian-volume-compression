@@ -16,7 +16,8 @@ class Scene:
         gaussians: GaussianModel,
         load_iteration=None,
         normalized=False,
-        fraction=0.01
+        fraction=0.01,
+        max_init=None
     ):
         self.model_path = args.model_path
         self.loaded_iter = None
@@ -33,9 +34,9 @@ class Scene:
 
         if os.path.exists(args.source_path) and args.source_path.lower().endswith(('.vtk', '.vtu')):
             if args.source_path.lower().endswith('.vtk'):
-                mesh, pcd = readData(args.source_path, fraction, normalized=normalized)
+                mesh, pcd = readData(args.source_path, fraction, normalized=normalized, max_points=max_init)
             else:
-                mesh, pcd = readDatau(args.source_path, fraction, normalized=normalized)
+                mesh, pcd = readDatau(args.source_path, fraction, normalized=normalized, max_points=max_init)
         else:
             assert False, "Could not recognize scene type!"
 
