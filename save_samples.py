@@ -46,6 +46,7 @@ def sample_mesh_points(mesh, num_batches, batch_size, device="cuda"):
 
     return all_samples
 
+
 def sample_exterior_points(mesh, num_batches, batch_size, offset=0.01, device="cuda"):
     """Sample points just outside the mesh surface using properly oriented normals."""
     # tet_mesh = pv.read("impacttet.vtu")
@@ -54,13 +55,15 @@ def sample_exterior_points(mesh, num_batches, batch_size, offset=0.01, device="c
     print("Open edges", s.n_open_edges)
     print("Faces", s.n_cells)
     surf = s.compute_normals(
-        cell_normals=True, 
+        cell_normals=True,
         point_normals=False,
         consistent_normals=True,
         auto_orient_normals=False,
     )
 
-    face_normals = torch.tensor(surf.cell_data["Normals"], dtype=torch.float32, device=device)
+    face_normals = torch.tensor(
+        surf.cell_data["Normals"], dtype=torch.float32, device=device
+    )
     points = torch.tensor(surf.points, dtype=torch.float32, device=device)
     faces = torch.tensor(
         surf.faces.reshape(-1, 4)[:, 1:], dtype=torch.long, device=device
@@ -88,16 +91,29 @@ def sample_exterior_points(mesh, num_batches, batch_size, offset=0.01, device="c
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Sample a VTU mesh and save numpy arrays.")
+    parser = argparse.ArgumentParser(
+        description="Sample a VTU mesh and save numpy arrays."
+    )
     parser.add_argument("vtu", help="Path to .vtu file")
-    parser.add_argument("--num_batches", type=int, default=100, help="Number of batches")
+    parser.add_argument(
+        "--num_batches", type=int, default=100, help="Number of batches"
+    )
     parser.add_argument("--size", type=int, default=128**3, help="Samples per batch")
-    parser.add_argument("--array_name", type=str, default=None,
-                        help="Point data array to interpolate (default: first array)")
-    parser.add_argument("--device", type=str, default="cuda",
-                        help="Torch device for sampling (cuda or cpu)")
-    parser.add_argument("--output_prefix", type=str, default="",
-                        help="Prefix for output filenames")
+    parser.add_argument(
+        "--array_name",
+        type=str,
+        default=None,
+        help="Point data array to interpolate (default: first array)",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        help="Torch device for sampling (cuda or cpu)",
+    )
+    parser.add_argument(
+        "--output_prefix", type=str, default="", help="Prefix for output filenames"
+    )
     args = parser.parse_args()
 
     print(f"Loading mesh: {args.vtu}")
@@ -118,7 +134,7 @@ def main():
     global_min = mesh.points.min()
     global_max = mesh.points.max()
     mesh.translate(np.array([-global_min, -global_min, -global_min]), inplace=True)
-    mesh.scale(1/(global_max - global_min), inplace=True)
+    mesh.scale(1 / (global_max - global_min), inplace=True)
 
     prefix = args.output_prefix
     # mesh.save(f"{prefix}norm.vtu")
@@ -137,14 +153,16 @@ def main():
     big_samples = sample_mesh_points(mesh, args.num_batches, size1)
     big_samples2 = sample_exterior_points(mesh, args.num_batches, size2)
     # print(big_samples.shape, big_samples2.shape)
-    big_samples = np.concatenate([big_samples, big_samples2], axis=1).reshape(args.num_batches * args.size, 3)
+    big_samples = np.concatenate([big_samples, big_samples2], axis=1).reshape(
+        args.num_batches * args.size, 3
+    )
 
     print("Interpolating field values with mesh...")
     probe_mesh = pv.PolyData(big_samples)
     probed = probe_mesh.sample(mesh)
     # big_samples = probed.points
     big_gt = probed[mesh.array_names[0]]
-    valid_mask = probed['vtkValidPointMask'].astype(bool)
+    valid_mask = probed["vtkValidPointMask"].astype(bool)
     big_gt[~valid_mask] = -1
 
     print("Interpolating field values with gpu_sampleu...")

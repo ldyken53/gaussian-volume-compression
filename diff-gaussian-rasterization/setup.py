@@ -1,44 +1,34 @@
-#
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
-#
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
-#
-# For inquiries contact  george.drettakis@inria.fr
-#
+import os
 
 from setuptools import setup
-from torch.utils.cpp_extension import CUDAExtension, BuildExtension
-import os
-os.path.dirname(os.path.abspath(__file__))
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+
+here = os.path.dirname(os.path.abspath(__file__))
 
 setup(
     name="bvh-diff-gaussian-rasterization",
-    packages=['bvh_diff_gaussian_rasterization'],
+    packages=["bvh_diff_gaussian_rasterization"],
     ext_modules=[
         CUDAExtension(
             name="bvh_diff_gaussian_rasterization._C",
             sources=[
-            "cuda_rasterizer/rasterizer_impl.cu",
-            "cuda_rasterizer/forward.cu",
-            "cuda_rasterizer/backward.cu",
-            "rasterize_points.cu",
-            "multi_adam.cu",
-            "fused_ops.cu",
-            "margin.cu",
-            "ext.cu"],
-            depends=[
-                "cuda_rasterizer/config.h"
+                "cuda_rasterizer/forward.cu",
+                "cuda_rasterizer/backward.cu",
+                "rasterize_points.cu",
+                "multi_adam.cu",
+                "fused_ops.cu",
+                "margin.cu",
+                "ext.cu",
             ],
-            extra_compile_args={"nvcc": [
-                "-I" + os.path.join(os.path.dirname(os.path.abspath(__file__)), "third_party/glm/"),
-                "-I" + os.path.join(os.path.dirname(os.path.abspath(__file__)), "third_party/cuBQL/"),
-                "-DNDEBUG"
-            ]})
-        ],
-    cmdclass={
-        'build_ext': BuildExtension
-    }
+            depends=["cuda_rasterizer/config.h", "cuda_rasterizer/auxiliary.h"],
+            extra_compile_args={
+                "nvcc": [
+                    "-I" + os.path.join(here, "third_party/glm/"),
+                    "-I" + os.path.join(here, "third_party/cuBQL/"),
+                    "-DNDEBUG",
+                ]
+            },
+        )
+    ],
+    cmdclass={"build_ext": BuildExtension},
 )
