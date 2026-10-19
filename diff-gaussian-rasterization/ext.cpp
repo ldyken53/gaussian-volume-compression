@@ -1,39 +1,21 @@
-/*
- * Copyright (C) 2023, Inria
- * GRAPHDECO research group, https://team.inria.fr/graphdeco
- * All rights reserved.
- *
- * This software is free for non-commercial, research and evaluation use 
- * under the terms of the LICENSE.md file.
- *
- * For inquiries contact  george.drettakis@inria.fr
- */
-
-#include <torch/extension.h>
 #include "rasterize_points.h"
-#include "cuda_rasterizer/config.h"
-#define FUSE_ACT_FLAG FUSE_ACT
+#include <torch/extension.h>
 #include <vector>
-void multi_adam_(std::vector<torch::Tensor>, std::vector<torch::Tensor>, std::vector<torch::Tensor>,
-                 std::vector<torch::Tensor>, std::vector<double>, int64_t, double, double, double);
-void multi_adam_ema_(std::vector<torch::Tensor>, std::vector<torch::Tensor>, std::vector<torch::Tensor>,
-                     std::vector<torch::Tensor>, std::vector<double>, int64_t, double, double, double,
-                     std::vector<torch::Tensor>, double);
-std::vector<torch::Tensor> fused_act_forward(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double);
-std::vector<torch::Tensor> fused_act_backward(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double,
-                                              torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor);
-std::vector<torch::Tensor> fused_loss_forward(torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, double);
-std::vector<torch::Tensor> fused_loss_backward(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, double, torch::Tensor);
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("rasterize_gaussians", &RasterizeGaussiansCUDA);
-  m.def("rasterize_gaussians_backward", &RasterizeGaussiansBackwardCUDA);
-  m.def("compute_relocation", &ComputeRelocationCUDA);
-  m.def("multi_adam_", &multi_adam_);
-  m.attr("RAW_ACTIVATIONS") = (bool)FUSE_ACT_FLAG;
-  m.def("multi_adam_ema_", &multi_adam_ema_);
-  m.def("fused_act_forward", &fused_act_forward);
-  m.def("fused_act_backward", &fused_act_backward);
-  m.def("fused_loss_forward", &fused_loss_forward);
-  m.def("fused_loss_backward", &fused_loss_backward);
+void multi_adam_(std::vector<torch::Tensor> params, std::vector<torch::Tensor> grads,
+	std::vector<torch::Tensor> exp_avgs, std::vector<torch::Tensor> exp_avg_sqs,
+	std::vector<double> lrs, int64_t step, double beta1, double beta2, double eps,
+	std::vector<torch::Tensor> emas, double ema_w);
+std::vector<torch::Tensor> fused_loss_forward(
+	torch::Tensor cells, torch::Tensor gt, torch::Tensor weights, double fn_reg, double tau);
+std::vector<torch::Tensor> fused_loss_backward(torch::Tensor cells, torch::Tensor gt,
+	torch::Tensor weights, torch::Tensor acc, double fn_reg, double tau, torch::Tensor gout);
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
+{
+	m.def("rasterize_gaussians", &RasterizeGaussiansCUDA);
+	m.def("rasterize_gaussians_backward", &RasterizeGaussiansBackwardCUDA);
+	m.def("multi_adam_", &multi_adam_);
+	m.def("fused_loss_forward", &fused_loss_forward);
+	m.def("fused_loss_backward", &fused_loss_backward);
 }

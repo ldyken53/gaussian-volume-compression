@@ -3,51 +3,20 @@
 
 #include <cuda.h>
 #include "cuda_runtime.h"
-#include "device_launch_parameters.h"
 #define GLM_FORCE_CUDA
 #include <glm/glm.hpp>
 
 namespace FORWARD
 {
-	// Perform initial steps for each Gaussian prior to rasterization.
-	void preprocess(
-		int P,
-		const float* means3D,
-		const glm::vec3* scales,
-		const float scale_modifier,
-		const glm::vec4* rotations,
-		const float* values,
-		const float* weights,
-		bool* clamped,
-		const float3 volume_mins,
-		const float3 volume_maxes,
-		const uint3 num_cells,
-		const float3 cell_size,
-		int* radii,
-		float3* means,
-		float* values_out, 
-		float* weights_out,
-		float* volumes,
-		float* conic,
-		float4* packed,
-		uint* aabbs,
-		const dim3 grid,
-		uint32_t* blocks_touched);
+// Activates the raw parameters, writes each Gaussian's packed render record and the tile
+// range its support ellipsoid overlaps.
+void preprocess(int P, const float* means3D, const float* scales, const float* rotations,
+	const float* values, const float* weights, float max_scale, float3 volume_mins,
+	float3 cell_size, dim3 grid, float4* packed, uint* aabbs, uint32_t* blocks_touched);
 
-	// Main rasterization method.
-	void render(
-		const dim3 grid, dim3 block,
-		const uint2* ranges,
-		const uint32_t* point_list,
-		const float3 volume_mins,
-		const uint3 num_cells,
-		const float3 cell_size,
-		const float* jitter,
-		const float4* packed,
-		float* accumulated_weights,
-		uint32_t* n_contrib,
-		float* out_cells);
-}
-
+void render(dim3 grid, dim3 block, const uint2* ranges, const uint32_t* point_list,
+	float3 volume_mins, uint3 num_cells, float3 cell_size, const float* jitter,
+	const float4* packed, float* out_weights, float* out_cells);
+} // namespace FORWARD
 
 #endif

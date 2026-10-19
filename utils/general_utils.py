@@ -1,14 +1,3 @@
-#
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
-#
-# This software is free for non-commercial, research and evaluation use
-# under the terms of the LICENSE.md file.
-#
-# For inquiries contact  george.drettakis@inria.fr
-#
-
 import random
 import os
 import sys
@@ -20,17 +9,6 @@ import torch
 
 def inverse_sigmoid(x):
     return torch.log(x / (1 - x))
-
-
-def PILtoTorch(pil_image, resolution, data_device="cuda"):
-    resized_image_PIL = pil_image.resize(resolution)
-    resized_image = (
-        torch.from_numpy(np.array(resized_image_PIL)).to(data_device) / 255.0
-    )
-    if len(resized_image.shape) == 3:
-        return resized_image.permute(2, 0, 1)
-    else:
-        return resized_image.unsqueeze(dim=-1).permute(2, 0, 1)
 
 
 def get_expon_lr_func(
@@ -67,22 +45,6 @@ def get_expon_lr_func(
         return delay_rate * log_lerp
 
     return helper
-
-
-def strip_lowerdiag(L):
-    uncertainty = torch.zeros((L.shape[0], 6), dtype=torch.float, device="cuda")
-
-    uncertainty[:, 0] = L[:, 0, 0]
-    uncertainty[:, 1] = L[:, 0, 1]
-    uncertainty[:, 2] = L[:, 0, 2]
-    uncertainty[:, 3] = L[:, 1, 1]
-    uncertainty[:, 4] = L[:, 1, 2]
-    uncertainty[:, 5] = L[:, 2, 2]
-    return uncertainty
-
-
-def strip_symmetric(sym):
-    return strip_lowerdiag(sym)
 
 
 def build_rotation(r):

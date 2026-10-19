@@ -1,51 +1,32 @@
-from utils.system_utils import mkdir_p
-from utils.graphics_utils import BasicPointCloud
-from utils.general_utils import (
-    build_rotation,
-    build_scaling_rotation,
-    get_expon_lr_func,
-    inverse_sigmoid,
-    strip_symmetric,
-)
-from utils.reloc_utils import compute_relocation_cuda
 import os
 
 import numpy as np
 import pyvista as pv
 import torch
+from diff_gaussian_rasterization import _C as _dgr_C
 from plyfile import PlyData, PlyElement
 from simple_knn._C import distCUDA2
-from diff_gaussian_rasterization import _C as _dgr_C
 from torch import nn
 
+from utils.general_utils import build_rotation, get_expon_lr_func, inverse_sigmoid
+from utils.graphics_utils import BasicPointCloud
 
+# Values are clamped this far inside (0, 1) before inverse_sigmoid: an exact 0 or 1 would map
+# to -inf/+inf, where the sigmoid has no gradient.
 VALUE_EPS = 1e-6
+INIT_WEIGHT = 0.01
 
 
 class GaussianModel:
-
-    def setup_functions(self):
-        def build_covariance_from_scaling_rotation(scaling, scaling_modifier, rotation):
-            L = build_scaling_rotation(scaling_modifier * scaling, rotation)
-            actual_covariance = L @ L.transpose(1, 2)
-            symm = strip_symmetric(actual_covariance)
-            return symm
-
-        self.scaling_activation = torch.exp
-        self.inverse_scaling_activation = torch.log
-
-        self.covariance_activation = build_covariance_from_scaling_rotation
-
-        self.weight_activation = torch.sigmoid
-        self.inverse_weight_activation = inverse_sigmoid
-
-        # self.weight_activation = lambda x: x
-        # self.inverse_weight_activation = lambda x: x
-
-        self.values_activation = torch.sigmoid
-        self.inverse_value_activation = inverse_sigmoid
-
-        self.rotation_activation = torch.nn.functional.normalize
+    # Parameter attributes, in the order the EMA buffers use.
+    EMA_NAMES = ("_xyz", "_scaling", "_rotation", "_weight", "_values")
+    _GROUP_ATTR = {
+        "xyz": "_xyz",
+        "weight": "_weight",
+        "scaling": "_scaling",
+        "rotation": "_rotation",
+        "value": "_values",
+    }
 
     def __init__(self):
         self._xyz = torch.empty(0)
@@ -55,50 +36,23 @@ class GaussianModel:
         self._values = torch.empty(0)
         self.optimizer = None
         self.percent_dense = 0
-        self.spatial_lr_scale = 0
         self.mesh = None
         self.max_scale = 0.02
-        self.setup_functions()
+        self.ema_buffers = None
+        self._adam_t = None
 
     def _apply_cap(self, s):
-        # r = torch.linalg.norm(s, dim=1, keepdim=True) + 1e-8
-        # factor = torch.clamp(self.max_scale / r, max=1.0)
-        # return s * factor
+        """Soft norm cap: ||s|| -> max_scale * tanh(||s|| / max_scale)."""
         r = torch.linalg.norm(s, dim=1, keepdim=True) + 1e-8
-        r_soft = self.max_scale * torch.tanh(r / self.max_scale)
-        return s * (r_soft / r)
-
-    def capture(self):
-        return (
-            self._xyz,
-            self._scaling,
-            self._rotation,
-            self._weight,
-            self._values,
-            self.optimizer.state_dict(),
-            self.spatial_lr_scale,
-        )
-
-    def restore(self, model_args, training_args):
-        (
-            self._xyz,
-            self._scaling,
-            self._rotation,
-            self._weight,
-            self._values,
-            opt_dict,
-            self.spatial_lr_scale,
-        ) = model_args
-        self.training_setup(training_args)
-        self.optimizer.load_state_dict(opt_dict)
+        return s * (self.max_scale * torch.tanh(r / self.max_scale) / r)
 
     @property
     def get_scaling(self):
-        return self._apply_cap(self.scaling_activation(self._scaling))
+        return self._apply_cap(torch.exp(self._scaling))
 
     @property
     def get_rotation(self):
-        return self.rotation_activation(self._rotation)
+        return torch.nn.functional.normalize(self._rotation)
 
     @property
     def get_xyz(self):
@@ -106,126 +60,63 @@ class GaussianModel:
 
     @property
     def get_weight(self):
-        return self.weight_activation(self._weight)
+        return torch.sigmoid(self._weight)
 
     @property
     def get_values(self):
-        return self.values_activation(self._values)
+        return torch.sigmoid(self._values)
 
-    def get_covariance(self, scaling_modifier=1):
-        return self.covariance_activation(
-            self.get_scaling, scaling_modifier, self._rotation
-        )
+    def _set_bounds(self, mesh):
+        xmin, xmax, ymin, ymax, zmin, zmax = mesh.bounds if mesh else (0, 1, 0, 1, 0, 1)
+        self.mins = [xmin, ymin, zmin]
+        self.maxes = [xmax, ymax, zmax]
 
-    def create_from_pcd(
-        self,
-        pcd: BasicPointCloud,
-        mesh: pv.PolyData,
-    ):
-        values = pcd.values
-        fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
-
-        xmin, xmax, ymin, ymax, zmin, zmax = mesh.bounds
-        # self.mins = [
-        #     pcd.points[:,0].min(),
-        #     pcd.points[:,1].min(),
-        #     pcd.points[:,2].min()
-        # ]
-        # self.maxes = [
-        #     pcd.points[:,0].max(),
-        #     pcd.points[:,1].max(),
-        #     pcd.points[:,2].max()
-        # ]
-        self.mins = [
-            xmin,
-            ymin,
-            zmin
-        ]
-        self.maxes = [
-            xmax,
-            ymax,
-            zmax
-        ]
-        print(self.mins)
-        print(self.maxes)
-
-
-        print(
-            f"Number of points at initialisation: {fused_point_cloud.shape[0]}"
-        )
-
+    def create_from_pcd(self, pcd: BasicPointCloud, mesh: pv.PolyData):
+        """Initial Gaussians at the sampled nodes, sized by their 3-NN distance."""
+        points = torch.tensor(np.asarray(pcd.points)).float().cuda()
+        self._set_bounds(mesh)
+        print(f"Number of points at initialisation: {points.shape[0]}")
         dist2 = torch.clamp_min(
             distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()),
             0.0000001,
         )
-        scales = self.inverse_scaling_activation(torch.sqrt(dist2))[..., None].repeat(1, 3)
-        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+        scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 3)
+        rots = torch.zeros((points.shape[0], 4), device="cuda")
         rots[:, 0] = 1
-
-        weights = self.inverse_weight_activation(
-            getattr(self, "init_weight", 0.01)
-            * torch.ones(
-                (fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"
-            )
+        weights = inverse_sigmoid(
+            INIT_WEIGHT
+            * torch.ones((points.shape[0], 1), dtype=torch.float, device="cuda")
         )
-
-        # Clamp away from the sigmoid's asymptotes before inverting. Data with exact
-        # 0.0 (or 1.0) values maps to a logit of -inf (+inf), where sigmoid' == 0, so
-        # those Gaussians would be frozen at that value with zero gradient forever.
-        values = self.inverse_value_activation(
+        values = inverse_sigmoid(
             torch.clamp(
-                torch.tensor(values, dtype=torch.float, device="cuda"),
-                VALUE_EPS, 1.0 - VALUE_EPS,
+                torch.tensor(pcd.values, dtype=torch.float, device="cuda"),
+                VALUE_EPS,
+                1.0 - VALUE_EPS,
             )
         )
-
-        self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
+        self._xyz = nn.Parameter(points.requires_grad_(True))
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._weight = nn.Parameter(weights.requires_grad_(True))
         self._values = nn.Parameter(values.requires_grad_(True))
-        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
-
         self.mesh = mesh
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
-
-        optimizer_params = [
-            {
-                "params": [self._xyz],
-                "lr": training_args.position_lr_init,
-                "name": "xyz",
-            },
-            {
-                "params": [self._weight],
-                "lr": training_args.weight_lr,
-                "name": "weight",
-            },
-            {
-                "params": [self._scaling],
-                "lr": training_args.scaling_lr,
-                "name": "scaling",
-            },
-            {
-                "params": [self._rotation],
-                "lr": training_args.rotation_lr,
-                "name": "rotation",
-            },
-            {
-                "params": [self._values],
-                "lr": training_args.values_lr,
-                "name": "value",
-            },
+        groups = [
+            ("xyz", self._xyz, training_args.position_lr_init),
+            ("weight", self._weight, training_args.weight_lr),
+            ("scaling", self._scaling, training_args.scaling_lr),
+            ("rotation", self._rotation, training_args.rotation_lr),
+            ("value", self._values, training_args.values_lr),
         ]
-
-        # fused=True: the 5 param groups hold one tensor each, so the default foreach
-        # path launches ~35 tiny multi_tensor_apply kernels per step (Adam was 24% of
-        # all CUDA time). The fused kernel does each group in one launch. Densification
-        # only ever rewrites exp_avg/exp_avg_sq, never state["step"], so the CUDA step
-        # tensor fused mode keeps carries through prune/split untouched.
-        self.optimizer = torch.optim.Adam(optimizer_params, lr=0.0, eps=1e-15, fused=True)
-
+        # torch owns the Adam state and takes the first step; optimizer_step does the rest.
+        self.optimizer = torch.optim.Adam(
+            [{"params": [p], "lr": lr, "name": name} for name, p, lr in groups],
+            lr=0.0,
+            eps=1e-15,
+            fused=True,
+        )
         self.xyz_scheduler_args = get_expon_lr_func(
             lr_init=training_args.position_lr_init,
             lr_final=training_args.position_lr_final,
@@ -233,255 +124,219 @@ class GaussianModel:
             max_steps=training_args.position_lr_max_steps,
         )
 
-    _EMA_ATTR = {"xyz": "_xyz", "weight": "_weight", "scaling": "_scaling",
-                 "rotation": "_rotation", "value": "_values"}
-
     def optimizer_step(self, ema=None, ema_w=0.0):
-        """optimizer.step(), but as ONE kernel over all five parameter tensors.
-
-        torch's fused Adam launches once per param group with one block per 65536
-        elements, so on small models each launch runs 1-3 blocks and is latency-bound
-        (~0.26 ms/iteration of GPU time at 44k Gaussians for ~10 us of traffic). Same
-        update, same state tensors (densification edits exp_avg/exp_avg_sq in place, which
-        this reads), so torch keeps owning the state. The first step goes through torch to
-        create that state.
-        """
+        """One Adam step over all five parameters in a single kernel, plus the EMA if given."""
         opt = self.optimizer
-        if getattr(self, "_adam_torch_only", False) or not hasattr(_dgr_C, "multi_adam_"):
+        params = [g["params"][0] for g in opt.param_groups]
+        has_grad = [p.grad is not None for p in params]
+        ema_done = False
+        if not any(has_grad):
+            pass  # densification replaced every parameter this iteration: no Adam step
+        elif self._adam_t is None:
             opt.step()
-            return
-        groups = [g for g in opt.param_groups if g["params"][0].grad is not None]
-        if not groups:
-            # Densification just replaced every parameter, so none has a gradient yet;
-            # torch's step is a no-op here (no state change, no step increment).
-            return
-        states = [opt.state.get(g["params"][0]) for g in groups]
-        if (len(groups) != len(opt.param_groups) or not all(states)
-                or getattr(self, "_adam_t", None) is None):
-            # First step (creates the state), or a partial step: let torch do it, then
-            # re-read the shared step count once. Per-group counts that ever diverge
-            # cannot share one bias correction, so stay on torch from then on.
-            opt.step()
-            steps = {int(st["step"]) for st in (opt.state[g["params"][0]] for g in opt.param_groups)
-                     if st}
-            self._adam_t = steps.pop() if len(steps) == 1 else None
-            self._adam_torch_only = self._adam_t is None
-            return
-        ps = [g["params"][0] for g in groups]
-        if not all(p.grad.is_contiguous() for p in ps):
-            opt.step()
-            self._adam_t += 1
-            return
-        self._adam_t += 1
-        b1, b2 = groups[0]["betas"]
-        args = ([p.data for p in ps], [p.grad for p in ps],
-                [st["exp_avg"] for st in states], [st["exp_avg_sq"] for st in states],
-                [float(g["lr"]) for g in groups], self._adam_t,
-                float(b1), float(b2), float(groups[0]["eps"]))
-        fused_ema = (ema is not None and len(groups) == len(opt.param_groups)
-                     and hasattr(_dgr_C, "multi_adam_ema_") and os.environ.get("FUSED_EMA", "1") != "0")
-        if fused_ema:
-            # The Polyak-average update rides along in the same pass over the parameters
-            # (saves a full extra read+write of every parameter and its average).
-            _dgr_C.multi_adam_ema_(*args, [ema[self._EMA_ATTR[g["name"]]] for g in groups], float(ema_w))
+            self._adam_t = int(opt.state[params[0]]["step"])
         else:
-            _dgr_C.multi_adam_(*args)
-        torch._foreach_add_([st["step"] for st in states], 1.0)
-        return fused_ema
+            assert all(has_grad), "partial Adam step"
+            self._adam_t += 1
+            states = [opt.state[p] for p in params]
+            g0 = opt.param_groups[0]
+            emas = (
+                [ema[self._GROUP_ATTR[g["name"]]] for g in opt.param_groups]
+                if ema
+                else []
+            )
+            _dgr_C.multi_adam_(
+                [p.data for p in params],
+                [p.grad for p in params],
+                [st["exp_avg"] for st in states],
+                [st["exp_avg_sq"] for st in states],
+                [float(g["lr"]) for g in opt.param_groups],
+                self._adam_t,
+                float(g0["betas"][0]),
+                float(g0["betas"][1]),
+                float(g0["eps"]),
+                emas,
+                float(ema_w),
+            )
+            ema_done = ema is not None
+        if ema is not None and not ema_done:
+            torch._foreach_lerp_(
+                [ema[n] for n in self.EMA_NAMES],
+                [getattr(self, n).detach() for n in self.EMA_NAMES],
+                ema_w,
+            )
 
     def update_learning_rate(self, iteration):
-        """Learning rate scheduling per step"""
         for param_group in self.optimizer.param_groups:
             if param_group["name"] == "xyz":
                 lr = self.xyz_scheduler_args(iteration)
                 param_group["lr"] = lr
                 return lr
 
-    def construct_list_of_attributes(self):
-        attributes = ["x", "y", "z", "value", "weight"]
-        for i in range(self._scaling.shape[1]):
-            attributes.append("scale_{}".format(i))
-        for i in range(self._rotation.shape[1]):
-            attributes.append("rot_{}".format(i))
-        return attributes
-
     def save_ply(self, path):
-        mkdir_p(os.path.dirname(path))
-
-        xyz = self._xyz.detach().cpu().numpy()
-        weights = self._weight.detach().cpu().numpy()
-        scale = self._scaling.detach().cpu().numpy()
-        rotation = self._rotation.detach().cpu().numpy()
-        values = self._values.detach().cpu().numpy()
-
-        dtype_full = [
-            (attribute, "f4") for attribute in self.construct_list_of_attributes()
-        ]
-
-        elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        attributes = np.concatenate((xyz, values, weights, scale, rotation), axis=1)
-        elements[:] = list(map(tuple, attributes))
-        el = PlyElement.describe(elements, "vertex")
-        PlyData([el]).write(path)
-
-        # The ascii copy is ~3x the binary's size and nothing reads it; it filled the home
-        # quota and crashed saves. Opt in with SAVE_ASCII_PLY=1.
-        if os.environ.get("SAVE_ASCII_PLY") == "1":
-            self.convert_ply_to_ascii(path)
-
-    def reset_weight(self):
-        weights_new = self.inverse_weight_activation(
-            torch.min(self.get_weight, torch.ones_like(self.get_weight) * 0.01)
-        )
-        optimizable_tensors = self.replace_tensor_to_optimizer(weights_new, "weight")
-        self._weight = optimizable_tensors["weight"]
-
-    def load_ply(self, path, mesh=None, use_train_test_exp=False):
-        plydata = PlyData.read(path)
-        print(
-            f"Number of points at initialisation : {plydata.elements[0]['x'].shape[0]}"
-        )
-        xyz = np.stack(
-            (
-                np.asarray(plydata.elements[0]["x"]),
-                np.asarray(plydata.elements[0]["y"]),
-                np.asarray(plydata.elements[0]["z"]),
-            ),
+        """Raw (pre-activation) parameters, 12 floats per Gaussian."""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        attributes = ["x", "y", "z", "value", "weight"]
+        attributes += [f"scale_{i}" for i in range(self._scaling.shape[1])]
+        attributes += [f"rot_{i}" for i in range(self._rotation.shape[1])]
+        data = np.concatenate(
+            [
+                t.detach().cpu().numpy()
+                for t in (
+                    self._xyz,
+                    self._values,
+                    self._weight,
+                    self._scaling,
+                    self._rotation,
+                )
+            ],
             axis=1,
         )
-        if mesh:
-            xmin, xmax, ymin, ymax, zmin, zmax = mesh.bounds
-        else:
-            xmin, xmax = 0, 1
-            ymin, ymax = 0, 1
-            zmin, zmax = 0, 1
-        # self.mins = [
-        #     xmin - 0.01,
-        #     ymin - 0.01,
-        #     zmin - 0.01
-        # ]
-        # self.maxes = [
-        #     xmax + 0.01,
-        #     ymax + 0.01,
-        #     zmax + 0.01
-        # ]
-        self.mins = [
-            xmin,
-            ymin,
-            zmin
-        ]
-        self.maxes = [
-            xmax,
-            ymax,
-            zmax
-        ]
-        print(self.mins)
-        print(self.maxes)
-        weights = np.asarray(plydata.elements[0]["weight"])[..., np.newaxis]
+        elements = np.empty(data.shape[0], dtype=[(a, "f4") for a in attributes])
+        elements[:] = list(map(tuple, data))
+        PlyData([PlyElement.describe(elements, "vertex")]).write(path)
 
-        scale_names = [
-            p.name
-            for p in plydata.elements[0].properties
-            if p.name.startswith("scale_")
-        ]
-        scale_names = sorted(scale_names, key=lambda x: int(x.split("_")[-1]))
-        scales = np.zeros((xyz.shape[0], len(scale_names)))
-        for idx, attr_name in enumerate(scale_names):
-            scales[:, idx] = np.asarray(plydata.elements[0][attr_name])
+    def load_ply(self, path, mesh=None):
+        el = PlyData.read(path).elements[0]
+        print(f"Number of points at initialisation : {el['x'].shape[0]}")
+        self._set_bounds(mesh)
 
-        rot_names = [
-            p.name for p in plydata.elements[0].properties if p.name.startswith("rot")
-        ]
-        rot_names = sorted(rot_names, key=lambda x: int(x.split("_")[-1]))
-        rots = np.zeros((xyz.shape[0], len(rot_names)))
-        for idx, attr_name in enumerate(rot_names):
-            rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
-
-        values = np.asarray(plydata.elements[0]["value"])[..., np.newaxis]
-
-        self._xyz = nn.Parameter(
-            torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True)
-        )
-        self._weight = nn.Parameter(
-            torch.tensor(weights, dtype=torch.float, device="cuda").requires_grad_(
-                True
+        def cols(prefix):
+            names = sorted(
+                (p.name for p in el.properties if p.name.startswith(prefix)),
+                key=lambda x: int(x.split("_")[-1]),
             )
-        )
-        self._scaling = nn.Parameter(
-            torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True)
-        )
-        self._rotation = nn.Parameter(
-            torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True)
-        )
-        self._values = nn.Parameter(
-            torch.tensor(values, dtype=torch.float, device="cuda").requires_grad_(True)
-        )
+            return np.stack([np.asarray(el[n]) for n in names], axis=1)
+
+        def param(a):
+            return nn.Parameter(
+                torch.tensor(a, dtype=torch.float, device="cuda").requires_grad_(True)
+            )
+
+        self._xyz = param(np.stack([np.asarray(el[c]) for c in "xyz"], axis=1))
+        self._weight = param(np.asarray(el["weight"])[..., np.newaxis])
+        self._scaling = param(cols("scale_"))
+        self._rotation = param(cols("rot"))
+        self._values = param(np.asarray(el["value"])[..., np.newaxis])
         self.mesh = mesh
 
-    def replace_tensor_to_optimizer(self, tensor, name):
-        optimizable_tensors = {}
-        for group in self.optimizer.param_groups:
-            if group["name"] == name:
-                stored_state = self.optimizer.state.get(group["params"][0], None)
-                stored_state["exp_avg"] = torch.zeros_like(tensor)
-                stored_state["exp_avg_sq"] = torch.zeros_like(tensor)
+    def _sync_params(self, tensors):
+        for name, t in tensors.items():
+            setattr(self, self._GROUP_ATTR[name], t)
 
-                del self.optimizer.state[group["params"][0]]
-                group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
-                self.optimizer.state[group["params"][0]] = stored_state
+    def _swap_param(self, group, tensor, state_fn):
+        """Replace a group's parameter by tensor, carrying its Adam state through state_fn."""
+        old = group["params"][0]
+        state = self.optimizer.state.pop(old, None)
+        group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
+        if state is not None:
+            state_fn(state)
+            self.optimizer.state[group["params"][0]] = state
+        return group["params"][0]
 
-                optimizable_tensors[group["name"]] = group["params"][0]
-        return optimizable_tensors
+    def replace_tensors_to_optimizer(self, inds):
+        """Re-wrap every parameter after in-place edits, zeroing the Adam moments at inds."""
 
-    def replace_tensors_to_optimizer(self, inds=None):
-        tensors_dict = {
-            "xyz": self._xyz,
-            "scaling" : self._scaling,
-            "rotation" : self._rotation,
-            "weight": self._weight,
-            "value": self._values
+        def reset(st):
+            st["exp_avg"][inds] = 0
+            st["exp_avg_sq"][inds] = 0
+
+        self._sync_params(
+            {
+                g["name"]: self._swap_param(
+                    g, getattr(self, self._GROUP_ATTR[g["name"]]), reset
+                )
+                for g in self.optimizer.param_groups
             }
+        )
 
-        optimizable_tensors = {}
-        for group in self.optimizer.param_groups:
-            assert len(group["params"]) == 1
-            tensor = tensors_dict[group["name"]]
-            stored_state = self.optimizer.state.get(group['params'][0], None)
-            
-            if inds is not None:
-                stored_state["exp_avg"][inds] = 0
-                stored_state["exp_avg_sq"][inds] = 0
-            else:
-                stored_state["exp_avg"] = torch.zeros_like(tensor)
-                stored_state["exp_avg_sq"] = torch.zeros_like(tensor)
+    def _prune_optimizer(self, mask):
+        def prune(st):
+            st["exp_avg"] = st["exp_avg"][mask]
+            st["exp_avg_sq"] = st["exp_avg_sq"][mask]
 
-            del self.optimizer.state[group['params'][0]]
-            group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
-            self.optimizer.state[group['params'][0]] = stored_state
+        return {
+            g["name"]: self._swap_param(g, g["params"][0][mask], prune)
+            for g in self.optimizer.param_groups
+        }
 
-            optimizable_tensors[group["name"]] = group["params"][0]
+    def cat_tensors_to_optimizer(self, tensors_dict):
+        out = {}
+        for g in self.optimizer.param_groups:
+            ext = tensors_dict[g["name"]]
 
-        self._xyz = optimizable_tensors["xyz"]
-        self._weight = optimizable_tensors["weight"]
-        self._scaling = optimizable_tensors["scaling"]
-        self._rotation = optimizable_tensors["rotation"]
-        self._values = optimizable_tensors["value"] 
+            def extend(st):
+                st["exp_avg"] = torch.cat((st["exp_avg"], torch.zeros_like(ext)), dim=0)
+                st["exp_avg_sq"] = torch.cat(
+                    (st["exp_avg_sq"], torch.zeros_like(ext)), dim=0
+                )
 
-        return optimizable_tensors
+            out[g["name"]] = self._swap_param(
+                g, torch.cat((g["params"][0], ext), dim=0), extend
+            )
+        return out
 
+    # The EMA buffers must see every row edit (prune, append, overwrite), or the saved
+    # average mixes unrelated Gaussians.
+    def _ema_prune(self, valid_points_mask):
+        if self.ema_buffers is None:
+            return
+        for n in self.EMA_NAMES:
+            self.ema_buffers[n] = self.ema_buffers[n][valid_points_mask]
+
+    def _ema_extend(self, n_new):
+        if self.ema_buffers is None or n_new <= 0:
+            return
+        for n in self.EMA_NAMES:
+            self.ema_buffers[n] = torch.cat(
+                (self.ema_buffers[n], getattr(self, n)[-n_new:].detach().clone()), dim=0
+            )
+
+    def _ema_reset(self, idx):
+        if self.ema_buffers is None or idx is None or idx.numel() == 0:
+            return
+        for n in self.EMA_NAMES:
+            self.ema_buffers[n][idx] = getattr(self, n)[idx].detach().clone()
+
+    def prune_points(self, mask):
+        valid = ~mask
+        self._sync_params(self._prune_optimizer(valid))
+        self._ema_prune(valid)
+
+    def densification_postfix(
+        self, new_xyz, new_weights, new_scaling, new_rotation, new_values
+    ):
+        d = {
+            "xyz": new_xyz,
+            "weight": new_weights,
+            "scaling": new_scaling,
+            "rotation": new_rotation,
+            "value": new_values,
+        }
+        self._sync_params(self.cat_tensors_to_optimizer(d))
+        self._ema_extend(new_xyz.shape[0])
+
+    # --use_mcmc: 3DGS-MCMC relocation of dead Gaussians onto live ones.
     def _update_params(self, idxs, ratio):
         N = (ratio[idxs, 0] + 1).float()
         new_weight = self.get_weight[idxs, 0] / N
-        new_weight = torch.clamp(new_weight.unsqueeze(-1), max=1.0 - torch.finfo(torch.float32).eps, min=0.005)
-        new_weight = self.inverse_weight_activation(new_weight)
-        new_scaling = self._scaling[idxs]  # unchanged in internal space
-
-        scaling = self.get_scaling[idxs]                          # (M, 3)
-        rotation = build_rotation(self._rotation[idxs])           # (M, 3, 3)
-        noise = torch.randn_like(scaling) * scaling * 0.5         # scale-proportional noise
-        perturbed_xyz = self._xyz[idxs] + torch.bmm(rotation, noise.unsqueeze(-1)).squeeze(-1)
-
-        return perturbed_xyz, new_weight, new_scaling, self._rotation[idxs], self._values[idxs]
+        new_weight = torch.clamp(
+            new_weight.unsqueeze(-1),
+            max=1.0 - torch.finfo(torch.float32).eps,
+            min=0.005,
+        )
+        new_weight = inverse_sigmoid(new_weight)
+        scaling = self.get_scaling[idxs]
+        rotation = build_rotation(self._rotation[idxs])
+        noise = torch.randn_like(scaling) * scaling * 0.5
+        xyz = self._xyz[idxs] + torch.bmm(rotation, noise.unsqueeze(-1)).squeeze(-1)
+        return (
+            xyz,
+            new_weight,
+            self._scaling[idxs],
+            self._rotation[idxs],
+            self._values[idxs],
+        )
 
     def _sample_alives(self, probs, num, alive_indices=None):
         probs = probs / (probs.sum() + torch.finfo(torch.float32).eps)
@@ -491,343 +346,147 @@ class GaussianModel:
         ratio = torch.bincount(sampled_idxs).unsqueeze(-1)
         return sampled_idxs, ratio
 
-    def relocate_gs(self, dead_mask=None, cells=None, gt=None):
-
+    def relocate_gs(self, dead_mask):
         if dead_mask.sum() == 0:
             return
-
-        alive_mask = ~dead_mask 
         dead_indices = dead_mask.nonzero(as_tuple=True)[0]
-        alive_indices = alive_mask.nonzero(as_tuple=True)[0]
-
+        alive_indices = (~dead_mask).nonzero(as_tuple=True)[0]
         if alive_indices.shape[0] <= 0:
             return
-
-        # sample from alive ones based on weight
-        probs = (self.get_weight[alive_indices, 0]) 
-        reinit_idx, ratio = self._sample_alives(alive_indices=alive_indices, probs=probs, num=dead_indices.shape[0])
-
+        probs = self.get_weight[alive_indices, 0]
+        reinit_idx, ratio = self._sample_alives(
+            alive_indices=alive_indices, probs=probs, num=dead_indices.shape[0]
+        )
         (
-            self._xyz[dead_indices], 
+            self._xyz[dead_indices],
             self._weight[dead_indices],
             self._scaling[dead_indices],
             self._rotation[dead_indices],
-            self._values[dead_indices] 
+            self._values[dead_indices],
         ) = self._update_params(reinit_idx, ratio=ratio)
-        
         self._weight[reinit_idx] = self._weight[dead_indices]
         self._scaling[reinit_idx] = self._scaling[dead_indices]
-
-        # Reset Adam moments for BOTH the split sources and the relocated
-        # destinations. The destinations get brand-new parameters, so keeping the
-        # dying Gaussian's stale exp_avg/exp_avg_sq drags them straight back down.
+        # Both the sources and the destinations now hold different Gaussians.
         reset_idx = torch.cat([reinit_idx, dead_indices]).unique()
         self._ema_reset(reset_idx)
-        self.replace_tensors_to_optimizer(inds=reset_idx) 
+        self.replace_tensors_to_optimizer(inds=reset_idx)
 
     def add_new_gs(self, cap_max):
-        current_num_points = self._weight.shape[0]
-        target_num = min(cap_max, int(1.5 * current_num_points))
-        num_gs = max(0, target_num - current_num_points)
-
+        current = self._weight.shape[0]
+        num_gs = max(0, min(cap_max, int(1.5 * current)) - current)
         if num_gs <= 0:
             return 0
-
-        probs = self.get_weight.squeeze(-1) 
-        add_idx, ratio = self._sample_alives(probs=probs, num=num_gs)
-
-        (
-            new_xyz, 
-            new_weight,
-            new_scaling,
-            new_rotation,
-            new_values
-        ) = self._update_params(add_idx, ratio=ratio)
-
+        add_idx, ratio = self._sample_alives(
+            probs=self.get_weight.squeeze(-1), num=num_gs
+        )
+        new_xyz, new_weight, new_scaling, new_rotation, new_values = (
+            self._update_params(add_idx, ratio=ratio)
+        )
         self._weight[add_idx] = new_weight
         self._scaling[add_idx] = new_scaling
-
         self._ema_reset(add_idx)
-        self.densification_postfix(new_xyz, new_weight, new_scaling, new_rotation, new_values, reset_params=False)
+        self.densification_postfix(
+            new_xyz, new_weight, new_scaling, new_rotation, new_values
+        )
         self.replace_tensors_to_optimizer(inds=add_idx)
-
         return num_gs
 
-    def _prune_optimizer(self, mask):
-        optimizable_tensors = {}
-        for group in self.optimizer.param_groups:
-            stored_state = self.optimizer.state.get(group["params"][0], None)
-            if stored_state is not None:
-                stored_state["exp_avg"] = stored_state["exp_avg"][mask]
-                stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
-
-                del self.optimizer.state[group["params"][0]]
-                group["params"][0] = nn.Parameter(
-                    (group["params"][0][mask].requires_grad_(True))
-                )
-                self.optimizer.state[group["params"][0]] = stored_state
-
-                optimizable_tensors[group["name"]] = group["params"][0]
-            else:
-                group["params"][0] = nn.Parameter(
-                    group["params"][0][mask].requires_grad_(True)
-                )
-                optimizable_tensors[group["name"]] = group["params"][0]
-        return optimizable_tensors
-
-
-    # ---- Parameter-EMA row bookkeeping -------------------------------------
-    # train.py installs `ema_buffers` (name -> tensor, one row per Gaussian). Any
-    # operation that reorders, drops or appends rows must apply the same change to
-    # them, or the average is taken over unrelated Gaussians -- a failure that is
-    # invisible during training and only corrupts the saved model. Routing this
-    # through prune_points/densification_postfix covers every densification path
-    # (error-based, 3DGS clone/split, MCMC add) with no per-path journal.
-    EMA_NAMES = ("_xyz", "_scaling", "_rotation", "_weight", "_values")
-
-    def _ema_prune(self, valid_points_mask):
-        if getattr(self, "ema_buffers", None) is None:
-            return
-        for n in self.EMA_NAMES:
-            self.ema_buffers[n] = self.ema_buffers[n][valid_points_mask]
-
-    def _ema_extend(self, n_new):
-        if getattr(self, "ema_buffers", None) is None or n_new <= 0:
-            return
-        for n in self.EMA_NAMES:
-            # A freshly created Gaussian has no history: its average starts at its
-            # current value.
-            self.ema_buffers[n] = torch.cat(
-                (self.ema_buffers[n], getattr(self, n)[-n_new:].detach().clone()), dim=0)
-
-    def _ema_reset(self, idx):
-        """Restart the average for rows whose parameters were overwritten in place.
-
-        Mirrors replace_tensors_to_optimizer: wherever the Adam moments are reset
-        because the row now holds a different Gaussian, the EMA must restart too.
-        """
-        if getattr(self, "ema_buffers", None) is None or idx is None or idx.numel() == 0:
-            return
-        for n in self.EMA_NAMES:
-            self.ema_buffers[n][idx] = getattr(self, n)[idx].detach().clone()
-
-    def prune_points(self, mask):
-        valid_points_mask = ~mask
-        optimizable_tensors = self._prune_optimizer(valid_points_mask)
-
-        self._xyz = optimizable_tensors["xyz"]
-        self._weight = optimizable_tensors["weight"]
-        self._scaling = optimizable_tensors["scaling"]
-        self._rotation = optimizable_tensors["rotation"]
-        self._values = optimizable_tensors["value"]
-        self._ema_prune(valid_points_mask)
-
-    def cat_tensors_to_optimizer(self, tensors_dict):
-        optimizable_tensors = {}
-        for group in self.optimizer.param_groups:
-            assert len(group["params"]) == 1
-            extension_tensor = tensors_dict[group["name"]]
-            stored_state = self.optimizer.state.get(group["params"][0], None)
-            if stored_state is not None:
-                avg_sq = stored_state["exp_avg_sq"].mean(dim=0, keepdim=True)
-                avg_sq = avg_sq.expand_as(extension_tensor)
-                avg = stored_state["exp_avg"].mean(dim=0, keepdim=True)
-                avg = avg.expand_as(extension_tensor)
-                if False:
-                    stored_state["exp_avg_sq"] = torch.cat(
-                        (stored_state["exp_avg_sq"], avg_sq), dim=0
-                    )
-                    # stored_state["exp_avg"] = torch.cat(
-                    #     (stored_state["exp_avg"], avg), dim=0
-                    # )
-                else:
-                    stored_state["exp_avg_sq"] = torch.cat(
-                        (stored_state["exp_avg_sq"], torch.zeros_like(extension_tensor)),
-                        dim=0,
-                    )
-                stored_state["exp_avg"] = torch.cat(
-                    (stored_state["exp_avg"], torch.zeros_like(extension_tensor)), dim=0
-                )
-
-                del self.optimizer.state[group["params"][0]]
-                group["params"][0] = nn.Parameter(
-                    torch.cat(
-                        (group["params"][0], extension_tensor), dim=0
-                    ).requires_grad_(True)
-                )
-                self.optimizer.state[group["params"][0]] = stored_state
-
-                optimizable_tensors[group["name"]] = group["params"][0]
-            else:
-                group["params"][0] = nn.Parameter(
-                    torch.cat(
-                        (group["params"][0], extension_tensor), dim=0
-                    ).requires_grad_(True)
-                )
-                optimizable_tensors[group["name"]] = group["params"][0]
-
-        return optimizable_tensors
-
-    def densification_postfix(
-        self,
-        new_xyz,
-        new_weights,
-        new_scaling,
-        new_rotation,
-        new_values,
-        reset_params=True
-    ):
-        d = {
-            "xyz": new_xyz,
-            "weight": new_weights,
-            "scaling": new_scaling,
-            "rotation": new_rotation,
-            "value": new_values
-        }
-
-        optimizable_tensors = self.cat_tensors_to_optimizer(d)
-
-        self._xyz = optimizable_tensors["xyz"]
-        self._weight = optimizable_tensors["weight"]
-        self._scaling = optimizable_tensors["scaling"]
-        self._rotation = optimizable_tensors["rotation"]
-        self._values = optimizable_tensors["value"]
-        self._ema_extend(new_xyz.shape[0])
-
-    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2, max_new_points=None):
-        n_points = self.get_xyz.shape[0]
-
-        grad_mag = torch.zeros(n_points, device=self.get_xyz.device)
-        grad_mag[:grads.shape[0]] = torch.linalg.norm(grads, dim=-1)
-
-        selected_pts_mask = grad_mag >= grad_threshold
-        selected_pts_mask = torch.logical_and(
-            selected_pts_mask,
+    # --densify_3dgs: clone/split on the position gradient.
+    def _select_by_grad(self, grads, grad_threshold, large, scene_extent, max_parents):
+        grad_mag = torch.zeros(self.get_xyz.shape[0], device=self.get_xyz.device)
+        grad_mag[: grads.shape[0]] = torch.linalg.norm(grads, dim=-1)
+        big = (
             torch.max(self.get_scaling, dim=1).values
-            > self.percent_dense * scene_extent,
+            > self.percent_dense * scene_extent
         )
+        mask = (grad_mag >= grad_threshold) & (big if large else ~big)
+        idx = mask.nonzero(as_tuple=True)[0]
+        if max_parents is not None:
+            if max_parents <= 0 or idx.numel() == 0:
+                return None
+            if idx.numel() > max_parents:
+                idx = idx[
+                    torch.topk(grad_mag[idx], k=max_parents, sorted=False).indices
+                ]
+            mask = torch.zeros_like(mask)
+            mask[idx] = True
+        return mask
 
-        selected_idx = selected_pts_mask.nonzero(as_tuple=True)[0]
-
-        if max_new_points is not None:
-            max_new_points = int(max_new_points)
-            max_parents = max_new_points // N   # use (N - 1) here if you mean net growth instead
-            if max_parents <= 0 or selected_idx.numel() == 0:
-                return 0
-            if selected_idx.numel() > max_parents:
-                keep = torch.topk(
-                    grad_mag[selected_idx], k=max_parents, sorted=False
-                ).indices
-                selected_idx = selected_idx[keep]
-
-            selected_pts_mask = torch.zeros_like(selected_pts_mask)
-            selected_pts_mask[selected_idx] = True
-
-        num_added = N * selected_pts_mask.sum().item()
-        if num_added == 0:
+    def densify_and_split(
+        self, grads, grad_threshold, scene_extent, N=2, max_new_points=None
+    ):
+        mask = self._select_by_grad(
+            grads,
+            grad_threshold,
+            True,
+            scene_extent,
+            None if max_new_points is None else int(max_new_points) // N,
+        )
+        if mask is None or N * mask.sum().item() == 0:
             return 0
-
-        stds = self.get_scaling[selected_pts_mask].repeat(N, 1)
-        means = torch.zeros((stds.size(0), 3), device=self.get_xyz.device)
-        samples = torch.normal(mean=means, std=stds)
-        rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N, 1, 1)
-
-        new_xyz = (
-            torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1)
-            + self.get_xyz[selected_pts_mask].repeat(N, 1)
+        num_added = N * mask.sum().item()
+        stds = self.get_scaling[mask].repeat(N, 1)
+        samples = torch.normal(
+            mean=torch.zeros((stds.size(0), 3), device=self.get_xyz.device), std=stds
         )
-        new_scaling = self.inverse_scaling_activation(
-            self.get_scaling[selected_pts_mask].repeat(N, 1) / (0.8 * N)
-        )
-        new_rotation = self._rotation[selected_pts_mask].repeat(N, 1)
-        new_weight = self._weight[selected_pts_mask].repeat(N, 1)
-        new_values = self._values[selected_pts_mask].repeat(N, 1)
-
+        rots = build_rotation(self._rotation[mask]).repeat(N, 1, 1)
         self.densification_postfix(
-            new_xyz,
-            new_weight,
-            new_scaling,
-            new_rotation,
-            new_values,
+            torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1)
+            + self.get_xyz[mask].repeat(N, 1),
+            self._weight[mask].repeat(N, 1),
+            torch.log(self.get_scaling[mask].repeat(N, 1) / (0.8 * N)),
+            self._rotation[mask].repeat(N, 1),
+            self._values[mask].repeat(N, 1),
         )
-
-        prune_filter = torch.cat(
-            (
-                selected_pts_mask,
-                torch.zeros(N * selected_pts_mask.sum(), device=self.get_xyz.device, dtype=torch.bool),
+        self.prune_points(
+            torch.cat(
+                (
+                    mask,
+                    torch.zeros(
+                        N * mask.sum(), device=self.get_xyz.device, dtype=torch.bool
+                    ),
+                )
             )
         )
-        self.prune_points(prune_filter)
         return num_added
 
-    def densify_and_clone(self, grads, grad_threshold, scene_extent, max_new_points=None):
-        n_points = self.get_xyz.shape[0]
-
-        grad_mag = torch.zeros(n_points, device=self.get_xyz.device)
-        grad_mag[:grads.shape[0]] = torch.linalg.norm(grads, dim=-1)
-
-        selected_pts_mask = grad_mag >= grad_threshold
-        selected_pts_mask = torch.logical_and(
-            selected_pts_mask,
-            torch.max(self.get_scaling, dim=1).values
-            <= self.percent_dense * scene_extent,
+    def densify_and_clone(
+        self, grads, grad_threshold, scene_extent, max_new_points=None
+    ):
+        mask = self._select_by_grad(
+            grads,
+            grad_threshold,
+            False,
+            scene_extent,
+            None if max_new_points is None else int(max_new_points),
         )
-
-        selected_idx = selected_pts_mask.nonzero(as_tuple=True)[0]
-
-        if max_new_points is not None:
-            max_new_points = int(max_new_points)
-            if max_new_points <= 0 or selected_idx.numel() == 0:
-                return 0
-            if selected_idx.numel() > max_new_points:
-                keep = torch.topk(
-                    grad_mag[selected_idx], k=max_new_points, sorted=False
-                ).indices
-                selected_idx = selected_idx[keep]
-
-            selected_pts_mask = torch.zeros_like(selected_pts_mask)
-            selected_pts_mask[selected_idx] = True
-
-        num_added = selected_pts_mask.sum().item()
-        if num_added == 0:
+        if mask is None or mask.sum().item() == 0:
             return 0
-
-        new_xyz = self._xyz[selected_pts_mask]
-        new_weights = self._weight[selected_pts_mask]
-        new_scaling = self._scaling[selected_pts_mask]
-        new_rotation = self._rotation[selected_pts_mask]
-        new_values = self._values[selected_pts_mask]
-
+        num_added = mask.sum().item()
         self.densification_postfix(
-            new_xyz,
-            new_weights,
-            new_scaling,
-            new_rotation,
-            new_values,
+            self._xyz[mask],
+            self._weight[mask],
+            self._scaling[mask],
+            self._rotation[mask],
+            self._values[mask],
         )
         return num_added
 
+    # Default densification: new Gaussians at high-error cells.
     def _new_point_knn(self, new_pts):
-        """distCUDA2 (mean squared distance to the 3 nearest other points) for the new
-        points only, against existing + new points.
+        """distCUDA2 for the new points only, against existing + new points.
 
-        distCUDA2 scans every box per point, O(P^2/1024), plus ~10 ms of fixed sort /
-        malloc / free per call: 60-135 ms per densification event at 1.4M-2.6M Gaussians
-        and 36 events per run, although after the growth phase an event adds only the
-        tens to a few hundred Gaussians pruning freed. Instead, bin all points into a grid
-        of cell size R and compare each new point only with the points in its 27 nearby
-        cells, which contain every point within distance R. When the three nearest found
-        all lie within R they are the global three nearest, so the result matches
-        distCUDA2 to float rounding; queries that miss retry once at 2R, and anything
-        still unresolved, or a large batch, falls back to the full pass.
+        Bins all points on a grid of cell size R and searches each query's 27 neighbouring
+        cells; a query whose 3 nearest all lie within R has the exact answer. Misses retry
+        at 2R, then fall back to the full pass, as do large batches.
         """
         old = self._xyz.detach()
         n_old, k = old.shape[0], new_pts.shape[0]
+
         def full():
             return distCUDA2(torch.cat([old, new_pts], dim=0))[n_old:]
+
         if k == 0 or 8 * k > n_old:
-            # Large batches (the growth phase) are faster through the full pass: the
-            # chunked grid search measured 1.6-2.4 s vs 0.24-0.72 s at 3.3-3.5M queries.
             return full()
         dev = old.device
         pts = torch.cat([old, new_pts], dim=0)
@@ -835,8 +494,9 @@ class GaussianModel:
         lo = pts.min(dim=0).values
         ext = (pts.max(dim=0).values - lo).clamp_min(1e-12)
         spacing = float((torch.prod(ext) / P) ** (1.0 / 3.0))
-        offs = torch.stack(torch.meshgrid(*[torch.arange(-1, 2, device=dev)] * 3,
-                                          indexing="ij"), -1).reshape(-1, 3)
+        offs = torch.stack(
+            torch.meshgrid(*[torch.arange(-1, 2, device=dev)] * 3, indexing="ij"), -1
+        ).reshape(-1, 3)
         out = torch.empty(k, device=dev)
         todo = torch.arange(k, device=dev)
         for R in (2.0 * spacing, 4.0 * spacing):
@@ -846,28 +506,25 @@ class GaussianModel:
             order = torch.argsort(lin)
             counts = torch.bincount(lin, minlength=int(torch.prod(G)))
             starts = torch.cumsum(counts, 0) - counts
-            # Queries go in chunks sized to the densest cell, so a densification event that
-            # adds millions of points (64x growth phase) no longer falls back to the full
-            # O(P^2) pass: the (chunk, 27, M) candidate tensors stay under ~6e7 entries.
+            # Chunked so the (chunk, 27, M) candidate tensors stay under ~6e7 entries.
             chunk = max(1024, int(6e7 // (27 * max(1, int(counts.max())))))
             unresolved = []
             for ch in torch.split(todo, chunk):
-                raw = c[n_old + ch][:, None, :] + offs[None]                       # (q, 27, 3)
-                # Out-of-grid neighbours must be dropped, not clamped: clamping maps two of a
-                # boundary cell's neighbours onto the same cell and counts its points twice.
+                raw = c[n_old + ch][:, None, :] + offs[None]
+                # Drop out-of-grid neighbours; clamping would count a boundary cell twice.
                 inb = ((raw >= 0) & (raw < G)).all(-1)
                 qc = raw.clamp_min(0).minimum(G - 1)
-                nb = (qc[..., 2] * G[1] + qc[..., 1]) * G[0] + qc[..., 0]          # (q, 27)
+                nb = (qc[..., 2] * G[1] + qc[..., 1]) * G[0] + qc[..., 0]
                 cnt = counts[nb] * inb
                 M = int(cnt.max())
                 if M == 0:
                     unresolved.append(ch)
                     continue
                 ar = torch.arange(M, device=dev)
-                slot = (starts[nb][..., None] + ar).clamp(max=P - 1)                # (q, 27, M)
+                slot = (starts[nb][..., None] + ar).clamp(max=P - 1)
                 idx = order[slot].reshape(ch.shape[0], -1)
                 valid = (ar < cnt[..., None]).reshape(ch.shape[0], -1)
-                valid &= idx != (n_old + ch)[:, None]                               # not itself
+                valid &= idx != (n_old + ch)[:, None]
                 d2 = ((pts[idx] - new_pts[ch][:, None, :]) ** 2).sum(-1)
                 d2 = d2.masked_fill(~valid, float("inf"))
                 if d2.shape[1] < 3:
@@ -883,10 +540,27 @@ class GaussianModel:
         out[todo] = full()[todo]
         return out
 
+    def _new_gaussians(self, empty_points, empty_values, new_weight):
+        dist2 = torch.clamp_min(self._new_point_knn(empty_points) * 0.1, 0.0000001)
+        n = empty_points.shape[0]
+        rot = torch.zeros((n, 4), device="cuda")
+        rot[:, 0] = 1
+        return {
+            "xyz": empty_points,
+            "weight": inverse_sigmoid(
+                new_weight * torch.ones((n, 1), dtype=torch.float, device="cuda")
+            ),
+            "scaling": torch.log(torch.sqrt(dist2))[..., None].repeat(1, 3),
+            "rotation": rot,
+            "value": inverse_sigmoid(
+                torch.clamp(empty_values, VALUE_EPS, 1.0 - VALUE_EPS)
+            ),
+        }
+
     def _write_rows(self, idx, d):
-        """Overwrite rows idx of every parameter in place with d[group name], zero their Adam
-        moments and restart their EMA. Clears all grads, so this iteration's Adam step is
-        skipped -- as it is after prune/cat, which hands Adam fresh grad-less Parameters."""
+        """Overwrite rows idx in place, zeroing their Adam moments and restarting their EMA.
+        Clears all grads, which skips this iteration's Adam step as a prune/append would.
+        """
         with torch.no_grad():
             for group in self.optimizer.param_groups:
                 p = group["params"][0]
@@ -898,12 +572,8 @@ class GaussianModel:
                 p.grad = None
         self._ema_reset(idx)
 
-    def densify_in_place(self, empty_points, empty_values, new_scale, new_weight, min_weight):
-        """densify_in_empty + prune, but new Gaussians take the dead Gaussians' rows instead
-        of being appended after a full-size prune. Once the budget is full every event
-        replaces exactly as many as it prunes, and prune/cat copied all ~10M rows of the five
-        parameters, their Adam moments and EMA (~75 ms/event at richtmyer 64x); this writes
-        only the replaced rows. Only the order of the Gaussians differs."""
+    def densify_in_place(self, empty_points, empty_values, new_weight, min_weight):
+        """New Gaussians take the rows of pruned ones; only the overflow is appended."""
         d = self._new_gaussians(empty_points, empty_values, new_weight)
         k = empty_points.shape[0]
         slots = torch.nonzero((self.get_weight <= min_weight).squeeze(-1)).squeeze(-1)
@@ -911,126 +581,44 @@ class GaussianModel:
         if m > 0:
             self._write_rows(slots[:m], {n: v[:m] for n, v in d.items()})
         if k > m:
-            self.densification_postfix(*(d[n][m:] for n in ("xyz", "weight", "scaling", "rotation", "value")))
+            self.densification_postfix(
+                *(d[n][m:] for n in ("xyz", "weight", "scaling", "rotation", "value"))
+            )
         elif slots.numel() > m:
-            mask = torch.zeros(self._xyz.shape[0], dtype=torch.bool, device=self._xyz.device)
+            mask = torch.zeros(
+                self._xyz.shape[0], dtype=torch.bool, device=self._xyz.device
+            )
             mask[slots[m:]] = True
             self.prune_points(mask)
 
-    def _new_gaussians(self, empty_points, empty_values, new_weight):
-        dist2 = torch.clamp_min(self._new_point_knn(empty_points) * 0.1, 0.0000001)
-        n = empty_points.shape[0]
-        rot = torch.zeros((n, 4), device="cuda"); rot[:, 0] = 1
-        return {
-            "xyz": empty_points,
-            "weight": self.inverse_weight_activation(new_weight * torch.ones((n, 1), dtype=torch.float, device="cuda")),
-            "scaling": self.inverse_scaling_activation(torch.sqrt(dist2))[..., None].repeat(1, 3),
-            "rotation": rot,
-            "value": self.inverse_value_activation(torch.clamp(empty_values, VALUE_EPS, 1.0 - VALUE_EPS)),
-        }
-
-    def densify_in_empty(self, empty_points, empty_values, new_scale, new_weight):
-        dist2 = torch.clamp_min(self._new_point_knn(empty_points) * 0.1, 0.0000001)
-        new_scaling = self.inverse_scaling_activation(torch.sqrt(dist2))[..., None].repeat(1, 3)
-        # new_scaling = self.inverse_scaling_activation(
-        #     (new_scale) # Slightly bigger than 1 cell in 100^3 grid
-        #     * torch.ones(
-        #         (empty_points.shape[0], 3), dtype=torch.float, device="cuda"
-        #     )
-        # )
-        new_rotation = torch.zeros((empty_points.shape[0], 4), device="cuda")
-        new_rotation[:, 0] = 1
-
-        new_weights = self.inverse_weight_activation(
-            (new_weight) *
-            torch.ones(
-                (empty_points.shape[0], 1), dtype=torch.float, device="cuda"
-            )
-        )
-
-        # Same clamp as create_from_pcd: inverse_sigmoid maps an exact 0.0 to -inf and an
-        # exact 1.0 to +inf, and sigmoid'(+-inf) == 0, so such a Gaussian is frozen at that
-        # value with zero gradient forever. Densification targets the highest-error cells,
-        # which in a volume with large exact-valued regions are exactly the cells at 0 or 1:
-        # richt has 36.8M exact zeros and 2.24M exact ones, chameleon 238M zeros,
-        # vertebra 32M. The clamp existed only at init; this path had none.
-        new_values = self.inverse_value_activation(
-            torch.clamp(empty_values, VALUE_EPS, 1.0 - VALUE_EPS)
-        )
-
-        self.densification_postfix(
-            empty_points,
-            new_weights,
-            new_scaling,
-            new_rotation,
-            new_values,
-        )
-
-    def densify_and_prune(self, max_grad, min_weight, new_scale, new_weight, empty_points, empty_values, prune_only=False, num_densify=None, use_3dgs=False):
-        # xyz_grads = None
-        # if self._xyz.grad is not None:
-        #     xyz_grads = self._xyz.grad.detach().clone()   # (N, 3)
-
-        # if not prune_only and xyz_grads is not None:
-        #     remaining = num_densify
-
-        #     added = self.densify_and_clone(
-        #         xyz_grads, max_grad, 1.0, max_new_points=remaining
-        #     )
-        #     if remaining is not None:
-        #         remaining -= added
-
-        #     if remaining is None or remaining > 0:
-        #         added = self.densify_and_split(
-        #             xyz_grads, max_grad, 1.0, max_new_points=remaining
-        #         )
-        #         if remaining is not None:
-        #             remaining -= added
-
+    def densify_and_prune(
+        self,
+        max_grad,
+        min_weight,
+        new_weight,
+        empty_points,
+        empty_values,
+        prune_only=False,
+        num_densify=None,
+        use_3dgs=False,
+    ):
         if not prune_only:
-            if use_3dgs:
-                # Stock 3DGS placement: clone/split existing Gaussians whose position
-                # gradient exceeds max_grad, instead of seeding at high-error cells.
-                # Uses the instantaneous xyz grad (this is called before optimizer.step,
-                # so .grad is live); stock 3DGS averages it over the interval.
-                xyz_grads = (self._xyz.grad.detach().clone()
-                             if self._xyz.grad is not None else None)
-                if xyz_grads is not None:
-                    remaining = num_densify
-                    added = self.densify_and_clone(
-                        xyz_grads, max_grad, 1.0, max_new_points=remaining)
-                    if remaining is not None:
-                        remaining -= added
-                    if remaining is None or remaining > 0:
-                        self.densify_and_split(
-                            xyz_grads, max_grad, 1.0, max_new_points=remaining)
-            elif os.environ.get("DENSIFY_INPLACE", "1") != "0":
-                self.densify_in_place(empty_points, empty_values, new_scale, new_weight, min_weight)
+            if not use_3dgs:
+                self.densify_in_place(
+                    empty_points, empty_values, new_weight, min_weight
+                )
                 return
-            else:
-                self.densify_in_empty(empty_points, empty_values, new_scale, new_weight)
-
-        prune_mask = (self.get_weight < min_weight).squeeze()
-        # print(f"Number of Gaussians pruned: {torch.count_nonzero(prune_mask)}")
-        self.prune_points(prune_mask)
-
-
-    def convert_ply_to_ascii(self, binary_ply_file_path):
-        ascii_ply_file_path = binary_ply_file_path.replace(".ply", "_ascii.ply")
-
-        ply_data = PlyData.read(binary_ply_file_path)
-
-        with open(ascii_ply_file_path, "w") as f:
-            f.write("ply\n")
-            f.write("format ascii 1.0\n")
-
-            for element in ply_data.elements:
-                f.write(f"element {element.name} {element.count}\n")
-                for prop in element.properties:
-                    f.write(f"property float {prop.name}\n")
-
-            f.write("end_header\n")
-
-            for element in ply_data.elements:
-                for row in element.data:
-                    f.write(" ".join(str(val) for val in row) + "\n")
+            # Called before the Adam step, so .grad is this iteration's.
+            if self._xyz.grad is not None:
+                grads = self._xyz.grad.detach().clone()
+                remaining = num_densify
+                added = self.densify_and_clone(
+                    grads, max_grad, 1.0, max_new_points=remaining
+                )
+                if remaining is not None:
+                    remaining -= added
+                if remaining is None or remaining > 0:
+                    self.densify_and_split(
+                        grads, max_grad, 1.0, max_new_points=remaining
+                    )
+        self.prune_points((self.get_weight < min_weight).squeeze())

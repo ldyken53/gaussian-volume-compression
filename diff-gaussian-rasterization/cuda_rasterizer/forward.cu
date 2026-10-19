@@ -1,411 +1,153 @@
 #include "forward.h"
-#include <cstdlib>
-#include <cstdio>
 #include "auxiliary.h"
 #include <cooperative_groups.h>
-#include <cooperative_groups/reduce.h>
 namespace cg = cooperative_groups;
 
-// Perform initial steps for each Gaussian prior to rasterization.
-template<int C>
-__global__ void preprocessCUDA(int P,
-	const float support_t,
-	const int gauss_cut,
-	const float* means3D,
-	const glm::vec3* scales,
-	const float scale_modifier,
-	const glm::vec4* rotations,
-	const float* values,
-	const float* weights,
-	bool* clamped,
-	const float3 volume_mins,
-	const float3 volume_maxes,
-	const uint3 num_cells,
-	const float3 cell_size,
-	int* radii,
-	float3* means,
-	float* values_out,
-	float* weights_out,
-	float* volumes,
-	float* conic,
-	float4* packed,
-	uint* aabbs,
-	const dim3 grid,
-	uint32_t* blocks_touched)
+__global__ void preprocessCUDA(int P, const float* means3D, const float* rs, const float* rq,
+	const float* values, const float* weights, const float max_scale, const float3 volume_mins,
+	const float3 cell_size, const dim3 grid, float4* packed, uint* aabbs, uint32_t* blocks_touched)
 {
 	auto idx = cg::this_grid().thread_rank();
 	if (idx >= P)
 		return;
 
-	// Initialize touched blocks to 0. If this isn't changed,
-	// this Gaussian will not be processed further.
-	blocks_touched[idx] = 0;
-	radii[idx] = 0;
-
-#if FUSE_ACT
-	glm::vec3 scale; glm::vec4 rot;
-	{
-		const float* rs = (const float*)scales;
-		const float* rq = (const float*)rotations;
-		const float M = scale_modifier;
-		const float s0 = expf(rs[3 * idx]), s1 = expf(rs[3 * idx + 1]), s2 = expf(rs[3 * idx + 2]);
-		const float r = sqrtf(s0 * s0 + s1 * s1 + s2 * s2) + ACT_CAP_EPS;
-		const float f = M * tanhf(r / M) / r;
-		scale = glm::vec3(s0 * f, s1 * f, s2 * f);
-		const float q0 = rq[4 * idx], q1 = rq[4 * idx + 1], q2 = rq[4 * idx + 2], q3 = rq[4 * idx + 3];
-		const float inv = 1.0f / fmaxf(sqrtf(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3), ACT_NORM_EPS);
-		rot = glm::vec4(q0 * inv, q1 * inv, q2 * inv, q3 * inv);
-	}
+	// Activations: exp + soft norm cap on the scales, normalized quaternion, sigmoids.
+	const float s0 = expf(rs[3 * idx]), s1 = expf(rs[3 * idx + 1]), s2 = expf(rs[3 * idx + 2]);
+	const float sr = sqrtf(s0 * s0 + s1 * s1 + s2 * s2) + ACT_CAP_EPS;
+	const float sf = max_scale * tanhf(sr / max_scale) / sr;
+	const glm::vec3 scale(s0 * sf, s1 * sf, s2 * sf);
+	const float q0 = rq[4 * idx], q1 = rq[4 * idx + 1], q2 = rq[4 * idx + 2], q3 = rq[4 * idx + 3];
+	const float qinv = 1.0f / fmaxf(sqrtf(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3), ACT_NORM_EPS);
+	const float r = q0 * qinv, x = q1 * qinv, y = q2 * qinv, z = q3 * qinv;
 	const float act_v = act_sigmoid(values[idx]), act_w = act_sigmoid(weights[idx]);
-	const float smod = 1.0f;
-#else
-	auto scale = scales[idx];
-	auto rot = rotations[idx];
-	const float act_v = values[idx], act_w = weights[idx];
-	const float smod = scale_modifier;
-#endif
-	
-	// Create scaling matrix
+
 	glm::mat3 S = glm::mat3(1.0f);
-	S[0][0] = smod * scale.x;
-	S[1][1] = smod * scale.y;
-	S[2][2] = smod * scale.z;
-
-	// Normalize quaternion to get valid rotation (commented out for some reason?)
-	glm::vec4 q = rot;// / glm::length(rot);
-	float r = q.x;
-	float x = q.y;
-	float y = q.z;
-	float z = q.w;
-
-	// Compute rotation matrix from quaternion
-	glm::mat3 R = glm::mat3(
-		1.f - 2.f * (y * y + z * z), 2.f * (x * y - r * z), 2.f * (x * z + r * y),
-		2.f * (x * y + r * z), 1.f - 2.f * (x * x + z * z), 2.f * (y * z - r * x),
-		2.f * (x * z - r * y), 2.f * (y * z + r * x), 1.f - 2.f * (x * x + y * y)
-	);
-
+	S[0][0] = scale.x;
+	S[1][1] = scale.y;
+	S[2][2] = scale.z;
+	glm::mat3 R =
+		glm::mat3(1.f - 2.f * (y * y + z * z), 2.f * (x * y - r * z), 2.f * (x * z + r * y),
+			2.f * (x * y + r * z), 1.f - 2.f * (x * x + z * z), 2.f * (y * z - r * x),
+			2.f * (x * z - r * y), 2.f * (y * z + r * x), 1.f - 2.f * (x * x + y * y));
 	glm::mat3 M = S * R;
-
-	// Compute 3D world covariance matrix Sigma
 	glm::mat3 Sigma = glm::transpose(M) * M;
 
-	// Normalize by epsilon to prevent numerical issues
 	const float epsilon = max(max(abs(Sigma[0][0]), abs(Sigma[1][1])), abs(Sigma[2][2])) * 1e-5;
-	const float cov[6] = {
-		Sigma[0][0] + epsilon,
-        Sigma[0][1],
-        Sigma[0][2],
-		Sigma[1][1] + epsilon,
-        Sigma[1][2],
-        Sigma[2][2] + epsilon,
-	};
+	const float a = Sigma[0][0] + epsilon, b = Sigma[0][1], c = Sigma[0][2];
+	const float d = Sigma[1][1] + epsilon, e = Sigma[1][2], f = Sigma[2][2] + epsilon;
+	const float det = a * (d * f - e * e) - b * (b * f - c * e) + c * (b * e - c * d);
+	const float det_inv = 1.0 / det;
+	const float cn[6] = {(d * f - e * e) * det_inv, (c * e - b * f) * det_inv,
+		(b * e - c * d) * det_inv, (a * f - c * c) * det_inv, (b * c - a * e) * det_inv,
+		(a * d - b * b) * det_inv};
 
-	// Use 3D covariance to compute and store 3D conic
-	const float a = cov[0]; // Sigma[0][0]
-    const float b = cov[1]; // Sigma[0][1]
-    const float c = cov[2]; // Sigma[0][2]
-    const float d = cov[3]; // Sigma[1][1]
-    const float e = cov[4]; // Sigma[1][2]
-    const float f = cov[5]; // Sigma[2][2]
-    const float det = a * (d * f - e * e) - b * (b * f - c * e) + c * (b * e - c * d);
-    const float det_inv = 1.0 / det;
-	// Kept in registers: packed carries it to both renders and to backward preprocess.
-	const float cn[6] = {
-		(d * f - e * e) * (float)det_inv, (c * e - b * f) * (float)det_inv, (b * e - c * d) * (float)det_inv,
-		(a * f - c * c) * (float)det_inv, (b * c - a * e) * (float)det_inv, (a * d - b * b) * (float)det_inv };
+	// Support radius in sigmas: w * exp(-m^2 / 2) = SUPPORT_T. NaN (no support) when w < SUPPORT_T.
+	const float m = sqrtf(-2 * logf(SUPPORT_T / act_w));
 
-	// Number of std devs at which this Gaussian's contribution falls below the cutoff.
-	// GAUSS_CUTOFF env 2: weight-independent support, G >= T for every Gaussian (a fixed
-	// sqrt(2 ln(1/T)) sigmas), instead of the absolute w * G >= T.
-	float m = gauss_cut == 2 ? sqrtf(-2.0f * logf(support_t))
-	                         : sqrtf(-2 * logf(support_t / act_w));
-
-	const float3 position = { means3D[3 * idx], means3D[3 * idx + 1], means3D[3 * idx + 2] };
-	packed[3 * idx + 0] = make_float4(position.x, position.y, position.z, act_v);
+	const float3 pos = {means3D[3 * idx], means3D[3 * idx + 1], means3D[3 * idx + 2]};
+	packed[3 * idx + 0] = make_float4(pos.x, pos.y, pos.z, act_v);
 	packed[3 * idx + 1] = make_float4(act_w, cn[0], cn[1], cn[2]);
-#if GAUSS_CUTOFF
-	// Slot w carries the Gaussian's own cutoff qmax = m^2 (negative when w < T: no support),
-	// or the old blanket 28 when the GAUSS_CUTOFF env switch is 0.
-	packed[3 * idx + 2] = make_float4(cn[3], cn[4], cn[5],
-		gauss_cut ? m * m : 28.0f);
-#else
-	packed[3 * idx + 2] = make_float4(cn[3], cn[4], cn[5], 0.0f);
-#endif
+	packed[3 * idx + 2] = make_float4(cn[3], cn[4], cn[5], m * m);
 
-	// Tight axis-aligned bounds of the m-sigma ellipsoid {(x-u)^T Sigma^-1 (x-u) <= m^2},
-	// which is exactly the region the conic above is nonzero over: ext_d = m * sqrt(Sigma_dd).
-	// This replaces bounding the ellipsoid's oriented BOX and taking the AABB of its 8 corners,
-	// which gives an L1 sum (m * sum_c |R_dc| s_c) where the ellipsoid only needs the L2 norm.
-	// L1 >= L2 always, by up to sqrt(3) per axis, so the old box was up to 5.2x too large in
-	// volume; measured over the shipped models it touched 1.5-2.0x more blocks than necessary.
-	// The corner form also paired R's rows with the scale index while Sigma pairs its columns,
-	// so for 0.6-3.9% of Gaussians it came out *smaller* than the conic's true extent and
-	// clipped their support at a block boundary. sqrt(Sigma_dd) has no pairing to get wrong.
-	const float3 ext = { m * sqrtf(cov[0]), m * sqrtf(cov[3]), m * sqrtf(cov[5]) };
-	const float3 mins  = { position.x - ext.x, position.y - ext.y, position.z - ext.z };
-	const float3 maxes = { position.x + ext.x, position.y + ext.y, position.z + ext.z };
-
-	// Calculate block size in world coordinates
-	const float block_size_x = cell_size.x * BLOCK_X;
-	const float block_size_y = cell_size.y * BLOCK_Y;
-	const float block_size_z = cell_size.z * BLOCK_Z;
-
-	// Find which blocks the Gaussian intersects
-	uint3 start_block = make_uint3(
-		max(0, min(static_cast<int>(grid.x), static_cast<int>(floor((mins.x - volume_mins.x) / block_size_x)))),
-		max(0, min(static_cast<int>(grid.y), static_cast<int>(floor((mins.y - volume_mins.y) / block_size_y)))),
-		max(0, min(static_cast<int>(grid.z), static_cast<int>(floor((mins.z - volume_mins.z) / block_size_z))))
-	);    
-	uint3 end_block = make_uint3(
-		max(0, min(static_cast<int>(grid.x), static_cast<int>(ceil((maxes.x - volume_mins.x) / block_size_x)))),
-		max(0, min(static_cast<int>(grid.y), static_cast<int>(ceil((maxes.y - volume_mins.y) / block_size_y)))),
-		max(0, min(static_cast<int>(grid.z), static_cast<int>(ceil((maxes.z - volume_mins.z) / block_size_z))))
-	);
-    uint3 block_dims = make_uint3(
-		end_block.x - start_block.x,
-		end_block.y - start_block.y,
-		end_block.z - start_block.z
-	);
-
-    // Store results
-    blocks_touched[idx] = static_cast<int>(block_dims.x * block_dims.y * block_dims.z);
-	radii[idx] = 1;
-    aabbs[idx * 6] = start_block.x;
-	aabbs[idx * 6 + 1] = start_block.y;
-    aabbs[idx * 6 + 2] = start_block.z;
-    aabbs[idx * 6 + 3] = end_block.x;
-    aabbs[idx * 6 + 4] = end_block.y;
-	aabbs[idx * 6 + 5] = end_block.z;
-	// Clamping may not be necessary since these are stored with sigmoid activation?
-	// clamped[idx] = (values[idx] < 0.0f) || (values[idx] > 1.0f);
-    // values_out[idx] = glm::clamp(values[idx], 0.0f, 1.0f); 
-	// weights_out[idx] = glm::clamp(weights[idx], 0.0f, 1.0f); 
-	// means / values_out / weights_out / volumes / clamped / conic are never read: not written.
+	// Axis-aligned bounds of the support ellipsoid: m * sqrt(Sigma_dd) per axis.
+	const float3 ext = {m * sqrtf(a), m * sqrtf(d), m * sqrtf(f)};
+	const float3 lo = {pos.x - ext.x, pos.y - ext.y, pos.z - ext.z};
+	const float3 hi = {pos.x + ext.x, pos.y + ext.y, pos.z + ext.z};
+	const float bx = cell_size.x * BLOCK_X, by = cell_size.y * BLOCK_Y, bz = cell_size.z * BLOCK_Z;
+	const uint3 start =
+		make_uint3(max(0, min((int)grid.x, (int)floor((lo.x - volume_mins.x) / bx))),
+			max(0, min((int)grid.y, (int)floor((lo.y - volume_mins.y) / by))),
+			max(0, min((int)grid.z, (int)floor((lo.z - volume_mins.z) / bz))));
+	const uint3 end = make_uint3(max(0, min((int)grid.x, (int)ceil((hi.x - volume_mins.x) / bx))),
+		max(0, min((int)grid.y, (int)ceil((hi.y - volume_mins.y) / by))),
+		max(0, min((int)grid.z, (int)ceil((hi.z - volume_mins.z) / bz))));
+	blocks_touched[idx] = (end.x - start.x) * (end.y - start.y) * (end.z - start.z);
+	aabbs[idx * 6 + 0] = start.x;
+	aabbs[idx * 6 + 1] = start.y;
+	aabbs[idx * 6 + 2] = start.z;
+	aabbs[idx * 6 + 3] = end.x;
+	aabbs[idx * 6 + 4] = end.y;
+	aabbs[idx * 6 + 5] = end.z;
 }
 
-// Main rasterization method. Collaboratively works on one tile per
-// block, each thread treats one pixel. Alternates between fetching 
-// and rasterizing data.
-template <uint32_t CHANNELS>
-__global__ void __launch_bounds__(BLOCK_X * BLOCK_Y * BLOCK_Z)
-renderCUDA(
-	const uint2* __restrict__ ranges,
-	const uint32_t* __restrict__ point_list,
-	const dim3 grid,
-	const float3 volume_mins,
-	const uint3 num_cells,
-	const float3 cell_size,
-	const float* __restrict__ jitter,
-	const float4* __restrict__ packed,
-	float* __restrict__ accumulated_weights,
-	uint32_t* __restrict__ n_contrib,
-	float* __restrict__ out_cells,
-	const float denom_floor,
-	const float occ_t,
-	const int occ_keep)
+// One block per tile, one thread per cell.
+__global__ void __launch_bounds__(BLOCK_SIZE)
+	renderCUDA(const uint2* __restrict__ ranges, const uint32_t* __restrict__ point_list,
+		const dim3 grid, const float3 volume_mins, const uint3 num_cells, const float3 cell_size,
+		const float* __restrict__ jitter, const float4* __restrict__ packed,
+		float* __restrict__ out_weights, float* __restrict__ out_cells)
 {
-	// Identify current tile and associated min/max pixel range.
 	auto block = cg::this_thread_block();
-	uint3 cell_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y, block.group_index().z * BLOCK_Z};
-	uint3 cell_max = { min(cell_min.x + BLOCK_X, num_cells.x), min(cell_min.y + BLOCK_Y , num_cells.y), min(cell_min.z + BLOCK_Z , num_cells.z) };
-	uint3 cell = { cell_min.x + block.thread_index().x, cell_min.y + block.thread_index().y, cell_min.z + block.thread_index().z  };
-	uint32_t cell_id = cell.z * num_cells.x * num_cells.y + cell.y * num_cells.x + cell.x;
-	float3 cell_pos =  make_float3(
-		static_cast<float>(cell.x) * cell_size.x + volume_mins.x + jitter[cell_id * 3], 
-		static_cast<float>(cell.y) * cell_size.y + volume_mins.y + jitter[cell_id * 3 + 1], 
-		static_cast<float>(cell.z) * cell_size.z + volume_mins.z + jitter[cell_id * 3 + 2]
-	);
+	const uint3 cell = {block.group_index().x * BLOCK_X + block.thread_index().x,
+		block.group_index().y * BLOCK_Y + block.thread_index().y,
+		block.group_index().z * BLOCK_Z + block.thread_index().z};
+	const uint32_t cell_id = cell.z * num_cells.x * num_cells.y + cell.y * num_cells.x + cell.x;
+	const float3 cell_pos =
+		make_float3(static_cast<float>(cell.x) * cell_size.x + volume_mins.x + jitter[cell_id * 3],
+			static_cast<float>(cell.y) * cell_size.y + volume_mins.y + jitter[cell_id * 3 + 1],
+			static_cast<float>(cell.z) * cell_size.z + volume_mins.z + jitter[cell_id * 3 + 2]);
+	const bool inside = cell.x < num_cells.x && cell.y < num_cells.y && cell.z < num_cells.z;
+	const bool done = !inside;
 
-	// Check if this thread is associated with a valid cell or outside.
-	bool inside = cell.x < num_cells.x && cell.y < num_cells.y && cell.z < num_cells.z;
-	// Done threads can help with fetching, but don't rasterize
-	bool done = !inside;
+	const uint2 range = ranges[block.group_index().z * grid.y * grid.x +
+							   block.group_index().y * grid.x + block.group_index().x];
+	const int rounds = (range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE;
+	int todo = range.y - range.x;
 
-	// Load start/end range of IDs to process in bit sorted list.
-	uint2 range = ranges[block.group_index().z * grid.y * grid.x + block.group_index().y * grid.x + block.group_index().x];
-	const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
-	int toDo = range.y - range.x;
-
-	// Allocate storage for batches of collectively fetched data.
-	// Per Gaussian: (mean.xyz, value), (w, cxx, 2cxy, 2cxz), (cyy, 2cyz, czz, -). The
-	// off-diagonal conic terms are stored doubled so the quadratic form folds into FMAs.
+	// Per Gaussian: (mean, value), (w, cxx, 2cxy, 2cxz), (cyy, 2cyz, czz, qmax).
 	__shared__ float4 collected[3 * BLOCK_SIZE];
-
-	// Initialize helper variables
-	float accumulated_weight = 0;
-	float accumulated_value = 0;
-	uint32_t n_contributor = 0;
-
-	// Iterate over batches until all done or range is complete
-	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
-	{
-		// End if entire block votes that it is done rasterizing
-		int num_done = __syncthreads_count(done);
-		if (num_done == BLOCK_SIZE)
+	float acc_w = 0.0f, acc_v = 0.0f;
+	for (int i = 0; i < rounds; i++, todo -= BLOCK_SIZE) {
+		if (__syncthreads_count(done) == BLOCK_SIZE)
 			break;
-
-		// Collectively fetch per-Gaussian data from global to shared
-		int progress = i * BLOCK_SIZE + block.thread_rank();
-		if (range.x + progress < range.y)
-		{
-			int coll_id = point_list[range.x + progress];
+		const int progress = i * BLOCK_SIZE + block.thread_rank();
+		if (range.x + progress < range.y) {
+			const int id = point_list[range.x + progress];
 			const int rank = block.thread_rank();
-			const float4 p1 = packed[3 * coll_id + 1], p2 = packed[3 * coll_id + 2];
-			collected[3 * rank + 0] = packed[3 * coll_id + 0];
+			const float4 p1 = packed[3 * id + 1], p2 = packed[3 * id + 2];
+			collected[3 * rank + 0] = packed[3 * id + 0];
 			collected[3 * rank + 1] = make_float4(p1.x, p1.y, 2.0f * p1.z, 2.0f * p1.w);
 			collected[3 * rank + 2] = make_float4(p2.x, 2.0f * p2.y, p2.z, p2.w);
 		}
 		block.sync();
-
-		// Iterate over current batch
-		for (int j = 0; !done && j < min(BLOCK_SIZE, toDo); j++)
-		{
-			const float4 p0 = collected[3 * j], p1 = collected[3 * j + 1], p2 = collected[3 * j + 2];
+		for (int j = 0; !done && j < min(BLOCK_SIZE, todo); j++) {
+			const float4 p0 = collected[3 * j], p1 = collected[3 * j + 1],
+						 p2 = collected[3 * j + 2];
 			const float dx = cell_pos.x - p0.x, dy = cell_pos.y - p0.y, dz = cell_pos.z - p0.z;
-			// d^T conic d in 4 MUL + 5 FMA, all float (the old -0.5 / -14.0 / 0.0 literals were
-			// doubles and promoted every evaluation). q in [0, 28] <=> power in [-14, 0].
 			const float t0 = fmaf(p1.w, dz, fmaf(p1.z, dy, p1.y * dx));
 			const float t1 = fmaf(p2.y, dz, p2.x * dy);
-			const float q  = fmaf(dx, t0, fmaf(dy, t1, p2.z * dz * dz));
-#if GAUSS_CUTOFF
-			if (!(q >= 0.0f && q <= p2.w)) continue;
-#else
-			if (!(q >= 0.0f && q <= 28.0f)) continue;
-#endif
+			const float q = fmaf(dx, t0, fmaf(dy, t1, p2.z * dz * dz));
+			if (!(q >= 0.0f && q <= p2.w))
+				continue;
 			const float weight = p1.x * __expf(-0.5f * q);
-			accumulated_value  += p0.w * weight;
-			accumulated_weight += weight;
+			acc_v += p0.w * weight;
+			acc_w += weight;
 		}
 	}
 
-	// All threads that treat valid pixel write out their final
-	// rendering data to the frame and auxiliary buffers.
-	if (inside)
-	{
-		// This both gives a dropoff where we have to have a certain weight to set a value
-		// and prevents numerical issues of dividing by something close to 0
-#if SOFT_CUTOFF
-		// Clamp the denominator rather than thresholding it: the value stays bounded (the
-		// 1/aw blow-up is what the cutoff guarded against) and the cell stays differentiable.
-		// aw == 0 means no Gaussian reaches the cell, so there is nothing to differentiate.
-		if (accumulated_weight > occ_t) {
-			out_cells[cell_id] = accumulated_value / SOFT_DENOM(accumulated_weight, denom_floor);
-			accumulated_weights[cell_id] = accumulated_weight;
+	if (inside) {
+		if (acc_w > 0.0f) {
+			out_cells[cell_id] = acc_v / max(acc_w, DENOM_FLOOR);
+			out_weights[cell_id] = acc_w;
 		} else {
-			out_cells[cell_id] = -1.0;
-			accumulated_weights[cell_id] = occ_keep ? accumulated_weight : 0.0f;
+			out_cells[cell_id] = -1.0f;
+			out_weights[cell_id] = 0.0f;
 		}
-		n_contrib[cell_id] = 0;
-#else
-		if (accumulated_weight > occ_t) {
-			out_cells[cell_id] = accumulated_value / accumulated_weight;
-			accumulated_weights[cell_id] = accumulated_weight;
-			n_contrib[cell_id] = 0;
-
-		} else {
-			out_cells[cell_id] = -1.0;
-			accumulated_weights[cell_id] = occ_keep ? accumulated_weight : 0.0f;
-			n_contrib[cell_id] = 0;
-		}
-#endif
 	}
 }
 
-void FORWARD::render(
-	const dim3 grid, dim3 block,
-	const uint2* ranges,
-	const uint32_t* point_list,
-	const float3 volume_mins,
-	const uint3 num_cells,
-	const float3 cell_size,
-	const float* jitter,
-	const float4* packed,
-	float* accumulated_weights,
-	uint32_t* n_contrib,
-	float* out_cells)
+void FORWARD::preprocess(int P, const float* means3D, const float* scales, const float* rotations,
+	const float* values, const float* weights, float max_scale, float3 volume_mins,
+	float3 cell_size, dim3 grid, float4* packed, uint* aabbs, uint32_t* blocks_touched)
 {
-	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
-		ranges,
-		point_list,
-		grid,
-		volume_mins,
-		num_cells,
-		cell_size,
-		jitter,
-		packed,
-		accumulated_weights,
-		n_contrib,
-		out_cells,
-		runtime_denom_floor(),
-		runtime_occ_t(),
-		runtime_occ_keep());
+	preprocessCUDA<<<(P + 255) / 256, 256>>>(P, means3D, scales, rotations, values, weights,
+		max_scale, volume_mins, cell_size, grid, packed, aabbs, blocks_touched);
 }
 
-void FORWARD::preprocess(int P,
-	const float* means3D,
-	const glm::vec3* scales,
-	const float scale_modifier,
-	const glm::vec4* rotations,
-	const float* values,
-	const float* weights,
-	bool* clamped,
-	const float3 volume_mins,
-	const float3 volume_maxes,
-	const uint3 num_cells,
-	const float3 cell_size,
-	int* radii,
-	float3* means,
-	float* values_out,
-	float* weights_out,
-	float* volumes,
-	float* conic,
-	float4* packed,
-	uint* aabbs,
-	const dim3 grid,
-	uint32_t* blocks_touched)
+void FORWARD::render(dim3 grid, dim3 block, const uint2* ranges, const uint32_t* point_list,
+	float3 volume_mins, uint3 num_cells, float3 cell_size, const float* jitter,
+	const float4* packed, float* out_weights, float* out_cells)
 {
-	// Runtime override of the support threshold (per-Gaussian cost ~ m^3; a model must be
-	// rendered at the value it was trained with). Read once per process: SUPPORT_T env, else
-	// the legacy TRUNC_FRAC env as SUPPORT_T = TRUNC_FRAC * 0.01, else the config.h default.
-	static float support_t = -1.0f;
-	if (support_t < 0.0f) {
-		const char* e = getenv("SUPPORT_T");
-		const char* legacy = getenv("TRUNC_FRAC");
-		support_t = e ? (float)atof(e) : legacy ? (float)atof(legacy) * 0.01f : (float)SUPPORT_T;
-		if (e || legacy) printf("[rasterizer] SUPPORT_T override: %.1e%s\n", support_t, e ? "" : " (from TRUNC_FRAC)");
-	}
-	static int gauss_cut = -1;
-	if (gauss_cut < 0) {
-		const char* g = getenv("GAUSS_CUTOFF");
-		gauss_cut = g ? atoi(g) : 1;
-		printf("[rasterizer] per-Gaussian cutoff %s >= %.1e: %s\n", gauss_cut == 2 ? "G" : "w*G",
-		       support_t, gauss_cut ? "on" : "off (blanket q <= 28 in each binned tile)");
-	}
-	preprocessCUDA<NUM_CHANNELS> <<<(P + 255) / 256, 256>>> (
-		P,
-		support_t,
-		gauss_cut,
-		means3D,
-		scales,
-		scale_modifier,
-		rotations,
-		values,
-		weights,
-		clamped,
-		volume_mins,
-		volume_maxes,
-		num_cells,
-		cell_size,
-		radii,
-		means,
-		values_out, 
-		weights_out,
-		volumes,
-		conic,
-		packed,
-		aabbs,
-		grid,
-		blocks_touched
-	);
+	renderCUDA<<<grid, block>>>(ranges, point_list, grid, volume_mins, num_cells, cell_size, jitter,
+		packed, out_weights, out_cells);
 }

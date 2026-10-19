@@ -3,48 +3,22 @@
 
 #include <cuda.h>
 #include "cuda_runtime.h"
-#include "device_launch_parameters.h"
 #define GLM_FORCE_CUDA
 #include <glm/glm.hpp>
 
 namespace BACKWARD
 {
-	void render(
-		const dim3 grid, const dim3 block,
-		const uint2* ranges,
-		const uint32_t* point_list,
-		const float3 volume_mins,
-		const uint3 num_cells,
-		const float3 cell_size,
-		const float* jitter,
-		const bool* clamped,
-		const float4* packed,
-		const float* out_cells,
-		const float* volumes,
-		const float* accumulated_weights,
-		const uint32_t* n_contrib,
-		const float* dL_dcells,
-		const float* dL_dcell_weights,
-		float3* dL_dmean3D,
-		float* dL_dconic,
-		float* dL_dvalue,
-		float* dL_dweights);
+// Accumulates each Gaussian's render gradients into its 12-float row of grad_rows:
+// conic[6], mean[3], value, weight, pad (activated parameters).
+void render(dim3 grid, const uint2* ranges, const uint32_t* point_list, float3 volume_mins,
+	uint3 num_cells, float3 cell_size, const float* jitter, const float4* packed,
+	const float* out_cells, const float* out_weights, const float* dL_dcells,
+	const float* dL_dcell_weights, float* grad_rows);
 
-	void preprocess(
-		int P,
-		const int* radii,
-		const glm::vec3* scales,
-		const glm::vec4* rotations,
-		const float* conics,
-		const float scale_modifier,
-		const float* dL_dconics,
-		glm::vec3* dL_dscale,
-		glm::vec4* dL_drot,
-		const float* values,
-		const float* weights,
-		float* dL_dmeans,
-		float* dL_dvalues,
-		float* dL_dweights);
-}
+// Chains the rows back through the covariance and the activations to the raw parameters.
+void preprocess(int P, const float* scales, const float* rotations, const float* values,
+	const float* weights, float max_scale, const float4* packed, const float* grad_rows,
+	float* dL_dmeans, float* dL_dscales, float* dL_drots, float* dL_dvalues, float* dL_dweights);
+} // namespace BACKWARD
 
 #endif
