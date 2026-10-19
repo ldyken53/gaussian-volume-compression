@@ -160,42 +160,37 @@ class NodeSampler:
         return t(self.lo) + (t(self.off) + node * t(self.stride)) * t(self.d)
 
 
-def lattice_gt(gaussians, cell_count, precomputed):
-    """(gt, jitter, samples) for --probe_gt / --precomputed_samples: 100 fixed jitters."""
-    if precomputed:
-        big_gt = np.load("richtmyer_meshkov_big_gt.npy")
-        big_samples = np.load("richtmyer_meshkov_big_samples.npy")
-        big_jitter = np.load("richtmyer_meshkov_big_jitter.npy")
-    else:
-        t0 = time.time()
-        spacing = [
-            (gaussians.maxes[i] - gaussians.mins[i]) / (cell_count - 1)
-            for i in range(3)
-        ]
-        axes = [
-            np.linspace(gaussians.mins[i], gaussians.maxes[i], cell_count)
-            for i in range(3)
-        ]
-        x, y, z = np.meshgrid(*axes, indexing="ij")
-        samples = np.vstack([x.ravel(), y.ravel(), z.ravel()]).T
-        samples = samples.reshape(cell_count, cell_count, cell_count, 3)
-        # Reorder to the rasterizer's [z, y, x] cell layout.
-        samples = np.flip(np.rot90(samples, k=1, axes=(2, 0)), axis=2).reshape(-1, 3)
-        num_jitters = 100
-        big_samples = np.tile(samples, (num_jitters, 1))
-        big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
-        big_jitter *= np.array(spacing)[None, :]
-        big_jitter[: cell_count**3, :] = 0
-        big_samples = np.clip(
-            big_samples + big_jitter,
-            np.array(gaussians.mins),
-            np.array(gaussians.maxes),
-        )
-        big_gt = pv.PolyData(big_samples).sample(gaussians.mesh).point_data["value"]
-        big_gt = big_gt.reshape(num_jitters, cell_count**3)
-        big_samples = big_samples.reshape(num_jitters, cell_count**3, 3)
-        big_jitter = big_jitter.reshape(num_jitters, cell_count**3, 3)
-        print(f"Time to sample gt: {time.time() - t0}")
+def probe_gt(gaussians, cell_count):
+    """(gt, jitter, samples) for --probe_gt: the mesh probed at 100 fixed jitters."""
+    t0 = time.time()
+    spacing = [
+        (gaussians.maxes[i] - gaussians.mins[i]) / (cell_count - 1)
+        for i in range(3)
+    ]
+    axes = [
+        np.linspace(gaussians.mins[i], gaussians.maxes[i], cell_count)
+        for i in range(3)
+    ]
+    x, y, z = np.meshgrid(*axes, indexing="ij")
+    samples = np.vstack([x.ravel(), y.ravel(), z.ravel()]).T
+    samples = samples.reshape(cell_count, cell_count, cell_count, 3)
+    # Reorder to the rasterizer's [z, y, x] cell layout.
+    samples = np.flip(np.rot90(samples, k=1, axes=(2, 0)), axis=2).reshape(-1, 3)
+    num_jitters = 100
+    big_samples = np.tile(samples, (num_jitters, 1))
+    big_jitter = np.random.uniform(-0.5, 0.5, big_samples.shape)
+    big_jitter *= np.array(spacing)[None, :]
+    big_jitter[: cell_count**3, :] = 0
+    big_samples = np.clip(
+        big_samples + big_jitter,
+        np.array(gaussians.mins),
+        np.array(gaussians.maxes),
+    )
+    big_gt = pv.PolyData(big_samples).sample(gaussians.mesh).point_data["value"]
+    big_gt = big_gt.reshape(num_jitters, cell_count**3)
+    big_samples = big_samples.reshape(num_jitters, cell_count**3, 3)
+    big_jitter = big_jitter.reshape(num_jitters, cell_count**3, 3)
+    print(f"Time to sample gt: {time.time() - t0}")
 
     def cuda(a):
         return torch.tensor(a, dtype=torch.float, device="cuda")
@@ -241,11 +236,9 @@ def training(dataset, opt, args):
     )
     scene.save(0)
 
-    if args.probe_gt or args.precomputed_samples:
+    if args.probe_gt:
         node_sampler = None
-        big_gt, big_jitter, big_samples = lattice_gt(
-            gaussians, CELL_COUNT, args.precomputed_samples
-        )
+        big_gt, big_jitter, big_samples = probe_gt(gaussians, CELL_COUNT)
         num_jitters = big_gt.shape[0]
     else:
         node_sampler = NodeSampler(gaussians.mesh, CELL_COUNT)
@@ -453,11 +446,6 @@ if __name__ == "__main__":
         "--probe_gt",
         action="store_true",
         help="GT probed on the 128^3 lattice at 100 fixed jitters",
-    )
-    parser.add_argument(
-        "--precomputed_samples",
-        action="store_true",
-        help="--probe_gt from richtmyer_meshkov_big_*.npy",
     )
     parser.add_argument(
         "--use_mcmc", action="store_true", help="densify by 3DGS-MCMC relocation"
