@@ -75,7 +75,8 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
 	renderCUDA(const uint2* __restrict__ ranges, const uint32_t* __restrict__ point_list,
 		const dim3 grid, const float3 volume_mins, const uint3 num_cells, const float3 cell_size,
 		const float* __restrict__ jitter, const float4* __restrict__ packed,
-		float* __restrict__ out_weights, float* __restrict__ out_cells)
+		float* __restrict__ out_weights, float* __restrict__ out_cells, const float occ_t,
+		const float floor)
 {
 	auto block = cg::this_thread_block();
 	const uint3 cell = {block.group_index().x * BLOCK_X + block.thread_index().x,
@@ -126,8 +127,8 @@ __global__ void __launch_bounds__(BLOCK_SIZE)
 	}
 
 	if (inside) {
-		if (acc_w > 0.0f) {
-			out_cells[cell_id] = acc_v / max(acc_w, DENOM_FLOOR);
+		if (acc_w > occ_t) {
+			out_cells[cell_id] = acc_v / max(acc_w, floor);
 			out_weights[cell_id] = acc_w;
 		} else {
 			out_cells[cell_id] = -1.0f;
@@ -146,8 +147,8 @@ void FORWARD::preprocess(int P, const float* means3D, const float* scales, const
 
 void FORWARD::render(dim3 grid, dim3 block, const uint2* ranges, const uint32_t* point_list,
 	float3 volume_mins, uint3 num_cells, float3 cell_size, const float* jitter,
-	const float4* packed, float* out_weights, float* out_cells)
+	const float4* packed, float* out_weights, float* out_cells, float occ_t, float floor)
 {
 	renderCUDA<<<grid, block>>>(ranges, point_list, grid, volume_mins, num_cells, cell_size, jitter,
-		packed, out_weights, out_cells);
+		packed, out_weights, out_cells, occ_t, floor);
 }

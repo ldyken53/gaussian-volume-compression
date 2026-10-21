@@ -107,7 +107,7 @@ __global__ void renderCUDA(const dim3 grid, const uint2* __restrict__ ranges,
 	const float3 cell_size, const float* __restrict__ jitter, const float4* __restrict__ packed,
 	const float* __restrict__ out_cells, const float* __restrict__ out_weights,
 	const float* __restrict__ dL_dcells, const float* __restrict__ dL_dcell_weights,
-	float* __restrict__ grad_rows)
+	float* __restrict__ grad_rows, const float occ_t, const float floor)
 {
 	const uint3 cmin = {blockIdx.x * BLOCK_X, blockIdx.y * BLOCK_Y, blockIdx.z * BLOCK_Z};
 	const uint3 cmax = {min(cmin.x + BLOCK_X, num_cells.x), min(cmin.y + BLOCK_Y, num_cells.y),
@@ -123,8 +123,8 @@ __global__ void renderCUDA(const dim3 grid, const uint2* __restrict__ ranges,
 		const uint3 cell = {cmin.x + lx, cmin.y + ly, cmin.z + lz};
 		const uint32_t cell_id = cell.z * num_cells.x * num_cells.y + cell.y * num_cells.x + cell.x;
 		const float aw = out_weights[cell_id];
-		const bool covered = aw > 0.0f;
-		const float inv_aw = covered ? 1.0f / max(aw, DENOM_FLOOR) : 0.0f;
+		const bool covered = aw > occ_t;
+		const float inv_aw = covered ? 1.0f / max(aw, floor) : 0.0f;
 		const float dvo = covered ? dL_dcells[cell_id] * inv_aw : 0.0f;
 		s_cell[i] = make_float4(
 			static_cast<float>(cell.x) * cell_size.x + volume_mins.x + jitter[cell_id * 3],
@@ -200,10 +200,10 @@ __global__ void renderCUDA(const dim3 grid, const uint2* __restrict__ ranges,
 void BACKWARD::render(dim3 grid, const uint2* ranges, const uint32_t* point_list,
 	float3 volume_mins, uint3 num_cells, float3 cell_size, const float* jitter,
 	const float4* packed, const float* out_cells, const float* out_weights, const float* dL_dcells,
-	const float* dL_dcell_weights, float* grad_rows)
+	const float* dL_dcell_weights, float* grad_rows, float occ_t, float floor)
 {
 	renderCUDA<<<grid, BWD_THREADS>>>(grid, ranges, point_list, volume_mins, num_cells, cell_size,
-		jitter, packed, out_cells, out_weights, dL_dcells, dL_dcell_weights, grad_rows);
+		jitter, packed, out_cells, out_weights, dL_dcells, dL_dcell_weights, grad_rows, occ_t, floor);
 }
 
 void BACKWARD::preprocess(int P, const float* scales, const float* rotations, const float* values,

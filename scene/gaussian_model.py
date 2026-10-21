@@ -38,6 +38,10 @@ class GaussianModel:
         self.percent_dense = 0
         self.mesh = None
         self.max_scale = 0.02
+        # Render rule: a cell is empty where aw <= occ_t, else S / max(aw, floor). Training uses
+        # occ_t = 0; a trained model's rule is in its render_rule file.
+        self.occ_t = 0.0
+        self.floor = 0.01
         self.ema_buffers = None
         self._adam_t = None
 

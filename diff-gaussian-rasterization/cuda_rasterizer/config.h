@@ -1,10 +1,11 @@
 #ifndef CUDA_RASTERIZER_CONFIG_H_INCLUDED
 #define CUDA_RASTERIZER_CONFIG_H_INCLUDED
 
-// A cell renders S / max(aw, DENOM_FLOOR); aw == 0 renders the -1 empty sentinel.
-#define DENOM_FLOOR 1e-2f
 // A Gaussian reaches a cell only where w * exp(-q/2) >= SUPPORT_T.
 #define SUPPORT_T 1e-4f
+// The render rule (occ_t, floor) is a runtime argument, stored per model in its render_rule file:
+// a cell is empty (-1) where aw <= occ_t, else it renders S / max(aw, floor). Models train with
+// (0, 0.01) and are deployed at (0.002, 0.01).
 
 #define BLOCK_X 4
 #define BLOCK_Y 4

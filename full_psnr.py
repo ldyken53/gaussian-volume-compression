@@ -88,7 +88,7 @@ def evaluate(gaussians, mesh, gt, block):
                 ).cuda()
 
                 sse += ((cells - g) ** 2).double().sum()
-                covered = wts > 0.0
+                covered = cells != -1.0  # occupied under the render rule (aw > occ_t)
                 sse_cov += ((cells[covered] - g[covered]) ** 2).double().sum()
                 n_cov += covered.sum()
                 n_fn += ((~covered) & (g != 0.0)).sum()
@@ -194,6 +194,11 @@ def main():
             if args.max_scale is not None
             else float(open(ms_file).read()) if os.path.exists(ms_file) else 0.02
         )
+        # The model's render rule; models without render_rule predate it: (0, 0.01).
+        rr = os.path.join(mp, "render_rule")
+        gaussians.occ_t, gaussians.floor = (
+            (float(x) for x in open(rr).read().split()[:2]) if os.path.exists(rr) else (0.0, 0.01)
+        )
         with torch.no_grad():
             gaussians.load_ply(
                 os.path.join(mp, "point_cloud", f"iteration_{it}", "point_cloud.ply"),
@@ -233,7 +238,7 @@ def main():
             f"bg_err_share={r['sse_bg_share']:.3f} "
             f"eval_s={time.time() - t:.1f}"
             + cont
-            + f" max_scale={gaussians.max_scale:.4f}",
+            + f" max_scale={gaussians.max_scale:.4f} occ_t={gaussians.occ_t:g}",
             flush=True,
         )
         del gaussians

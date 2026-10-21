@@ -6,7 +6,7 @@ std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torc
 RasterizeGaussiansCUDA(const torch::Tensor& means3D, const torch::Tensor& scales,
 	const torch::Tensor& rotations, const torch::Tensor& values, const torch::Tensor& weights,
 	const torch::Tensor& jitter, float max_scale, float min_x, float min_y, float min_z,
-	float max_x, float max_y, float max_z, uint cell_count);
+	float max_x, float max_y, float max_z, uint cell_count, float occ_t, float floor);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansBackwardCUDA(const torch::Tensor& scales, const torch::Tensor& rotations,
@@ -15,4 +15,4 @@ RasterizeGaussiansBackwardCUDA(const torch::Tensor& scales, const torch::Tensor&
 	float min_y, float min_z, float max_x, float max_y, float max_z, uint cell_count,
 	const torch::Tensor& dL_dout_cells, const torch::Tensor& dL_dout_cell_weights,
 	const torch::Tensor& geomBuffer, int R, const torch::Tensor& binningBuffer,
-	const torch::Tensor& imageBuffer);
+	const torch::Tensor& imageBuffer, float occ_t, float floor);

@@ -126,7 +126,8 @@ int CudaRasterizer::Rasterizer::forward(std::function<char*(size_t)> geometryBuf
 	std::function<char*(size_t)> binningBuffer, std::function<char*(size_t)> imageBuffer, int P,
 	const float* means3D, const float* scales, const float* rotations, const float* values,
 	const float* weights, float max_scale, const float* jitter, float3 volume_mins,
-	float3 volume_maxes, uint3 num_cells, float* out_cells, float* out_weights)
+	float3 volume_maxes, uint3 num_cells, float* out_cells, float* out_weights, float occ_t,
+	float floor)
 {
 	const float3 cell_size = cellSize(volume_mins, volume_maxes, num_cells);
 	const dim3 block_grid = tileGrid(num_cells);
@@ -174,7 +175,7 @@ int CudaRasterizer::Rasterizer::forward(std::function<char*(size_t)> geometryBuf
 			num_intersections, binningState.point_list_keys, imgState.ranges);
 
 	FORWARD::render(block_grid, block, imgState.ranges, binningState.point_list, volume_mins,
-		num_cells, cell_size, jitter, geomState.packed, out_weights, out_cells);
+		num_cells, cell_size, jitter, geomState.packed, out_weights, out_cells, occ_t, floor);
 
 	return num_intersections;
 }
@@ -184,7 +185,8 @@ void CudaRasterizer::Rasterizer::backward(int P, int R, const float* scales, con
 	float3 volume_mins, float3 volume_maxes, uint3 num_cells, const float* out_cells,
 	const float* out_weights, char* geom_buffer, char* binning_buffer, char* img_buffer,
 	const float* dL_dcells, const float* dL_dcell_weights, float* grad_rows, float* dL_dmeans,
-	float* dL_dscales, float* dL_drots, float* dL_dvalues, float* dL_dweights)
+	float* dL_dscales, float* dL_drots, float* dL_dvalues, float* dL_dweights, float occ_t,
+	float floor)
 {
 	const float3 cell_size = cellSize(volume_mins, volume_maxes, num_cells);
 	const dim3 block_grid = tileGrid(num_cells);
@@ -196,7 +198,7 @@ void CudaRasterizer::Rasterizer::backward(int P, int R, const float* scales, con
 
 	BACKWARD::render(block_grid, imgState.ranges, binningState.point_list, volume_mins, num_cells,
 		cell_size, jitter, geomState.packed, out_cells, out_weights, dL_dcells, dL_dcell_weights,
-		grad_rows);
+		grad_rows, occ_t, floor);
 	BACKWARD::preprocess(P, scales, rotations, values, weights, max_scale, geomState.packed,
 		grad_rows, dL_dmeans, dL_dscales, dL_drots, dL_dvalues, dL_dweights);
 }

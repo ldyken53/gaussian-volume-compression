@@ -63,6 +63,14 @@ To run the optimizer, simply use
 python train.py -s <path to unstructured or structured volume dataset>
 ```
 
+### Render rule
+
+A model renders a cell as empty where the accumulated weight aw = sum w G is at most T, and
+otherwise as S / max(aw, F) with S = sum w G v; this is the same rule as the unstructured
+repository's models. Each model stores its (T, F) in `<model>/render_rule`, by default
+(0.002, 0.01) (`--occ_t`, `--denom_floor`); training renders with T = 0. Models without a
+`render_rule` file predate it and render with (0, 0.01). `full_psnr.py` applies the stored rule.
+
 ## Fixes
 - *It breaks when trying to install diff-gaussian-rasterization or submodules/simple-knn during the creation from environment.yml. How do I proceed?* Just try again essentially, like so;
 ```

@@ -13,6 +13,8 @@ def render(pc: GaussianModel, jitter, cell_count=100):
         volume_maxes=pc.maxes,
         cell_count=cell_count,
         max_scale=float(pc.max_scale),
+        occ_t=float(pc.occ_t),
+        floor=float(pc.floor),
     )
     cells, weights = GaussianRasterizer(settings)(
         pc.get_xyz, pc._scaling, pc._rotation, pc._values, pc._weight, jitter

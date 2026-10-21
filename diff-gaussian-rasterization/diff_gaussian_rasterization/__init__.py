@@ -11,6 +11,9 @@ class GaussianRasterizationSettings(NamedTuple):
     volume_maxes: tuple[float, float, float]
     cell_count: int
     max_scale: float
+    # Render rule: a cell is empty where aw <= occ_t, else it renders S / max(aw, floor).
+    occ_t: float = 0.0
+    floor: float = 0.01
 
 
 class _RasterizeGaussians(torch.autograd.Function):
@@ -27,6 +30,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             *settings.volume_mins,
             *settings.volume_maxes,
             settings.cell_count,
+            settings.occ_t,
+            settings.floor,
         )
         ctx.settings = settings
         ctx.num_rendered = num_rendered
@@ -77,6 +82,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             ctx.num_rendered,
             binning,
             img,
+            s.occ_t,
+            s.floor,
         )
         return (*grads, None, None)
 

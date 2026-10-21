@@ -210,8 +210,12 @@ def training(dataset, opt, args):
         )
     with open(os.path.join(dataset.model_path, "max_scale"), "w") as f:
         f.write(f"{args.max_scale}\n")
+    # Trained with the soft render (empty only where aw == 0), deployed under the stored rule.
+    with open(os.path.join(dataset.model_path, "render_rule"), "w") as f:
+        f.write(f"{args.occ_t} {args.denom_floor}\n")
     gaussians = GaussianModel()
     gaussians.max_scale = args.max_scale
+    gaussians.occ_t, gaussians.floor = 0.0, args.denom_floor
     scene = Scene(
         dataset,
         gaussians,
@@ -429,10 +433,16 @@ if __name__ == "__main__":
     parser.add_argument(
         "--fn_thresh",
         type=float,
-        default=0.002,
+        default=0.0025,
         help="tau: accumulated weight below which the FN barrier pushes a cell up",
     )
     parser.add_argument("--is_scaled", action="store_true")
+    parser.add_argument(
+        "--occ_t", type=float, default=0.002, help="render rule: empty where aw <= occ_t"
+    )
+    parser.add_argument(
+        "--denom_floor", type=float, default=0.01, help="render rule: S / max(aw, floor)"
+    )
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument(

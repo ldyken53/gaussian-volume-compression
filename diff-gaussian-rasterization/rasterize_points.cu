@@ -17,7 +17,7 @@ std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torc
 RasterizeGaussiansCUDA(const torch::Tensor& means3D, const torch::Tensor& scales,
 	const torch::Tensor& rotations, const torch::Tensor& values, const torch::Tensor& weights,
 	const torch::Tensor& jitter, float max_scale, float min_x, float min_y, float min_z,
-	float max_x, float max_y, float max_z, uint cell_count)
+	float max_x, float max_y, float max_z, uint cell_count, float occ_t, float floor)
 {
 	TORCH_CHECK(means3D.ndimension() == 2 && means3D.size(1) == 3,
 		"means3D must have dimensions (num_points, 3)");
@@ -41,7 +41,7 @@ RasterizeGaussiansCUDA(const torch::Tensor& means3D, const torch::Tensor& scales
 			weights.contiguous().data_ptr<float>(), max_scale,
 			jitter.contiguous().data_ptr<float>(), make_float3(min_x, min_y, min_z),
 			make_float3(max_x, max_y, max_z), num_cells, out_cells.data_ptr<float>(),
-			out_weights.data_ptr<float>());
+			out_weights.data_ptr<float>(), occ_t, floor);
 	else {
 		out_cells.fill_(-1.0f);
 		out_weights.zero_();
@@ -56,7 +56,7 @@ RasterizeGaussiansBackwardCUDA(const torch::Tensor& scales, const torch::Tensor&
 	float min_y, float min_z, float max_x, float max_y, float max_z, uint cell_count,
 	const torch::Tensor& dL_dout_cells, const torch::Tensor& dL_dout_cell_weights,
 	const torch::Tensor& geomBuffer, int R, const torch::Tensor& binningBuffer,
-	const torch::Tensor& imageBuffer)
+	const torch::Tensor& imageBuffer, float occ_t, float floor)
 {
 	const int P = scales.size(0);
 	const uint3 num_cells = make_uint3(cell_count, cell_count, cell_count);
@@ -83,6 +83,6 @@ RasterizeGaussiansBackwardCUDA(const torch::Tensor& scales, const torch::Tensor&
 			dL_dout_cell_weights.contiguous().data_ptr<float>(), grad_rows.data_ptr<float>(),
 			dL_dmeans.data_ptr<float>(), dL_dscales.data_ptr<float>(),
 			dL_drotations.data_ptr<float>(), dL_dvalues.data_ptr<float>(),
-			dL_dweights.data_ptr<float>());
+			dL_dweights.data_ptr<float>(), occ_t, floor);
 	return std::make_tuple(dL_dmeans, dL_dscales, dL_drotations, dL_dvalues, dL_dweights);
 }

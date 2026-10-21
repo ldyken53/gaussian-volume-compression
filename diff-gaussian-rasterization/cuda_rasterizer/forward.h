@@ -16,7 +16,7 @@ void preprocess(int P, const float* means3D, const float* scales, const float* r
 
 void render(dim3 grid, dim3 block, const uint2* ranges, const uint32_t* point_list,
 	float3 volume_mins, uint3 num_cells, float3 cell_size, const float* jitter,
-	const float4* packed, float* out_weights, float* out_cells);
+	const float4* packed, float* out_weights, float* out_cells, float occ_t, float floor);
 } // namespace FORWARD
 
 #endif
