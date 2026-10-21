@@ -9,6 +9,15 @@ Output matches what train.py --precomputed_samples expects:
   <out>_samples.npy  (batches, size, 3) float32
   <out>_gt.npy       (batches, size)    float32
 
+Surface sets (--surface, or --ext_share / --interior_skin): like train.py's surface batches, each
+batch is interior points, then --ext_share points up to --band_width outside the surface, then
+--interior_skin points up to --band_width inside it, offset along the surface normals. Each face's
+outward side is taken from its own volume cell (away from the cell's centroid), so meshes whose
+surface is not consistently orientable (earthquake) still get their band on the right side. Only
+true boundary faces are used: a non-conforming mesh's extract_surface also returns internal faces
+(earthquake: 2/3 of them, 83% of the area), so a face is kept only if the point 1e-4 outside it is
+outside the mesh. Band points are probed against the mesh: -1 outside, the interpolated value inside.
+
 Resumable: writes via memmap and records finished chunks in <out>_progress.txt, so a
 job that expires mid-run continues where it stopped.
 """
@@ -65,11 +74,27 @@ ap.add_argument(
     default=4_000_000,
     help="points evaluated at once, to bound temporary allocations",
 )
+ap.add_argument(
+    "--surface",
+    action="store_true",
+    help="train.py's surface batch mix: --ext_share 0.2 --interior_skin 0.1",
+)
+ap.add_argument("--ext_share", type=float, default=0.0, help="exterior band share")
+ap.add_argument("--interior_skin", type=float, default=0.0, help="inner skin share")
+ap.add_argument("--band_width", type=float, default=0.01)
+ap.add_argument("--band_pow", type=float, default=1.0, help="band distance = u^p * width")
 a = ap.parse_args()
+if a.surface:
+    a.ext_share = a.ext_share or 0.2
+    a.interior_skin = a.interior_skin or 0.1
+# Per batch, as train.py's load_samples: interior, then exterior band, then inner skin.
+size_ext = int(a.size * a.ext_share)
+size_skin = int(a.size * a.interior_skin)
+size_int = a.size - size_ext - size_skin
 
 assert a.batches % a.chunk_batches == 0, "batches must be a multiple of chunk_batches"
 n_chunks = a.batches // a.chunk_batches
-per_chunk = a.chunk_batches * a.size
+per_chunk = a.chunk_batches * size_int
 prog_path = a.out + "_progress.txt"
 done = 0
 if os.path.exists(prog_path):
@@ -90,6 +115,65 @@ print(
     f"pts[{pts.min():.4f},{pts.max():.4f}]",
     flush=True,
 )
+
+band = None
+if size_ext or size_skin:
+    # The probe needs the mesh itself in the unit cube with values in [0, 1].
+    name = m.array_names[0]
+    m.points = pts
+    m.point_data[name] = vals.astype(np.float32)
+    t = time.time()
+    surf = m.extract_surface(pass_cellid=True).triangulate()
+    tri = surf.faces.reshape(-1, 4)[:, 1:]
+    sp = np.asarray(surf.points, dtype=np.float64)
+    nrm = np.cross(sp[tri[:, 1]] - sp[tri[:, 0]], sp[tri[:, 2]] - sp[tri[:, 0]])
+    area = 0.5 * np.linalg.norm(nrm, axis=1)
+    nrm /= np.maximum(2.0 * area, 1e-30)[:, None]
+    # Outward = away from the face's own volume cell, whatever the surface's winding says.
+    owner = np.asarray(surf.cell_data["vtkOriginalCellIds"])
+    uniq, inv = np.unique(owner, return_inverse=True)
+    centers = np.asarray(m.extract_cells(uniq).cell_centers().points, dtype=np.float64)
+    fc = sp[tri].mean(1)
+    flip = ((fc - centers[inv]) * nrm).sum(1) < 0
+    nrm[flip] *= -1
+    # Internal faces of a non-conforming mesh have the mesh on their outer side too: drop them.
+    outer = np.empty(tri.shape[0], dtype=bool)
+    for lo in range(0, tri.shape[0], a.inner):
+        pr = pv.PolyData((fc[lo : lo + a.inner] + 1e-4 * nrm[lo : lo + a.inner]).astype(np.float32))
+        outer[lo : lo + a.inner] = ~np.asarray(pr.sample(m)["vtkValidPointMask"]).astype(bool)
+    print(
+        f"surface {tri.shape[0]} triangles in {time.time() - t:.0f}s, "
+        f"{100 * flip.mean():.1f}% of face normals flipped outward, "
+        f"{100 * outer.mean():.1f}% of faces ({100 * area[outer].sum() / area.sum():.1f}% of the area) "
+        "on the true boundary",
+        flush=True,
+    )
+    tri, nrm, area = tri[outer], nrm[outer], area[outer]
+    band = (tri, sp, nrm, area / area.sum(), name)
+
+
+def band_points(rng, n, inward):
+    """n points up to band_width from the surface (area-uniform faces), outside or inside."""
+    tri, sp, nrm, prob, _ = band
+    f = rng.choice(tri.shape[0], size=n, p=prob)
+    u = rng.random((n, 2))
+    s0 = np.sqrt(u[:, 0])
+    b = np.stack([1 - s0, s0 * (1 - u[:, 1]), s0 * u[:, 1]], 1)
+    p = (b[:, :, None] * sp[tri[f]]).sum(1)
+    d = rng.random((n, 1)) ** a.band_pow * a.band_width
+    return (p + nrm[f] * (-d if inward else d)).astype(np.float32)
+
+
+def probe(points):
+    """Mesh value at each point, -1 outside the mesh."""
+    out = np.empty(points.shape[0], dtype=np.float32)
+    for lo in range(0, points.shape[0], a.inner):
+        pr = pv.PolyData(points[lo : lo + a.inner]).sample(m)
+        g = np.asarray(pr[band[4]], dtype=np.float32)
+        g[~np.asarray(pr["vtkValidPointMask"]).astype(bool)] = -1.0
+        out[lo : lo + a.inner] = g
+    return out
+
 
 mode = "r+" if done else "w+"
 S = np.lib.format.open_memmap(
@@ -195,8 +279,22 @@ for c in range(done, n_chunks):
         out_s[lo:hi] = (b[:, :, None] * pts[v]).sum(1).astype(np.float32)
         out_g[lo:hi] = (b * vals[v]).sum(1).astype(np.float32)
     b0 = c * a.chunk_batches
-    S[b0 : b0 + a.chunk_batches] = out_s.reshape(a.chunk_batches, a.size, 3)
-    G[b0 : b0 + a.chunk_batches] = out_g.reshape(a.chunk_batches, a.size)
+    cb = a.chunk_batches
+    S[b0 : b0 + cb, :size_int] = out_s.reshape(cb, size_int, 3)
+    G[b0 : b0 + cb, :size_int] = out_g.reshape(cb, size_int)
+    if band is not None:
+        t = time.time()
+        parts = [(size_int, size_ext, False), (size_int + size_ext, size_skin, True)]
+        frac = []
+        for lo, n, inward in parts:
+            if n == 0:
+                continue
+            bp = band_points(rng, cb * n, inward)
+            bg = probe(bp)
+            S[b0 : b0 + cb, lo : lo + n] = bp.reshape(cb, n, 3)
+            G[b0 : b0 + cb, lo : lo + n] = bg.reshape(cb, n)
+            frac.append(f"{'skin' if inward else 'exterior'} {100 * (bg == -1).mean():.1f}% empty")
+        print(f"  band in {time.time() - t:.0f}s: " + ", ".join(frac), flush=True)
     S.flush()
     G.flush()
     open(prog_path, "w").write(str(c + 1))

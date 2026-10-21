@@ -27,8 +27,9 @@ python eval_final.py -s mesh.vtu --models output/model [--surface output/model]
 the final configurations; `run_final.sh` trains and evaluates every final model.
 
 Meshes too large to triangulate on the GPU train on precomputed samples
-(`gen_samples.py`, then `--precomputed_samples <prefix>`) and evaluate on a precomputed
-tet-interior set (`precompute_tet.py`, then `--eval_set <prefix>`).
+(`gen_samples.py`, then `--precomputed_samples <prefix>`; add `--surface` for an
+`--encode_surface` set with train.py's exterior band and inner skin) and evaluate on a
+precomputed tet-interior set (`precompute_tet.py`, then `--eval_set <prefix>`).
 
 Ablations: `--densify_3dgs`, `--use_mcmc`, `--densify_alpha 0` (densification);
 `--sample_frac`, `--sample_mode`, `--samples_per_node` (batch subsampling); `--fp_mode`,
