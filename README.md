@@ -26,6 +26,15 @@ python eval_final.py -s mesh.vtu --models output/model [--surface output/model]
 `--cap_max` is the final Gaussian count: storage / (ratio x 48 bytes). The defaults are
 the final configurations; `run_final.sh` trains and evaluates every final model.
 
+## Render rule
+
+Every model renders the same way: at a point, with S = sum w G v and aw = sum w G over the
+Gaussians, the point is empty where aw <= T and otherwise has the value S / max(aw, F).
+Each model stores its (T, F) in `<model>/render_rule`: interior models (0.002, 0.01), surface
+models (0.01, 0.01); `--occ_t` and `--denom_floor` override them. All models train with the
+soft render (T = 0). Models without a `render_rule` file predate it and use (0.01, 0.01) if
+they are surface models, else (0, 0.01).
+
 Meshes too large to triangulate on the GPU train on precomputed samples
 (`gen_samples.py`, then `--precomputed_samples <prefix>`; add `--surface` for an
 `--encode_surface` set with train.py's exterior band and inner skin) and evaluate on a

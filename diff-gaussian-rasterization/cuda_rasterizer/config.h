@@ -3,8 +3,8 @@
 
 // A Gaussian reaches a sample only where w * exp(-q/2) >= SUPPORT_T.
 #define SUPPORT_T 1e-4f
-// Hard cutoff (surface models): aw <= WEIGHT_CUTOFF is empty, else S / aw.
-// Soft cutoff (interior models): empty only at aw == 0, else S / max(aw, WEIGHT_CUTOFF).
-#define WEIGHT_CUTOFF 1e-2f
+// The render rule (occ_t, floor) is a runtime argument, stored per model in its render_rule file:
+// a sample is empty where aw <= occ_t, else it renders S / max(aw, floor). Interior models use
+// (0.002, 0.01), surface models (0.01, 0.01).
 
 #endif

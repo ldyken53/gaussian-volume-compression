@@ -17,7 +17,7 @@ static void* ensureScratch(void*& ptr, size_t& cap, size_t bytes)
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> RasterizeGaussiansCUDA(
 	const torch::Tensor& means3D, const torch::Tensor& scales, const torch::Tensor& rotations,
-	const torch::Tensor& values, const torch::Tensor& weights, bool hard,
+	const torch::Tensor& values, const torch::Tensor& weights, float occ_t, float floor,
 	const torch::Tensor& samples, const cuBQL::bvh3f& bvh)
 {
 	TORCH_CHECK(means3D.ndimension() == 2 && means3D.size(1) == 3,
@@ -38,7 +38,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> RasterizeGaussiansCUDA(
 			(glm::vec3*)scales.contiguous().data_ptr<float>(),
 			(glm::vec4*)rotations.contiguous().data_ptr<float>(), w.data_ptr<float>(), cn, aabbs);
 		FORWARD::render(P, S, means.data_ptr<float>(), values.contiguous().data_ptr<float>(),
-			w.data_ptr<float>(), cn, aabbs, bvh, hard, out_test.data_ptr<float>(),
+			w.data_ptr<float>(), cn, aabbs, bvh, occ_t, floor, out_test.data_ptr<float>(),
 			out_testw.data_ptr<float>());
 	}
 	return std::make_tuple(out_test, out_testw, conics);
@@ -48,8 +48,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 RasterizeGaussiansBackwardCUDA(const torch::Tensor& means3D, const torch::Tensor& scales,
 	const torch::Tensor& rotations, const torch::Tensor& conics, const torch::Tensor& values,
 	const torch::Tensor& weights, const torch::Tensor& out_cells, const torch::Tensor& out_weights,
-	const torch::Tensor& dL_dout_cells, const torch::Tensor& dL_dout_cell_weights, bool hard,
-	const torch::Tensor& samples, const cuBQL::bvh3f& bvh)
+	const torch::Tensor& dL_dout_cells, const torch::Tensor& dL_dout_cell_weights, float occ_t,
+	float floor, const torch::Tensor& samples, const cuBQL::bvh3f& bvh)
 {
 	const int P = means3D.size(0);
 	const int S = samples.size(0);
@@ -66,7 +66,7 @@ RasterizeGaussiansBackwardCUDA(const torch::Tensor& means3D, const torch::Tensor
 			(glm::vec3*)scales.data_ptr<float>(), (glm::vec4*)rotations.data_ptr<float>(),
 			conics.contiguous().data_ptr<float>(), values.contiguous().data_ptr<float>(),
 			weights.contiguous().data_ptr<float>(), samples.contiguous().data_ptr<float>(), bvh,
-			hard, out_cells.contiguous().data_ptr<float>(),
+			occ_t, floor, out_cells.contiguous().data_ptr<float>(),
 			out_weights.contiguous().data_ptr<float>(),
 			dL_dout_cells.contiguous().data_ptr<float>(),
 			dL_dout_cell_weights.contiguous().data_ptr<float>(), dL_dmeans3D.data_ptr<float>(),

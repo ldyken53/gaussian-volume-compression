@@ -1,3 +1,5 @@
+import os
+
 import torch
 
 from bvh_diff_gaussian_rasterization import _C, rasterize_gaussians
@@ -5,15 +7,29 @@ from bvh_diff_gaussian_rasterization.fused import fused_activations
 from scene.gaussian_model import GaussianModel
 from utils.general_utils import build_rotation
 
-_hard = False
+# Render rule (occ_t, floor): a sample is empty where aw <= occ_t, else S / max(aw, floor).
+# Each model stores its own in <model>/render_rule; training renders with occ_t = 0.
+INTERIOR_RULE = (0.002, 0.01)
+SURFACE_RULE = (0.01, 0.01)
+_rule = (0.0, 0.01)
 _morton_order = None
 _morton_state = (0, 0)  # (gaussian count, renders since refresh)
 
 
-def init_rasterizer(hard=False):
-    """hard: surface models' cutoff (empty at aw <= 0.01); interior models use the soft one."""
-    global _hard
-    _hard = hard
+def init_rasterizer(occ_t=0.0, floor=0.01):
+    """Render rule for the next renders: empty where aw <= occ_t, else S / max(aw, floor)."""
+    global _rule
+    _rule = (float(occ_t), float(floor))
+
+
+def model_render_rule(model_dir, surface):
+    """A model's stored render rule; models from before render_rule existed used the old
+    hard (surface) or soft (interior) cutoff."""
+    path = os.path.join(model_dir, "render_rule")
+    if os.path.exists(path):
+        occ_t, floor = (float(x) for x in open(path).read().split()[:2])
+        return occ_t, floor
+    return (0.01, 0.01) if surface else (0.0, 0.01)
 
 
 def build_bvh(samples):
@@ -71,7 +87,7 @@ def render(pc: GaussianModel):
         rotations[order],
         values[order],
         weights[order],
-        _hard,
+        _rule,
     )
     return {"cells": cells, "weights": cell_weights}
 

@@ -193,7 +193,7 @@ __global__ void __launch_bounds__(256, 4)
 
 // Per-sample terms, computed once per sample instead of once per (Gaussian, sample) pair.
 // An empty sample keeps its weight adjoint (the FN/FP terms) but has no value adjoint.
-__global__ void samplePrepCUDA(int S, bool hard, const float* __restrict__ samples,
+__global__ void samplePrepCUDA(int S, float occ_t, float floor, const float* __restrict__ samples,
 	const float* __restrict__ out_cells, const float* __restrict__ out_weights,
 	const float* __restrict__ dL_dsamples, const float* __restrict__ dL_dsample_weights,
 	float4* __restrict__ sample_pack, float* __restrict__ sample_fc)
@@ -202,9 +202,9 @@ __global__ void samplePrepCUDA(int S, bool hard, const float* __restrict__ sampl
 	if (s >= S)
 		return;
 	const float aw = out_weights[s];
-	const bool covered = aw > (hard ? WEIGHT_CUTOFF : 0.0f);
-	// The soft path keeps the (v - R) adjoint at the floored denominator on purpose.
-	const float denom = covered ? (hard ? aw : max(aw, WEIGHT_CUTOFF)) : 1.0f;
+	const bool covered = aw > occ_t;
+	// Below the floor the (v - R) adjoint is kept at the floored denominator on purpose.
+	const float denom = covered ? max(aw, floor) : 1.0f;
 	const float dvo = covered ? dL_dsamples[s] / denom : 0.0f;
 	sample_pack[s] = make_float4(samples[3 * s], samples[3 * s + 1], samples[3 * s + 2], dvo);
 	sample_fc[s] = covered ? dL_dsample_weights[s] - dvo * out_cells[s]
@@ -213,7 +213,7 @@ __global__ void samplePrepCUDA(int S, bool hard, const float* __restrict__ sampl
 
 void BACKWARD::render(int P, int S, const float* means3D, const glm::vec3* scales,
 	const glm::vec4* rotations, const float* conics, const float* values, const float* weights,
-	const float* samples, const cuBQL::bvh3f& bvh, bool hard, const float* out_cells,
+	const float* samples, const cuBQL::bvh3f& bvh, float occ_t, float floor, const float* out_cells,
 	const float* out_weights, const float* dL_dsamples, const float* dL_dsample_weights,
 	float* dL_dmean3D, float* dL_dvalue, float* dL_dweights, glm::vec3* dL_dscale,
 	glm::vec4* dL_drot, float* dL_dconics)
@@ -230,7 +230,7 @@ void BACKWARD::render(int P, int S, const float* means3D, const glm::vec3* scale
 		cudaMalloc(&sample_fc, sizeof(float) * S);
 		prep_cap = S;
 	}
-	samplePrepCUDA<<<(S + 255) / 256, 256>>>(S, hard, samples, out_cells, out_weights, dL_dsamples,
+	samplePrepCUDA<<<(S + 255) / 256, 256>>>(S, occ_t, floor, samples, out_cells, out_weights, dL_dsamples,
 		dL_dsample_weights, sample_pack, sample_fc);
 	renderCUDA<<<(P * 32 + 255) / 256, 256>>>(P, means3D, scales, rotations, conics, values,
 		weights, bvh, dL_dmean3D, dL_dvalue, dL_dweights, dL_dconics, sample_pack, sample_fc);

@@ -81,16 +81,16 @@ __global__ void renderCUDA(int P, const float* means3D, const float* values, con
 }
 
 // Empty samples keep their true aw, so the FN/FP terms still see them.
-__global__ void normalizeCUDA(int S, bool hard, float* out_test, const float* out_testw)
+__global__ void normalizeCUDA(int S, float occ_t, float floor, float* out_test, const float* out_testw)
 {
 	auto idx = cg::this_grid().thread_rank();
 	if (idx >= S)
 		return;
 	const float aw = out_testw[idx];
-	if (aw <= (hard ? WEIGHT_CUTOFF : 0.0f))
+	if (aw <= occ_t)
 		out_test[idx] = -1.0;
 	else
-		out_test[idx] = out_test[idx] / (hard ? aw : max(aw, WEIGHT_CUTOFF));
+		out_test[idx] = out_test[idx] / max(aw, floor);
 }
 
 void FORWARD::preprocess(int P, const float* means3D, const glm::vec3* scales,
@@ -100,10 +100,10 @@ void FORWARD::preprocess(int P, const float* means3D, const glm::vec3* scales,
 }
 
 void FORWARD::render(int P, int S, const float* means3D, const float* values, const float* weights,
-	const float* conics, const cuBQL::box3f* aabbs, const cuBQL::bvh3f& bvh, bool hard,
-	float* out_test, float* out_testw)
+	const float* conics, const cuBQL::box3f* aabbs, const cuBQL::bvh3f& bvh, float occ_t,
+	float floor, float* out_test, float* out_testw)
 {
 	renderCUDA<<<(P * 32 + 255) / 256, 256>>>(
 		P, means3D, values, weights, gvSamplePos(), conics, aabbs, bvh, out_test, out_testw);
-	normalizeCUDA<<<(S + 255) / 256, 256>>>(S, hard, out_test, out_testw);
+	normalizeCUDA<<<(S + 255) / 256, 256>>>(S, occ_t, floor, out_test, out_testw);
 }

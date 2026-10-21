@@ -17,7 +17,7 @@ import numpy as np
 import pyvista as pv
 import torch
 
-from gaussian_renderer import build_bvh, init_rasterizer, render
+from gaussian_renderer import build_bvh, init_rasterizer, model_render_rule, render
 from sampling import sample_exterior_points, sample_mesh_points
 from scene import GaussianModel
 
@@ -103,7 +103,7 @@ def main():
         g = GaussianModel()
         g.max_scale = ms
         g.load_ply(ply)
-        init_rasterizer(hard=mp in surface)
+        init_rasterizer(*model_render_rule(mp, mp in surface))
         build_bvh(int_t)
         cells = render(g)["cells"].double()
         m_gt = gt_i_t != -1

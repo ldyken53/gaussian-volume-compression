@@ -18,6 +18,8 @@ from bvh_diff_gaussian_rasterization.fused import fused_volume_loss
 from gaussian_renderer import (
     build_bvh,
     build_bvh_cached,
+    INTERIOR_RULE,
+    SURFACE_RULE,
     init_rasterizer,
     margin_fp,
     margin_set_exterior,
@@ -33,23 +35,27 @@ from utils.general_utils import build_scaling_rotation, safe_state
 SAMPLE_SEED = 20260903
 BATCH_SIZE = 128**3
 NUM_BATCHES = 100
-# The rasterizer's hard-cutoff occupancy threshold and per-Gaussian support threshold.
-WEIGHT_CUTOFF = 0.01
+# The rasterizer's per-Gaussian support threshold.
 SUPPORT_T = 1e-4
 # Gaussians at or under this weight count as dead when sizing a densification event.
 DEAD_WEIGHT = 0.005
 
 # Per-mode defaults for flags left unset.
-INTERIOR_DEFAULTS = dict(fn_mode="log", fn_reg=0.0001, fp_reg=0.0)
+# Interior: the log barrier keeps every sample above the render threshold (0.002) with margin.
+INTERIOR_DEFAULTS = dict(fn_mode="log", fn_reg=0.0001, fp_reg=0.0, fn_thresh=0.0025)
+# Surface: FN/FP hinges around the render threshold, scaled by the data loss (MAE), and L2
+# values with the interior's light log barrier (fn_thresh).
 SURFACE_DEFAULTS = dict(
     fn_mode="abs",
-    fn_reg=300.0,
-    fp_reg=3.0,
+    fn_reg=1200.0,
+    fp_reg=12.0,
+    hinge_rel_pow=1.0,
     fp_mode="hinge",
     fp_margin=0.2,
     fn_margin=0.05,
     fnfp_norm="all",
     interior_skin=0.1,
+    fn_thresh=0.002,
 )
 
 
@@ -201,7 +207,14 @@ def training(dataset, opt, args):
     big_samples_cuda = big_samples_cuda.gather(1, order.unsqueeze(-1).expand(-1, -1, 3))
     big_gt_cuda = big_gt_cuda.gather(1, order)
 
-    init_rasterizer(hard=surface)
+    # Every model trains with the soft render (empty only where aw == 0) and is deployed under
+    # its own rule, which is stored with it.
+    rule = SURFACE_RULE if surface else INTERIOR_RULE
+    occ_t = rule[0] if args.occ_t is None else args.occ_t
+    floor = rule[1] if args.denom_floor is None else args.denom_floor
+    with open(os.path.join(dataset.model_path, "render_rule"), "w") as f:
+        f.write(f"{occ_t} {floor}\n")
+    init_rasterizer(0.0, floor)
     if args.samples_per_node > 0:
         # About this many samples per mesh node per iteration, at most the whole batch.
         args.sample_frac = min(1.0, args.samples_per_node * int(mesh.n_points) / size)
@@ -244,10 +257,8 @@ def training(dataset, opt, args):
     if args.fn_mode == "log":
         fn_tau = args.fn_thresh
     else:
-        fn_tau = ((1.0 + args.fn_margin) if surface else 1.1) * WEIGHT_CUTOFF
-    fp_t = (
-        (1.0 - args.fp_margin) * WEIGHT_CUTOFF if args.fp_mode == "hinge" else SUPPORT_T
-    )
+        fn_tau = ((1.0 + args.fn_margin) if surface else 1.1) * occ_t
+    fp_t = (1.0 - args.fp_margin) * occ_t if args.fp_mode == "hinge" else SUPPORT_T
     fp_on = surface and args.fp_mode != "margin"
 
     torch.cuda.synchronize()
@@ -303,9 +314,25 @@ def training(dataset, opt, args):
             norm_all=args.fnfp_norm == "all",
             rel_pow=hw_rel,
         )
+        # The hinges' data-loss scale (L1 on surface models); l_v may become the L2 term below.
+        l_v_hinge = l_v
+        if surface:
+            # Surface values are fit with L2 and the interior's light log barrier; the call
+            # above only supplies the hinges.
+            lv_out = fused_volume_loss(
+                cells,
+                gt,
+                weights,
+                l1=False,
+                fn_mode="log",
+                fn_thresh=args.fn_thresh,
+                fn_reg=0.0001,
+            )
+            l_v = lv_out[1]
+            loss = lv_out[0] + false_negative + false_positive
         if args.hinge_freeze > 0 and args.hinge_rel_pow > 0 and hinge_frozen is None:
             if iteration > args.hinge_freeze - 50:
-                hinge_lv_sum = hinge_lv_sum + l_v.detach()
+                hinge_lv_sum = hinge_lv_sum + l_v_hinge.detach()
                 hinge_lv_n += 1
             if iteration >= args.hinge_freeze:
                 hinge_frozen = (
@@ -523,8 +550,13 @@ def parse_args(argv):
         "--sample_mode", default="stratified", choices=["stratified", "random"]
     )
     parser.add_argument("--fn_mode", choices=["abs", "rel", "log"])
+    parser.add_argument("--fn_thresh", type=float, help="log barrier threshold")
     parser.add_argument(
-        "--fn_thresh", type=float, default=0.002, help="log barrier threshold"
+        "--occ_t", type=float,
+        help="render rule: empty where aw <= occ_t (default 0.002 interior, 0.01 surface)",
+    )
+    parser.add_argument(
+        "--denom_floor", type=float, help="render rule: S / max(aw, floor) (default 0.01)"
     )
     parser.add_argument("--fn_reg", type=float)
     parser.add_argument("--fn_margin", type=float, default=0.05)

@@ -14,10 +14,10 @@ void preprocess(int P, const float* means3D, const glm::vec3* scales, const glm:
 	const float* weights, float* conics, cuBQL::box3f* aabbs);
 
 // Accumulates each Gaussian into the samples of the BVH leaves its box overlaps, then
-// normalizes: out_test = S / aw (hard) or S / max(aw, WEIGHT_CUTOFF), -1 for empty samples.
+// normalizes: out_test = S / max(aw, floor), -1 for empty samples (aw <= occ_t).
 void render(int P, int S, const float* means3D, const float* values, const float* weights,
-	const float* conics, const cuBQL::box3f* aabbs, const cuBQL::bvh3f& bvh, bool hard,
-	float* out_test, float* out_testw);
+	const float* conics, const cuBQL::box3f* aabbs, const cuBQL::bvh3f& bvh, float occ_t,
+	float floor, float* out_test, float* out_testw);
 } // namespace FORWARD
 
 #endif

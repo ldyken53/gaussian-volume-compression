@@ -138,21 +138,22 @@ torch::Tensor SampleBVHPrimIDs()
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> Rasterize(const torch::Tensor& means3D,
 	const torch::Tensor& scales, const torch::Tensor& rotations, const torch::Tensor& values,
-	const torch::Tensor& weights, bool hard)
+	const torch::Tensor& weights, double occ_t, double floor)
 {
-	return RasterizeGaussiansCUDA(
-		means3D, scales, rotations, values, weights, hard, stored_samples, samples_bvh);
+	return RasterizeGaussiansCUDA(means3D, scales, rotations, values, weights, (float)occ_t,
+		(float)floor, stored_samples, samples_bvh);
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeBackward(const torch::Tensor& means3D, const torch::Tensor& scales,
 	const torch::Tensor& rotations, const torch::Tensor& conics, const torch::Tensor& values,
 	const torch::Tensor& weights, const torch::Tensor& out_cells, const torch::Tensor& out_weights,
-	const torch::Tensor& dL_dout_cells, const torch::Tensor& dL_dout_cell_weights, bool hard)
+	const torch::Tensor& dL_dout_cells, const torch::Tensor& dL_dout_cell_weights, double occ_t,
+	double floor)
 {
 	return RasterizeGaussiansBackwardCUDA(means3D, scales, rotations, conics, values, weights,
-		out_cells, out_weights, dL_dout_cells, dL_dout_cell_weights, hard, stored_samples,
-		samples_bvh);
+		out_cells, out_weights, dL_dout_cells, dL_dout_cell_weights, (float)occ_t, (float)floor,
+		stored_samples, samples_bvh);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
