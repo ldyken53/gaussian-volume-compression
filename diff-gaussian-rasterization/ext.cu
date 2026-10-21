@@ -116,6 +116,9 @@ void BuildBVHCached(const torch::Tensor& samples, const int64_t key)
 		samples_bvh_cached = true;
 		return;
 	}
+	// A per-iteration BVH is ours to free before switching to a cached one.
+	if (!samples_bvh_cached && samples_bvh.nodes)
+		cuBQL::cuda::free(samples_bvh);
 	stored_samples = it->second.samples;
 	samples_bvh = it->second.bvh;
 	samples_bvh_cached = true;
