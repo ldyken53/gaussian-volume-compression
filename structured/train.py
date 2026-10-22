@@ -259,8 +259,6 @@ def training(dataset, opt, args):
     save_seconds = 0.0
     torch.cuda.synchronize()
     train_t0 = time.perf_counter()
-    ema_names = GaussianModel.EMA_NAMES
-    ema = None
     densifies = 0
     progress_bar = tqdm(range(opt.iterations), desc="Training progress")
     for iteration in range(1, opt.iterations + 1):
@@ -346,15 +344,7 @@ def training(dataset, opt, args):
                         )
 
             if iteration < opt.iterations:
-                use_ema = args.ema > 0 and iteration >= args.ema_from
-                gaussians.optimizer_step(
-                    ema=ema if use_ema else None, ema_w=1.0 - args.ema
-                )
-                gaussians.optimizer.zero_grad(set_to_none=True)
-                if use_ema and ema is None:
-                    ema = {n: getattr(gaussians, n).detach().clone() for n in ema_names}
-                    # Shared with the model, which mirrors every row edit onto it.
-                    gaussians.ema_buffers = ema
+                gaussians.step(args.ema, args.ema > 0 and iteration >= args.ema_from)
 
                 if args.use_mcmc:
                     L = build_scaling_rotation(
@@ -375,16 +365,7 @@ def training(dataset, opt, args):
                 save_t0 = time.perf_counter()
                 print(f"\n[ITER {iteration}] Saving Gaussians")
                 # Ship the parameter average, not the last iterate.
-                if ema is not None:
-                    backup = {
-                        n: getattr(gaussians, n).detach().clone() for n in ema_names
-                    }
-                    for n in ema_names:
-                        getattr(gaussians, n).copy_(ema[n])
-                scene.save(iteration)
-                if ema is not None:
-                    for n in ema_names:
-                        getattr(gaussians, n).copy_(backup[n])
+                scene.save(iteration, gaussians.ema_buffers)
                 torch.cuda.synchronize()
                 save_seconds += time.perf_counter() - save_t0
 

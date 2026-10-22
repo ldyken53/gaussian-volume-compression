@@ -261,8 +261,6 @@ def training(dataset, opt, args):
     torch.cuda.synchronize()
     train_t0 = time.perf_counter()
     save_seconds = 0.0
-    ema_params = None
-    ema_names = list(GaussianModel.EMA_NAMES)
     hinge_frozen, hinge_lv_sum, hinge_lv_n = None, 0.0, 0
     densifies = 0
     progress_bar = tqdm(range(opt.iterations), desc="Training progress")
@@ -370,22 +368,14 @@ def training(dataset, opt, args):
                 torch.cuda.synchronize()
                 save_t0 = time.perf_counter()
                 print(f"\n[ITER {iteration}] Saving Gaussians")
-                if ema_params is not None:
-                    # Save the average; swap it in place so training state is untouched.
-                    bak = {
-                        nm: getattr(gaussians, nm).detach().clone() for nm in ema_names
-                    }
-                    for nm in ema_names:
-                        getattr(gaussians, nm).copy_(ema_params[nm])
+                # Ship the parameter average, not the last iterate.
                 gaussians.save_ply(
                     os.path.join(
                         dataset.model_path,
                         f"point_cloud/iteration_{iteration}/point_cloud.ply",
-                    )
+                    ),
+                    ema=gaussians.ema_buffers,
                 )
-                if ema_params is not None:
-                    for nm in ema_names:
-                        getattr(gaussians, nm).copy_(bak[nm])
                 torch.cuda.synchronize()
                 save_seconds += time.perf_counter() - save_t0
 
@@ -446,37 +436,7 @@ def training(dataset, opt, args):
                 densifies += 1
 
             if iteration < opt.iterations:
-                ema_ready = (
-                    args.ema > 0
-                    and iteration >= args.ema_from
-                    and ema_params is not None
-                    and ema_params["_xyz"].shape[0] == gaussians._xyz.shape[0]
-                )
-                ema_done = gaussians.optimizer_step(
-                    ema=ema_params if ema_ready else None, ema_w=1.0 - args.ema
-                )
-                gaussians.optimizer.zero_grad(set_to_none=True)
-
-                if args.ema > 0 and iteration >= args.ema_from:
-                    cur = {nm: getattr(gaussians, nm) for nm in ema_names}
-                    if (
-                        ema_params is None
-                        or ema_params["_xyz"].shape[0] != cur["_xyz"].shape[0]
-                    ):
-                        if ema_params is not None:
-                            print(
-                                f"[ema] buffer desync at iteration {iteration}; restarting"
-                            )
-                        ema_params = {nm: cur[nm].detach().clone() for nm in ema_names}
-                        gaussians.ema_buffers = ema_params
-                    elif not ema_done:
-                        torch._foreach_lerp_(
-                            [ema_params[nm] for nm in ema_names],
-                            [cur[nm].detach() for nm in ema_names],
-                            1.0 - args.ema,
-                        )
-                    # Pruning and appending replace the buffer tensors.
-                    ema_params = gaussians.ema_buffers
+                gaussians.step(args.ema, args.ema > 0 and iteration >= args.ema_from)
 
                 if args.use_mcmc:
                     L = build_scaling_rotation(

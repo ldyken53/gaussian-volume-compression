@@ -25,9 +25,11 @@ class Scene:
         mesh, pcd = readData(args.source_path, fraction, normalized, max_init)
         self.gaussians.create_from_pcd(pcd, mesh)
 
-    def save(self, iteration):
+    def save(self, iteration, ema=None):
+        """The model's ply; the EMA buffers' parameters instead if given."""
         self.gaussians.save_ply(
             os.path.join(
                 self.model_path, f"point_cloud/iteration_{iteration}", "point_cloud.ply"
-            )
+            ),
+            ema=ema,
         )

@@ -43,8 +43,8 @@ class ModelParams(ParamGroup):
 
 
 class OptimizationParams(ParamGroup):
-    """The schedule and learning rates both pipelines train with. `own` adds each pipeline's
-    own fields and defaults (they differ in the densification window and the MCMC terms)."""
+    """The schedule and learning rates both pipelines train with; `own` adds each pipeline's
+    own fields and defaults (the densification window and the MCMC terms differ)."""
 
     def __init__(self, parser, **own):
         self.iterations = 5_000
