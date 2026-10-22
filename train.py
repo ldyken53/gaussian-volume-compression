@@ -37,12 +37,12 @@ BATCH_SIZE = 128**3
 NUM_BATCHES = 100
 # The rasterizer's per-Gaussian support threshold.
 SUPPORT_T = 1e-4
-# Gaussians at or under this weight count as dead when sizing a densification event.
+# Gaussians under this weight count as dead when sizing a densification event.
 DEAD_WEIGHT = 0.005
 
 # Per-mode defaults for flags left unset.
 # Interior: the log barrier keeps every sample above the render threshold (0.002) with margin.
-INTERIOR_DEFAULTS = dict(fn_mode="log", fn_reg=0.0001, fp_reg=0.0, fn_thresh=0.0025)
+INTERIOR_DEFAULTS = dict(fn_mode="log", fn_reg=0.0001, fp_reg=0.0)
 # Surface: FN/FP hinges around the render threshold, scaled by the data loss (MAE), and L2
 # values with the interior's light log barrier (fn_thresh).
 SURFACE_DEFAULTS = dict(
@@ -55,7 +55,6 @@ SURFACE_DEFAULTS = dict(
     fn_margin=0.05,
     fnfp_norm="all",
     interior_skin=0.1,
-    fn_thresh=0.002,
 )
 
 
@@ -161,11 +160,9 @@ def training(dataset, opt, args):
     )
     gaussians.create_from_pcd(pcd, mesh)
     if args.max_scale_k > 0:
-        # The cap grows with the Gaussian spacing; surface models measure it over the mesh's
-        # bounding box rather than the unit cube.
-        vol = 1.0
-        if surface:
-            vol = float(np.prod(np.array(gaussians.maxes) - np.array(gaussians.mins)))
+        # The cap grows with the Gaussian spacing (V / N)^(1/3), V the mesh's bounding box (the
+        # structured pipeline's rule too).
+        vol = float(np.prod(np.array(gaussians.maxes) - np.array(gaussians.mins)))
         args.max_scale = max(
             args.max_scale, args.max_scale_k * (vol / n_final) ** (1.0 / 3.0)
         )
@@ -400,12 +397,12 @@ def training(dataset, opt, args):
                 budget = int(
                     n_final
                     - gaussians.get_values.shape[0]
-                    + torch.count_nonzero(gaussians.get_weight <= DEAD_WEIGHT)
+                    + torch.count_nonzero(gaussians.get_weight < DEAD_WEIGHT)
                 )
                 remaining = max(1, densify_events - densifies)
                 if args.use_mcmc:
                     gaussians.relocate_gs(
-                        (gaussians.get_weight <= DEAD_WEIGHT).squeeze(-1)
+                        (gaussians.get_weight < DEAD_WEIGHT).squeeze(-1)
                     )
                     gaussians.add_new_gs(cap_max=args.cap_max)
                 elif args.densify_3dgs:
@@ -425,7 +422,7 @@ def training(dataset, opt, args):
                             )
                         densifies += 1
                         gaussians.prune_points(
-                            (gaussians.get_weight <= DEAD_WEIGHT).squeeze(-1)
+                            (gaussians.get_weight < DEAD_WEIGHT).squeeze(-1)
                         )
                 else:
                     mask = gt.ravel() != -1
@@ -550,13 +547,21 @@ def parse_args(argv):
         "--sample_mode", default="stratified", choices=["stratified", "random"]
     )
     parser.add_argument("--fn_mode", choices=["abs", "rel", "log"])
-    parser.add_argument("--fn_thresh", type=float, help="log barrier threshold")
     parser.add_argument(
-        "--occ_t", type=float,
+        "--fn_thresh",
+        type=float,
+        default=0.0025,
+        help="log barrier threshold (both modes; the structured pipeline's too)",
+    )
+    parser.add_argument(
+        "--occ_t",
+        type=float,
         help="render rule: empty where aw <= occ_t (default 0.002 interior, 0.01 surface)",
     )
     parser.add_argument(
-        "--denom_floor", type=float, help="render rule: S / max(aw, floor) (default 0.01)"
+        "--denom_floor",
+        type=float,
+        help="render rule: S / max(aw, floor) (default 0.01)",
     )
     parser.add_argument("--fn_reg", type=float)
     parser.add_argument("--fn_margin", type=float, default=0.05)
