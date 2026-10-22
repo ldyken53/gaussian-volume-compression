@@ -5,23 +5,13 @@
 #include <cuBQL/bvh.h>
 #include "cuBQL/builder/cuda.h"
 #include "rasterize_points.h"
+#include "gv_ops.h"
 
-void multi_adam_(std::vector<torch::Tensor> params, std::vector<torch::Tensor> grads,
-	std::vector<torch::Tensor> exp_avgs, std::vector<torch::Tensor> exp_avg_sqs,
-	std::vector<double> lrs, int64_t step, double beta1, double beta2, double eps,
-	std::vector<torch::Tensor> emas, double ema_w);
 std::vector<torch::Tensor> fused_act_forward(
 	torch::Tensor rs, torch::Tensor rq, torch::Tensor rv, torch::Tensor rw, double max_scale);
 std::vector<torch::Tensor> fused_act_backward(torch::Tensor rs, torch::Tensor rq, torch::Tensor ov,
 	torch::Tensor ow, double max_scale, torch::Tensor gs, torch::Tensor gq, torch::Tensor gv,
 	torch::Tensor gw);
-std::vector<torch::Tensor> fused_loss_forward(torch::Tensor c, torch::Tensor g, torch::Tensor w,
-	int64_t l1, int64_t fn_log, int64_t rel, double tau, double fn_reg, double fp_reg, double fp_t,
-	int64_t fp_kind, int64_t norm_all, double rel_pow);
-std::vector<torch::Tensor> fused_loss_backward(torch::Tensor c, torch::Tensor g, torch::Tensor w,
-	torch::Tensor acc, int64_t l1, int64_t fn_log, int64_t rel, double tau, double fn_reg,
-	double fp_reg, double fp_t, int64_t fp_kind, int64_t norm_all, double rel_pow,
-	torch::Tensor gout);
 void margin_set_exterior(torch::Tensor samples, int64_t key);
 std::vector<torch::Tensor> margin_fp(
 	torch::Tensor means, torch::Tensor conic, torch::Tensor weights, double T, int64_t key);

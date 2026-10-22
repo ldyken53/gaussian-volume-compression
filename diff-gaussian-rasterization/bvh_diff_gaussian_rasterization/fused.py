@@ -1,6 +1,8 @@
-"""Autograd wrappers for the fused activation and loss kernels in fused_ops.cu."""
+"""Autograd wrappers for the fused activation kernels in fused_ops.cu, and the shared fused
+volume loss (gvcommon.fused_loss) on this extension's kernel."""
 
 import torch
+from gvcommon.fused_loss import volume_loss
 
 from . import _C
 
@@ -39,53 +41,7 @@ def fused_activations(raw_scaling, raw_rotation, raw_values, raw_weight, max_sca
     )
 
 
-class _FusedVolumeLoss(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, cells, gt, weights, cfg):
-        out, acc = _C.fused_loss_forward(cells, gt, weights, *cfg)
-        ctx.cfg = cfg
-        ctx.save_for_backward(cells, gt, weights, acc)
-        ctx.mark_non_differentiable(gt)
-        return out
-
-    @staticmethod
-    def backward(ctx, g_out):
-        cells, gt, weights, acc = ctx.saved_tensors
-        dc, dw = _C.fused_loss_backward(
-            cells, gt, weights, acc, *ctx.cfg, g_out.contiguous()
-        )
-        return dc, None, dw, None
-
-
-_FP_KINDS = {"lin": 0, "log": 1, "hinge": 2}
-
-
-def fused_volume_loss(
-    cells,
-    gt,
-    weights,
-    *,
-    l1,
-    fn_mode,
-    fn_thresh,
-    fn_reg,
-    fp_reg=0.0,
-    fp_t=0.0,
-    fp_mode="lin",
-    norm_all=False,
-    rel_pow=0.0,
-):
-    """[l_v + fn + fp, l_v, fn, fp]; see fused_ops.cu for the terms."""
-    cfg = (
-        int(bool(l1)),
-        int(fn_mode == "log"),
-        int(fn_mode == "rel"),
-        float(fn_thresh),
-        float(fn_reg),
-        float(fp_reg),
-        float(fp_t),
-        _FP_KINDS[fp_mode],
-        int(bool(norm_all)),
-        float(rel_pow),
-    )
-    return _FusedVolumeLoss.apply(cells, gt, weights, cfg)
+def fused_volume_loss(cells, gt, weights, **terms):
+    """[l_v + fn + fp, l_v, fn, fp]; terms as gvcommon.fused_loss.volume_loss. The data term
+    skips samples where gt or the render is -1."""
+    return volume_loss(_C, cells, gt, weights, **terms)

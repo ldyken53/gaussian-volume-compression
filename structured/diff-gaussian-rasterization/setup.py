@@ -8,7 +8,7 @@ here = os.path.dirname(os.path.abspath(__file__))
 glm = os.path.normpath(
     os.path.join(here, "..", "..", "diff-gaussian-rasterization", "third_party", "glm")
 )
-# Kernel sources both pipelines' extensions compile (see multi_adam.cu).
+# Kernel sources both pipelines' extensions compile (see multi_adam.cu, fused_ops.cu).
 common = os.path.normpath(os.path.join(here, "..", "..", "common", "cuda"))
 
 setup(
@@ -30,8 +30,11 @@ setup(
                 "cuda_rasterizer/config.h",
                 "cuda_rasterizer/auxiliary.h",
                 os.path.join(common, "multi_adam.cuh"),
+                os.path.join(common, "volume_loss.cuh"),
+                os.path.join(common, "gv_ops.h"),
             ],
-            extra_compile_args={"nvcc": ["-I" + glm, "-I" + common]},
+            include_dirs=[common],
+            extra_compile_args={"nvcc": ["-I" + glm]},
         )
     ],
     cmdclass={"build_ext": BuildExtension},
