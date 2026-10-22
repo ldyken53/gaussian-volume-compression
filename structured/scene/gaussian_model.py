@@ -8,7 +8,7 @@ from plyfile import PlyData, PlyElement
 from simple_knn._C import distCUDA2
 from torch import nn
 
-from utils.general_utils import build_rotation, get_expon_lr_func, inverse_sigmoid
+from gvcommon.general_utils import build_rotation, get_expon_lr_func, inverse_sigmoid
 from utils.graphics_utils import BasicPointCloud
 
 # Values are clamped this far inside (0, 1) before inverse_sigmoid: an exact 0 or 1 would map

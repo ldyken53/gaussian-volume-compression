@@ -27,9 +27,9 @@ from gaussian_renderer import (
     render,
     sample_bvh_prim_ids,
 )
+from gvcommon.general_utils import build_scaling_rotation, safe_state
 from sampling import sample_exterior_points, sample_mesh_points
 from scene import GaussianModel, read_mesh
-from utils.general_utils import build_scaling_rotation, safe_state
 
 # Fixed seed for the sample points, so the cached ground truth matches every run's points.
 SAMPLE_SEED = 20260903

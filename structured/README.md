@@ -2,8 +2,8 @@
 This repository contains an implementation of training a mixed Gaussian model from volumetric data. The codebase borrows heavily from the paper "3D Gaussian Splatting for Real-Time Radiance Field Rendering", which can be found [here](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/).
 
 This directory is the repository's structured pipeline; `../README.md` maps the layout. Run it
-from here, with only this pipeline's extension on `PYTHONPATH`
-(`export PYTHONPATH=$PWD/diff-gaussian-rasterization`).
+from here, with this pipeline's extension and the shared `../common` on `PYTHONPATH`
+(`export PYTHONPATH=$PWD/diff-gaussian-rasterization:$PWD/../common`).
 
 ## Cloning the Repository
 

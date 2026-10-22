@@ -1,5 +1,4 @@
 import random
-import os
 import sys
 from datetime import datetime
 
@@ -14,27 +13,12 @@ def inverse_sigmoid(x):
 def get_expon_lr_func(
     lr_init, lr_final, lr_delay_steps=0, lr_delay_mult=1.0, max_steps=1000000
 ):
-    """
-    Copied from Plenoxels
-
-    Continuous learning rate decay function. Adapted from JaxNeRF
-    The returned rate is lr_init when step=0 and lr_final when step=max_steps, and
-    is log-linearly interpolated elsewhere (equivalent to exponential decay).
-    If lr_delay_steps>0 then the learning rate will be scaled by some smooth
-    function of lr_delay_mult, such that the initial learning rate is
-    lr_init*lr_delay_mult at the beginning of optimization but will be eased back
-    to the normal learning rate when steps>lr_delay_steps.
-    :param conf: config subtree 'lr' or similar
-    :param max_steps: int, the number of steps during optimization.
-    :return HoF which takes step as input
-    """
+    """Log-linear decay from lr_init to lr_final over max_steps, with an optional delay."""
 
     def helper(step):
         if step < 0 or (lr_init == 0.0 and lr_final == 0.0):
-            # Disable this parameter
             return 0.0
         if lr_delay_steps > 0:
-            # A kind of reverse cosine decay.
             delay_rate = lr_delay_mult + (1 - lr_delay_mult) * np.sin(
                 0.5 * np.pi * np.clip(step / lr_delay_steps, 0, 1)
             )
@@ -48,6 +32,7 @@ def get_expon_lr_func(
 
 
 def build_rotation(r):
+    """Rotation matrices of (unnormalized) quaternions (w, x, y, z)."""
     norm = torch.sqrt(
         r[:, 0] * r[:, 0] + r[:, 1] * r[:, 1] + r[:, 2] * r[:, 2] + r[:, 3] * r[:, 3]
     )
@@ -74,6 +59,7 @@ def build_rotation(r):
 
 
 def build_scaling_rotation(s, r):
+    """R diag(s), whose outer product with itself is the covariance."""
     L = torch.zeros((s.shape[0], 3, 3), dtype=torch.float, device="cuda")
     R = build_rotation(r)
 
@@ -85,7 +71,8 @@ def build_scaling_rotation(s, r):
     return L
 
 
-def safe_state(silent):
+def safe_state(silent, seed=0):
+    """Timestamp stdout lines (or silence them) and seed every RNG with seed."""
     old_f = sys.stdout
 
     class F:
@@ -111,7 +98,6 @@ def safe_state(silent):
 
     sys.stdout = F(silent)
 
-    seed = int(os.environ.get("SEED", "0"))
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)

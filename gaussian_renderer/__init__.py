@@ -4,8 +4,8 @@ import torch
 
 from bvh_diff_gaussian_rasterization import _C, rasterize_gaussians
 from bvh_diff_gaussian_rasterization.fused import fused_activations
+from gvcommon.general_utils import build_rotation
 from scene.gaussian_model import GaussianModel
-from utils.general_utils import build_rotation
 
 # Render rule (occ_t, floor): a sample is empty where aw <= occ_t, else S / max(aw, floor).
 # Each model stores its own in <model>/render_rule; training renders with occ_t = 0.

@@ -13,8 +13,8 @@ from tqdm import tqdm
 
 from arguments import ModelParams, OptimizationParams
 from gaussian_renderer import render
+from gvcommon.general_utils import build_scaling_rotation, safe_state
 from scene import GaussianModel, Scene
-from utils.general_utils import build_scaling_rotation, safe_state
 
 CELL_COUNT = 128
 # Auto densification: enough growth events that each grows the model by about this factor.
@@ -508,6 +508,6 @@ if __name__ == "__main__":
     args.save_iterations.append(args.iterations)
 
     print("Optimizing " + args.model_path)
-    safe_state(args.quiet)
+    safe_state(args.quiet, seed=int(os.environ.get("SEED", "0")))
     training(lp.extract(args), op.extract(args), args)
     print("\nTraining complete.")

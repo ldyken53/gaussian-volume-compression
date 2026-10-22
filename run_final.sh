@@ -5,7 +5,7 @@
 # Outputs output/IN_<d>_<r> and output/SU_<d>_s<r>, evaluations in bench_logs/eval_<tag>.json.
 cd "$(dirname "$0")"
 G=${1:-0}; MODE=${2:-all}; shift $(( $# < 2 ? $# : 2 )); DS=${*:-"mito sf1 valley rbl eq"}
-export CUDA_VISIBLE_DEVICES=$G PYTHONPATH=$PWD/diff-gaussian-rasterization:$PYTHONPATH
+export CUDA_VISIBLE_DEVICES=$G PYTHONPATH=$PWD/diff-gaussian-rasterization:$PWD/common:$PYTHONPATH
 A=/lus/eagle/projects/dist_relational_alg/ldyken53
 U=/lus/eagle/projects/UIC-HPC/ldyken53
 declare -A SRC=([mito]=$A/mito.vtu [sf1]=$A/sf1.vtu [valley]=$U/valley.vtu [rbl]=$U/rbl.vtu

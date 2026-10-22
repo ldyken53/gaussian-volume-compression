@@ -7,7 +7,7 @@ from simple_knn._C import distCUDA2
 from torch import nn
 
 from bvh_diff_gaussian_rasterization import _C as _dgr_C
-from utils.general_utils import build_rotation, get_expon_lr_func, inverse_sigmoid
+from gvcommon.general_utils import build_rotation, get_expon_lr_func, inverse_sigmoid
 
 # Values are clamped this far from 0 and 1 before inverse_sigmoid, which is infinite there.
 VALUE_EPS = 1e-6

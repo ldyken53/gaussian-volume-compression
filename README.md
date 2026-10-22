@@ -7,9 +7,10 @@ Two pipelines fit a set of 3D Gaussians to the scalar field of a volume:
 | unstructured | repository root | volume meshes (`.vtu`) | BVH over sample points (`bvh_diff_gaussian_rasterization`) | `eval_final.py` |
 | structured | `structured/` | regular grids (legacy `.vtk` STRUCTURED_POINTS) | tile rasterizer over the grid (`diff_gaussian_rasterization`) | `structured/full_psnr.py` |
 
-Both pipelines have a `train.py`, `scene/`, `gaussian_renderer/`, `utils/` and `arguments/`.
-Run each from its own directory with only its own extension on `PYTHONPATH`; never put both
-pipeline roots on `sys.path`, or one pipeline's modules stand in for the other's.
+Code both pipelines share lives in `common/gvcommon/`. Both pipelines have a `train.py`,
+`scene/`, `gaussian_renderer/`, `utils/` and `arguments/`: run each from its own directory with
+its own extension and `common/` on `PYTHONPATH`. Never put both pipeline roots on `sys.path`,
+or one pipeline's modules stand in for the other's.
 
 ```shell
 git clone --recursive <repo>
@@ -19,12 +20,12 @@ pip install submodules/simple-knn          # both pipelines import the installed
 (cd structured/diff-gaussian-rasterization && python setup.py build_ext --inplace)
 
 # unstructured, from the repository root
-export PYTHONPATH=$PWD/diff-gaussian-rasterization
+export PYTHONPATH=$PWD/diff-gaussian-rasterization:$PWD/common
 python train.py -s mesh.vtu --cap_max 5015 -m output/model [--encode_surface]
 python eval_final.py -s mesh.vtu --models output/model [--surface output/model]
 
 # structured, from structured/
-cd structured && export PYTHONPATH=$PWD/diff-gaussian-rasterization
+cd structured && export PYTHONPATH=$PWD/diff-gaussian-rasterization:$PWD/../common
 python train.py -s volume.vtk --is_scaled --ratio 1024 -m output/model
 python full_psnr.py -s volume.vtk --is_scaled --continuous 2 -m output/model
 ```
@@ -47,7 +48,7 @@ pip install submodules/simple-knn
 cd diff-gaussian-rasterization && python setup.py build_ext --inplace
 ```
 
-Put `diff-gaussian-rasterization` on `PYTHONPATH` to use the in-place build.
+Put `diff-gaussian-rasterization` (the in-place build) and `common` on `PYTHONPATH`.
 
 ### Training and evaluation
 
