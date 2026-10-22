@@ -43,10 +43,10 @@ class ModelParams(ParamGroup):
 
 
 class OptimizationParams(ParamGroup):
-    """The schedule and learning rates both pipelines train with; `own` adds each pipeline's
-    own fields and defaults (the densification window and the MCMC terms differ)."""
+    """The schedule and learning rates every model type trains with. train.py replaces the
+    defaults that differ by type (densify_grad_threshold, weight_reg) unless given."""
 
-    def __init__(self, parser, **own):
+    def __init__(self, parser):
         self.iterations = 5_000
         self.position_lr_init = 0.00016
         self.position_lr_final = 0.0000016
@@ -58,10 +58,12 @@ class OptimizationParams(ParamGroup):
         self.rotation_lr = 0.005
         self.densification_interval = 100
         self.densify_from_iter = 500
+        self.densify_until_iter = 16_000
         # --densify_3dgs
         self.percent_dense = 0.01
+        self.densify_grad_threshold = 0.0
         # --use_mcmc
         self.noise_lr = 5e5
         self.scale_reg = 0.01
-        vars(self).update(own)
+        self.weight_reg = 0.00001
         super().__init__(parser, "Optimization Parameters")

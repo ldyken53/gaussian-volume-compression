@@ -1,15 +1,25 @@
+"""Rendering a model, for every model type, under one render rule.
+
+render_points renders at the samples of the last BVH build (mesh models: arbitrary points);
+render_grid renders onto a jittered cell lattice (grid models). Both apply the render rule
+(occ_t, floor): with S = sum w G v and aw = sum w G over the Gaussians, a point is empty (-1)
+where aw <= occ_t, else it has the value S / max(aw, floor). Each model stores its rule in
+<model>/render_rule; training renders with occ_t = 0.
+"""
+
 import torch
 
-from gvcommon.general_utils import build_rotation
-from gvcommon.model_files import read_render_rule
-from gvraster import bvh as _C
-from gvraster.bvh import fused_activations, rasterize_gaussians
+from gvraster import bvh, tile
 from scene.gaussian_model import GaussianModel
+from scene.model_files import read_render_rule
+from utils.general_utils import build_rotation
 
-# Render rule (occ_t, floor): a sample is empty where aw <= occ_t, else S / max(aw, floor).
-# Each model stores its own in <model>/render_rule; training renders with occ_t = 0.
-INTERIOR_RULE = (0.002, 0.01)
-SURFACE_RULE = (0.01, 0.01)
+# Each model type's render rule (occ_t, floor).
+RULES = {
+    "structured": (0.002, 0.01),
+    "interior": (0.002, 0.01),
+    "surface": (0.01, 0.01),
+}
 _rule = (0.0, 0.01)
 _morton_order = None
 _morton_state = (0, 0)  # (gaussian count, renders since refresh)
@@ -21,25 +31,51 @@ def init_rasterizer(occ_t=0.0, floor=0.01):
     _rule = (float(occ_t), float(floor))
 
 
+def render_rule():
+    return _rule
+
+
 def model_render_rule(model_dir, surface):
     """A model's stored render rule; models from before render_rule existed used the old
-    hard (surface) or soft (interior) cutoff."""
+    hard (surface) or soft (interior, grid) cutoff."""
     return read_render_rule(model_dir, (0.01, 0.01) if surface else (0.0, 0.01))
 
 
+# ---- Grids: the tile rasterizer ----
+
+
+def render_grid(pc: GaussianModel, jitter, cell_count=100):
+    """(cells, weights) on the cell_count^3 lattice over [pc.mins, pc.maxes], each cell moved
+    by its jitter (3 floats per cell, [z, y, x] cell order)."""
+    settings = tile.GaussianRasterizationSettings(
+        volume_mins=pc.mins,
+        volume_maxes=pc.maxes,
+        cell_count=cell_count,
+        max_scale=float(pc.max_scale),
+        occ_t=_rule[0],
+        floor=_rule[1],
+    )
+    return tile.GaussianRasterizer(settings)(
+        pc.get_xyz, pc._scaling, pc._rotation, pc._values, pc._weight, jitter
+    )
+
+
+# ---- Points: the BVH rasterizer ----
+
+
 def build_bvh(samples):
-    """Make `samples` the points every render evaluates at."""
-    _C.build_bvh(samples)
+    """Make `samples` the points every render_points evaluates at."""
+    bvh.build_bvh(samples)
 
 
 def build_bvh_cached(samples, key):
     """build_bvh, reusing the BVH built for batch `key` (full-batch runs only)."""
-    _C.build_bvh_cached(samples, int(key))
+    bvh.build_bvh_cached(samples, int(key))
 
 
 def sample_bvh_prim_ids():
     """primIDs of the sample BVH last built (int32, leaf order)."""
-    return _C.sample_bvh_prim_ids()
+    return bvh.sample_bvh_prim_ids()
 
 
 def morton3d_unit(xyz: torch.Tensor) -> torch.Tensor:
@@ -60,11 +96,11 @@ def morton3d_unit(xyz: torch.Tensor) -> torch.Tensor:
     )
 
 
-def render(pc: GaussianModel):
-    """{"cells", "weights"} at the current samples."""
+def render_points(pc: GaussianModel):
+    """(cells, weights) at the samples of the last BVH build."""
     global _morton_order, _morton_state
     means3D = pc.get_xyz
-    scales, rotations, values, weights = fused_activations(
+    scales, rotations, values, weights = bvh.fused_activations(
         pc._scaling, pc._rotation, pc._values, pc._weight, pc.max_scale
     )
     # Morton order is a memory-locality hint: refresh it every 100 renders or on a count change.
@@ -76,7 +112,7 @@ def render(pc: GaussianModel):
     else:
         _morton_state = (n, age + 1)
     order = _morton_order
-    cells, cell_weights = rasterize_gaussians(
+    return bvh.rasterize_gaussians(
         means3D[order],
         scales[order],
         rotations[order],
@@ -84,7 +120,9 @@ def render(pc: GaussianModel):
         weights[order],
         _rule,
     )
-    return {"cells": cells, "weights": cell_weights}
+
+
+# ---- Surface models' --fp_mode margin term ----
 
 
 def conic6(pc: GaussianModel):
@@ -121,7 +159,7 @@ def conic6(pc: GaussianModel):
 class _MarginFP(torch.autograd.Function):
     @staticmethod
     def forward(ctx, means, conic, weights, T, key):
-        val, gmu, gc, gw = _C.margin_fp(
+        val, gmu, gc, gw = bvh.margin_fp(
             means.detach().float().contiguous(),
             conic.detach().float().contiguous(),
             weights.detach().reshape(-1).float().contiguous(),
@@ -145,7 +183,7 @@ class _MarginFP(torch.autograd.Function):
 
 def margin_set_exterior(samples, key):
     """Register (and build a BVH for) exterior sample set `key` for margin_fp."""
-    _C.margin_set_exterior(samples.contiguous(), int(key))
+    bvh.margin_set_exterior(samples.contiguous(), int(key))
 
 
 def margin_fp(pc: GaussianModel, key, T):

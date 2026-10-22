@@ -1,7 +1,7 @@
 """gvraster: the CUDA side of Gaussian volume models, as three extension modules.
 
   gvraster._bvh   renders Gaussians at arbitrary sample points through a BVH (meshes), plus the
-                  fused activations and the margin FP term its pipeline uses
+                  fused activations and the surface models' margin FP term
   gvraster._tile  renders Gaussians onto a cell lattice with a tile rasterizer (regular grids)
   gvraster._ops   the training kernels both renderers share: one-launch Adam (+ EMA) and the
                   fused volume loss

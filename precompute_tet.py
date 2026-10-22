@@ -9,7 +9,8 @@ instead of all of them.
 Ground truth needs no probe: a point at barycentric coords b inside a tet is worth
 b . (values at that tet's four vertices), which is exactly the linear interpolation
 vtkProbeFilter performs. Values and coordinates are normalised the same way
-readDatau does, so the set matches what the models were trained against.
+read_unstructured (scene/dataset_readers.py) does, so the set matches what the models
+were trained against.
 """
 
 import sys, time, argparse, numpy as np, pyvista as pv

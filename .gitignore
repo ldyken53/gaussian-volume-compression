@@ -17,16 +17,3 @@ finals
 sample_cache
 eval_sets/
 rast_*/
-
-# Structured pipeline run artifacts
-/structured/3dgs
-/structured/data
-/structured/out_vtk/
-/structured/point_clouds
-/structured/raw
-/structured/screenshots
-/structured/tensorboard_3d
-/structured/test*.vtk
-/structured/vtk
-/structured/vtu
-/structured/**/*.png

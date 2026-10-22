@@ -1,166 +1,99 @@
-"""Fit Gaussians to a volume mesh's interior field, or with --encode_surface to its interior and
-exterior (a sample outside the mesh must render empty)."""
+"""Fit Gaussians to the scalar field of a volume. The model type follows the input:
 
-import math
+  structured  a regular grid (.vtk structured points): trained on jittered lattices over the
+              grid with continuous ground truth, rendered by the tile rasterizer
+  interior    a volume mesh (.vtu): trained on points sampled inside the mesh, rendered at
+              them through a BVH
+  surface     --encode_surface: a mesh's interior and its boundary, points just outside the
+              mesh rendering empty
+
+--kind overrides the choice (for example a .vtk grid trained as a mesh). Every type shares the
+model, the schedule, the EMA and densification; the defaults that differ by type are in
+KIND_DEFAULTS and RULES.
+"""
+
 import os
 import sys
 import time
 import uuid
-from argparse import ArgumentParser
+from argparse import ArgumentParser, RawDescriptionHelpFormatter
 
-import numpy as np
-import pyvista as pv
 import torch
 from tqdm import tqdm
 
-from gaussian_renderer import (
-    build_bvh,
-    build_bvh_cached,
-    INTERIOR_RULE,
-    SURFACE_RULE,
-    init_rasterizer,
-    margin_fp,
-    margin_set_exterior,
-    morton3d_unit,
-    render,
-    sample_bvh_prim_ids,
-)
-from gvcommon import densify, model_files
-from gvcommon.arguments import ModelParams, OptimizationParams
-from gvcommon.general_utils import build_scaling_rotation, safe_state
+from arguments import ModelParams, OptimizationParams
+from gaussian_renderer import RULES, init_rasterizer, margin_fp
 from gvraster.ops import volume_loss
-from sampling import sample_exterior_points, sample_mesh_points
-from scene import GaussianModel, read_mesh
+from scene import GaussianModel, densify, model_files, read_mesh, read_structured
+from scene.samples import GridSamples, MeshSamples
+from utils.general_utils import build_scaling_rotation, safe_state
 
-# Fixed seed for the sample points, so the cached ground truth matches every run's points.
-SAMPLE_SEED = 20260903
-BATCH_SIZE = 128**3
-NUM_BATCHES = 100
+KINDS = ("structured", "interior", "surface")
 # The rasterizer's per-Gaussian support threshold.
 SUPPORT_T = 1e-4
-# Gaussians under this weight count as dead when sizing a densification event.
-DEAD_WEIGHT = 0.005
 
-# Per-mode defaults for flags left unset.
-# Interior: the log barrier keeps every sample above the render threshold (0.002) with margin.
-INTERIOR_DEFAULTS = dict(fn_mode="log", fn_reg=0.0001, fp_reg=0.0)
-# Surface: FN/FP hinges around the render threshold, scaled by the data loss (MAE), and L2
-# values with the interior's light log barrier (fn_thresh).
-SURFACE_DEFAULTS = dict(
-    fn_mode="abs",
-    fn_reg=1200.0,
-    fp_reg=12.0,
-    hinge_rel_pow=1.0,
-    fp_mode="hinge",
-    fp_margin=0.2,
-    fn_margin=0.05,
-    fnfp_norm="all",
-    interior_skin=0.1,
+# Per-type defaults for flags left unset.
+KIND_DEFAULTS = {
+    # Seeds: 1e-5 of the grid nodes; L2 on every lattice cell plus the log FN barrier.
+    "structured": dict(
+        fraction=0.00001,
+        init_share_max=0.25,
+        fn_mode="log",
+        fn_reg=0.0001,
+        fp_reg=0.0,
+        weight_reg=0.01,
+        densify_grad_threshold=0.0002,
+    ),
+    # Seeds: every mesh node; the log barrier keeps samples above the render threshold.
+    "interior": dict(
+        fraction=1.0, init_share_max=0.5, fn_mode="log", fn_reg=0.0001, fp_reg=0.0
+    ),
+    # FN/FP hinges around the render threshold, scaled by the data loss (MAE), and L2 values
+    # with the interior's light log barrier (fn_thresh).
+    "surface": dict(
+        fraction=1.0,
+        init_share_max=0.5,
+        fn_mode="abs",
+        fn_reg=1200.0,
+        fp_reg=12.0,
+        hinge_rel_pow=1.0,
+        fp_mode="hinge",
+        fp_margin=0.2,
+        fn_margin=0.05,
+        fnfp_norm="all",
+        interior_skin=0.1,
+    ),
+}
+# Flags that only mean something for grids or for meshes.
+GRID_ONLY = ("is_scaled", "jitter_gt", "probe_gt")
+MESH_ONLY = (
+    "precomputed_samples",
+    "sample_cache_dir",
+    "sample_frac",
+    "samples_per_node",
+    "sample_mode",
 )
-
-
-def sample_cache_path(cache_dir, source_path, encode_surface, interior_skin):
-    """Path of the cached ground truth, or None if caching is disabled."""
-    if not cache_dir:
-        return None
-    stem = os.path.splitext(os.path.basename(source_path))[0]
-    tag = f"{stem}_c128_b{NUM_BATCHES}_s{int(bool(encode_surface))}"
-    if encode_surface and interior_skin > 0:
-        tag += f"_skin{interior_skin:g}"
-    return os.path.join(cache_dir, tag + "_gt.npy")
-
-
-def load_samples(args, mesh):
-    """(gt, samples) as (B, S) and (B, S, 3) arrays; gt is -1 outside the mesh."""
-    if args.precomputed_samples:
-        # <prefix>_gt.npy and <prefix>_samples.npy, for meshes too large to triangulate.
-        big_gt = np.load(args.precomputed_samples + "_gt.npy")
-        big_samples = np.load(args.precomputed_samples + "_samples.npy")
-        assert big_samples.shape[:2] == big_gt.shape
-        print(
-            f"Loaded precomputed samples {big_gt.shape} from {args.precomputed_samples}"
-        )
-        return big_gt, big_samples
-
-    # Drawing the points takes ~1 s; probing them ~9 CPU-minutes, so only the GT is cached.
-    size = BATCH_SIZE
-    cache_g = sample_cache_path(
-        args.sample_cache_dir, args.source_path, args.encode_surface, args.interior_skin
-    )
-    torch.manual_seed(SAMPLE_SEED)
-    if args.encode_surface:
-        # 20% just outside the surface and --interior_skin just inside it, so both sides of
-        # the boundary are sampled at the same density per unit area.
-        size2 = int(math.floor(size * 0.2))
-        size3 = int(math.floor(size * args.interior_skin))
-        size1 = size - size2 - size3
-        parts = [
-            sample_mesh_points(mesh, NUM_BATCHES, size1).cpu().numpy(),
-            sample_exterior_points(mesh, NUM_BATCHES, size2).cpu().numpy(),
-        ]
-        if size3 > 0:
-            parts.append(
-                sample_exterior_points(mesh, NUM_BATCHES, size3, inward=True)
-                .cpu()
-                .numpy()
-            )
-        big_samples = np.concatenate(parts, axis=1)
-    else:
-        big_samples = sample_mesh_points(mesh, NUM_BATCHES, size).cpu().numpy()
-
-    if cache_g is not None and os.path.exists(cache_g):
-        print(f"Loaded cached ground truth from {cache_g}")
-        return np.load(cache_g), big_samples.reshape(NUM_BATCHES, size, 3)
-
-    big_samples = big_samples.reshape(NUM_BATCHES * size, 3)
-    probed = pv.PolyData(big_samples).sample(mesh)
-    big_gt = probed[mesh.array_names[0]]
-    big_gt[~probed["vtkValidPointMask"].astype(bool)] = -1
-    big_gt = big_gt.reshape(NUM_BATCHES, size)
-    big_samples = big_samples.reshape(NUM_BATCHES, size, 3)
-    if cache_g is not None:
-        os.makedirs(os.path.dirname(cache_g), exist_ok=True)
-        tmp = cache_g + f".tmp{os.getpid()}.npy"
-        np.save(tmp, np.ascontiguousarray(big_gt, dtype=np.float32))
-        os.replace(tmp, cache_g)
-        print(f"Wrote ground-truth cache to {cache_g}")
-    return big_gt, big_samples
-
-
-def drop_exterior_samples(big_gt, big_samples):
-    """Replace -1 targets with other in-mesh samples of the same batch (interior models)."""
-    bad = big_gt == -1
-    if not bad.any():
-        return big_gt, big_samples
-    rng = np.random.default_rng(SAMPLE_SEED)
-    big_gt = np.array(big_gt, copy=True)
-    big_samples = np.array(big_samples, copy=True)
-    for b in range(big_gt.shape[0]):
-        idx = np.flatnonzero(bad[b])
-        if idx.size == 0:
-            continue
-        good = np.flatnonzero(~bad[b])
-        repl = rng.choice(good, size=idx.size, replace=False)
-        big_gt[b, idx] = big_gt[b, repl]
-        big_samples[b, idx] = big_samples[b, repl]
-    print(f"replaced {int(bad.sum())} out-of-mesh samples with in-mesh ones")
-    return big_gt, big_samples
 
 
 def training(dataset, opt, args):
+    kind = args.kind
+    surface = kind == "surface"
     os.makedirs(dataset.model_path, exist_ok=True)
     with open(os.path.join(dataset.model_path, "cfg_args"), "w") as f:
         f.write(str(args))
     n_final = args.cap_max
-    surface = args.encode_surface
 
     gaussians = GaussianModel()
     caps = [c for c in (args.init_share_max * n_final, args.init_max) if c > 0]
-    mesh, pcd = read_mesh(
-        dataset.source_path, args.fraction, min(caps) if caps else None
-    )
+    max_init = min(caps) if caps else None
+    if kind == "structured":
+        mesh, pcd = read_structured(
+            dataset.source_path, args.fraction, args.is_scaled, max_init
+        )
+    else:
+        mesh, pcd = read_mesh(dataset.source_path, args.fraction, max_init)
     gaussians.create_from_pcd(pcd, mesh)
-    # The cap grows with the Gaussian spacing (V / N)^(1/3), V the mesh's bounding box.
+    # The cap grows with the Gaussian spacing (V / N)^(1/3), V the volume's bounding box.
     args.max_scale = model_files.size_cap(
         args.max_scale, args.max_scale_k, gaussians.mins, gaussians.maxes, n_final
     )
@@ -183,66 +116,16 @@ def training(dataset, opt, args):
         )
         print(f"densify_events {densify_events} ({n0:,} -> {n_final:,} Gaussians)")
 
-    big_gt, big_samples = load_samples(args, mesh)
-    if not surface:
-        big_gt, big_samples = drop_exterior_samples(big_gt, big_samples)
-    num_batches, size = big_gt.shape
-    big_gt_cuda = torch.tensor(big_gt, dtype=torch.float, device="cuda")
-    big_samples_cuda = torch.tensor(big_samples, dtype=torch.float, device="cuda")
-
-    # Morton-sort each batch: BVH builds and subsampling rely on the locality.
-    morton = morton3d_unit(
-        torch.clamp(big_samples_cuda, 0.0, 1.0).reshape(-1, 3)
-    ).reshape(num_batches, size)
-    order = morton.argsort(dim=1)
-    big_samples_cuda = big_samples_cuda.gather(1, order.unsqueeze(-1).expand(-1, -1, 3))
-    big_gt_cuda = big_gt_cuda.gather(1, order)
-
     # Every model trains with the soft render (empty only where aw == 0) and is deployed under
     # its own rule, which is stored with it.
-    rule = SURFACE_RULE if surface else INTERIOR_RULE
-    occ_t = rule[0] if args.occ_t is None else args.occ_t
-    floor = rule[1] if args.denom_floor is None else args.denom_floor
+    occ_t = RULES[kind][0] if args.occ_t is None else args.occ_t
+    floor = RULES[kind][1] if args.denom_floor is None else args.denom_floor
     model_files.write_render_rule(dataset.model_path, occ_t, floor)
     init_rasterizer(0.0, floor)
-    if args.samples_per_node > 0:
-        # About this many samples per mesh node per iteration, at most the whole batch.
-        args.sample_frac = min(1.0, args.samples_per_node * int(mesh.n_points) / size)
-        print(
-            f"samples_per_node {args.samples_per_node:g}: sample_frac {args.sample_frac:.4f}"
-        )
-    full_batch = not (0.0 < args.sample_frac < 1.0)
-
-    # Permute each batch into its sample BVH's leaf order, so render loads are near-sequential;
-    # full-batch runs also keep each batch's BVH.
-    for b in range(num_batches):
-        build_bvh(big_samples_cuda[b])
-        perm = sample_bvh_prim_ids().long()
-        big_samples_cuda[b] = big_samples_cuda[b][perm]
-        big_gt_cuda[b] = big_gt_cuda[b][perm]
-        if full_batch:
-            build_bvh_cached(big_samples_cuda[b], b)
-    torch.cuda.synchronize()
-    build_bvh(big_samples_cuda[0])
-
-    margin_n_ext = None
-    if surface and args.fp_mode == "margin":
-        margin_n_ext = []
-        for b in range(num_batches):
-            ext = big_samples_cuda[b][big_gt_cuda[b] == -1]
-            margin_set_exterior(ext, b)
-            margin_n_ext.append(max(1, int(ext.shape[0])))
-
-    sub_k, sub_stride, sub_base = 0, 1, None
-    if not full_batch:
-        if args.sample_mode == "stratified":
-            # One draw from each run of sub_stride: ascending by construction, no gaps.
-            sub_stride = max(2, int(round(1.0 / args.sample_frac)))
-            sub_k = size // sub_stride
-            sub_base = torch.arange(sub_k, device="cuda") * sub_stride
-        else:
-            sub_k = max(1, int(round(size * args.sample_frac)))
-        print(f"rendering {sub_k} of {size} samples per iteration ({args.sample_mode})")
+    if kind == "structured":
+        data = GridSamples(args, gaussians)
+    else:
+        data = MeshSamples(args, mesh, surface)
 
     if args.fn_mode == "log":
         fn_tau = args.fn_thresh
@@ -250,6 +133,9 @@ def training(dataset, opt, args):
         fn_tau = ((1.0 + args.fn_margin) if surface else 1.1) * occ_t
     fp_t = (1.0 - args.fp_margin) * occ_t if args.fp_mode == "hinge" else SUPPORT_T
     fp_on = surface and args.fp_mode != "margin"
+    # Grid models fit every lattice cell, an empty one's -1 included; mesh models skip samples
+    # without ground truth or coverage.
+    mask_data = kind != "structured"
 
     torch.cuda.synchronize()
     train_t0 = time.perf_counter()
@@ -258,26 +144,9 @@ def training(dataset, opt, args):
     densifies = 0
     progress_bar = tqdm(range(opt.iterations), desc="Training progress")
     for iteration in range(1, opt.iterations + 1):
-        jit_idx = np.random.randint(0, num_batches)
-        gt = big_gt_cuda[jit_idx]
-        current_samples = big_samples_cuda[jit_idx]
-        if sub_k > 0:
-            # Indices stay ascending, as the BVH build expects.
-            if sub_base is not None:
-                sub_idx = sub_base + torch.randint(
-                    0, sub_stride, (sub_k,), device="cuda"
-                )
-            else:
-                sub_idx = torch.randint(0, size, (sub_k,), device="cuda").sort().values
-            gt = gt[sub_idx]
-            current_samples = current_samples[sub_idx]
-            build_bvh(current_samples)
-        else:
-            build_bvh_cached(current_samples, jit_idx)
+        gt = data.next(gaussians)
         xyz_lr = gaussians.update_learning_rate(iteration)
-
-        render_pkg = render(gaussians)
-        cells, weights = render_pkg["cells"], render_pkg["weights"]
+        cells, weights = data.render(gaussians)
 
         # --hinge_rel_pow scales the hinges by the data loss; --hinge_freeze fixes that scale
         # at the mean data loss of the 50 iterations before it.
@@ -301,6 +170,7 @@ def training(dataset, opt, args):
             fp_mode=args.fp_mode if fp_on else "lin",
             norm_all=args.fnfp_norm == "all",
             rel_pow=hw_rel,
+            mask_data=mask_data,
         )
         # The hinges' data-loss scale (L1 on surface models); l_v may become the L2 term below.
         l_v_hinge = l_v
@@ -329,11 +199,11 @@ def training(dataset, opt, args):
                 print(
                     f"hinge weights frozen at iteration {iteration}: scale {hinge_frozen:.3e}"
                 )
-        if margin_n_ext is not None:
+        if surface and data.margin_n_ext is not None:
             false_positive = (
                 args.fp_reg
-                * margin_fp(gaussians, jit_idx, fp_t)
-                / margin_n_ext[jit_idx]
+                * margin_fp(gaussians, data.batch, fp_t)
+                / data.margin_n_ext[data.batch]
             )
             loss = loss + false_positive
         if args.use_mcmc:
@@ -377,42 +247,43 @@ def training(dataset, opt, args):
                 and iteration % opt.densification_interval == 0
                 and iteration not in args.save_iterations
             ):
-                budget = densify.budget(gaussians, n_final, DEAD_WEIGHT)
+                budget = densify.budget(gaussians, n_final, args.min_weight)
                 remaining = max(1, densify_events - densifies)
                 if args.use_mcmc:
                     gaussians.relocate_gs(
-                        (gaussians.get_weight < DEAD_WEIGHT).squeeze(-1)
+                        (gaussians.get_weight < args.min_weight).squeeze(-1)
                     )
                     gaussians.add_new_gs(cap_max=args.cap_max)
                 elif args.densify_3dgs:
-                    # Clone/split by position-gradient magnitude, threshold 0: 3DGS's image-space
-                    # threshold never fires here.
+                    # Clone/split by position-gradient magnitude (mesh models' threshold 0:
+                    # 3DGS's image-space threshold never fires there), then prune the dead.
                     k3 = max(0, densify.share(budget, remaining))
                     g = gaussians._xyz.grad
                     if k3 > 0 and g is not None:
                         n_cl = gaussians.densify_and_clone(
-                            g, 0.0, 1.0, max_new_points=k3
+                            g, opt.densify_grad_threshold, 1.0, max_new_points=k3
                         )
                         left = max(0, k3 - int(n_cl or 0))
                         if left > 0:
                             # Cloning replaced _xyz, so reuse the gradient captured before it.
                             gaussians.densify_and_split(
-                                g, 0.0, 1.0, max_new_points=left
+                                g, opt.densify_grad_threshold, 1.0, max_new_points=left
                             )
-                        densifies += 1
-                        gaussians.prune_points(
-                            (gaussians.get_weight < DEAD_WEIGHT).squeeze(-1)
-                        )
+                    gaussians.prune_points(
+                        (gaussians.get_weight < args.min_weight).squeeze(-1)
+                    )
                 else:
+                    # New Gaussians at samples drawn ~ error^alpha among those with ground
+                    # truth, taking dead Gaussians' rows.
                     mask = gt.ravel() != -1
                     diff = torch.abs(cells.ravel()[mask] - gt.ravel()[mask])
                     k = max(0, min(densify.share(budget, remaining), diff.numel()))
                     if k > 0:
                         pick = densify.pick(diff, k, args.densify_alpha)
-                        loss_idx = torch.nonzero(mask, as_tuple=False).squeeze(1)[pick]
+                        idx = torch.nonzero(mask, as_tuple=False).squeeze(1)[pick]
                         gaussians.densify_in_place(
-                            current_samples[loss_idx],
-                            gt[loss_idx].reshape(-1, 1),
+                            data.positions(idx),
+                            gt.ravel()[idx].reshape(-1, 1),
                             args.min_weight,
                         )
                 densifies += 1
@@ -442,113 +313,198 @@ def training(dataset, opt, args):
     )
 
 
+def vtk_node_count(path):
+    """Node count of a legacy structured-points .vtk, from its text header."""
+    with open(path, "rb") as f:
+        for _ in range(32):
+            tok = f.readline().decode("ascii", "replace").split()
+            if tok and tok[0].upper() == "DIMENSIONS":
+                return int(tok[1]) * int(tok[2]) * int(tok[3])
+    raise SystemExit(f"{path}: no DIMENSIONS line in the header; pass --cap_max")
+
+
 def parse_args(argv):
-    parser = ArgumentParser(description=__doc__)
+    parser = ArgumentParser(
+        description=__doc__, formatter_class=RawDescriptionHelpFormatter
+    )
     lp = ModelParams(parser)
-    # This pipeline's densification window and MCMC weight term.
-    op = OptimizationParams(parser, densify_until_iter=16_000, weight_reg=0.00001)
-    parser.add_argument(
-        "--fraction", type=float, default=1.0, help="share of mesh nodes seeded"
+    op = OptimizationParams(parser)
+
+    g = parser.add_argument_group("Model type")
+    g.add_argument(
+        "--kind",
+        choices=KINDS,
+        help="default: structured for a .vtk grid, interior for a .vtu mesh, "
+        "surface with --encode_surface",
     )
-    parser.add_argument(
-        "--init_share_max", type=float, default=0.5, help="seed cap, x final count"
+    g.add_argument("--encode_surface", action="store_true", help="--kind surface")
+    g.add_argument(
+        "--ratio",
+        type=float,
+        default=0.0,
+        help="grids: train to nodes / (12 * ratio) Gaussians (sets --cap_max)",
     )
-    parser.add_argument("--init_max", type=int, default=20000, help="absolute seed cap")
-    parser.add_argument("--min_weight", type=float, default=0.005)
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[])
-    parser.add_argument("--quiet", action="store_true")
-    parser.add_argument(
+
+    g = parser.add_argument_group("Seeds, densification and EMA")
+    g.add_argument(
+        "--fraction",
+        type=float,
+        help="share of nodes seeded (default 1 for meshes, 1e-5 for grids)",
+    )
+    g.add_argument(
+        "--init_share_max",
+        type=float,
+        help="seed cap, x final count (default 0.5 meshes, 0.25 grids; 0 = none)",
+    )
+    g.add_argument(
+        "--init_max", type=int, default=20000, help="absolute seed cap; 0 = none"
+    )
+    g.add_argument(
+        "--min_weight", type=float, default=0.005, help="Gaussians below are dead"
+    )
+    g.add_argument(
+        "--use_mcmc", action="store_true", help="MCMC relocate/add densification"
+    )
+    g.add_argument("--densify_3dgs", action="store_true", help="3DGS clone/split")
+    g.add_argument(
+        "--densify_alpha", type=float, default=2.5, help="<= 0: top-k by error"
+    )
+    g.add_argument("--densify_growth", type=float, default=1.5)
+    g.add_argument("--ema", type=float, default=0.995, help="0 ships the last iterate")
+    g.add_argument("--ema_from", type=int, default=1000, help="-1: last 100 iterations")
+    g.add_argument("--max_scale", type=float, default=0.02)
+    g.add_argument(
+        "--max_scale_k",
+        type=float,
+        default=1.25,
+        help="if > 0, max_scale = max(--max_scale, k (V / N)^(1/3)), V the bounding box",
+    )
+
+    g = parser.add_argument_group("Loss and render rule")
+    g.add_argument("--fn_mode", choices=["abs", "rel", "log"])
+    g.add_argument(
+        "--fn_thresh",
+        type=float,
+        default=0.0025,
+        help="log barrier threshold: accumulated weight below which a sample is pushed up",
+    )
+    g.add_argument("--fn_reg", type=float)
+    g.add_argument(
+        "--occ_t",
+        type=float,
+        help="render rule: empty where aw <= occ_t (default 0.002; surface 0.01)",
+    )
+    g.add_argument(
+        "--denom_floor",
+        type=float,
+        help="render rule: S / max(aw, floor) (default 0.01)",
+    )
+
+    g = parser.add_argument_group("Grids (structured)")
+    g.add_argument(
+        "--is_scaled",
+        action="store_true",
+        help="the volume is already in the unit cube with values in [0, 1]",
+    )
+    g.add_argument(
+        "--jitter_gt",
+        type=int,
+        default=400,
+        help="train on this many precomputed jittered lattices with trilinear GT; "
+        "0 = raw node values on a strided subgrid",
+    )
+    g.add_argument(
+        "--probe_gt",
+        action="store_true",
+        help="GT probed on the lattice at 100 fixed jitters",
+    )
+
+    g = parser.add_argument_group("Meshes (interior and surface)")
+    g.add_argument(
         "--precomputed_samples",
         default="",
         help="prefix of <prefix>_gt.npy / _samples.npy",
     )
-    parser.add_argument(
+    g.add_argument(
         "--sample_cache_dir",
         default=os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "sample_cache"
         ),
         help="ground-truth cache; '' disables",
     )
-    parser.add_argument("--encode_surface", action="store_true")
-    parser.add_argument(
-        "--interior_skin", type=float, help="surface: share sampled just inside"
-    )
-    parser.add_argument(
+    g.add_argument(
         "--sample_frac",
         type=float,
         default=1.0,
         help="share of each batch rendered per step (overrides --samples_per_node)",
     )
-    parser.add_argument(
+    g.add_argument(
         "--samples_per_node",
         type=float,
         default=0.25,
         help="render about this many samples per mesh node per step",
     )
-    parser.add_argument(
+    g.add_argument(
         "--sample_mode", default="stratified", choices=["stratified", "random"]
     )
-    parser.add_argument("--fn_mode", choices=["abs", "rel", "log"])
-    parser.add_argument(
-        "--fn_thresh",
-        type=float,
-        default=0.0025,
-        help="log barrier threshold (both modes; the structured pipeline's too)",
+
+    g = parser.add_argument_group("Surface models")
+    g.add_argument(
+        "--interior_skin", type=float, help="share sampled just inside the surface"
     )
-    parser.add_argument(
-        "--occ_t",
-        type=float,
-        help="render rule: empty where aw <= occ_t (default 0.002 interior, 0.01 surface)",
-    )
-    parser.add_argument(
-        "--denom_floor",
-        type=float,
-        help="render rule: S / max(aw, floor) (default 0.01)",
-    )
-    parser.add_argument("--fn_reg", type=float)
-    parser.add_argument("--fn_margin", type=float, default=0.05)
-    parser.add_argument("--fp_reg", type=float)
-    parser.add_argument(
+    g.add_argument("--fn_margin", type=float, default=0.05)
+    g.add_argument("--fp_reg", type=float)
+    g.add_argument(
         "--fp_mode", default="lin", choices=["lin", "log", "margin", "hinge"]
     )
-    parser.add_argument("--fp_margin", type=float, default=0.05)
-    parser.add_argument("--fnfp_norm", default="viol", choices=["viol", "all"])
-    parser.add_argument("--hinge_rel_pow", type=float, default=0.0)
-    parser.add_argument("--hinge_freeze", type=int, default=0)
-    parser.add_argument(
-        "--use_mcmc", action="store_true", help="MCMC relocate/add densification"
+    g.add_argument("--fp_margin", type=float, default=0.05)
+    g.add_argument("--fnfp_norm", default="viol", choices=["viol", "all"])
+    g.add_argument("--hinge_rel_pow", type=float, default=0.0)
+    g.add_argument("--hinge_freeze", type=int, default=0)
+
+    g = parser.add_argument_group("Run")
+    g.add_argument("--save_iterations", nargs="+", type=int, default=[])
+    g.add_argument("--quiet", action="store_true")
+    g.add_argument(
+        "--seed",
+        type=int,
+        default=int(os.environ.get("SEED", "0")),
+        help="RNG seed (default $SEED, else 0)",
     )
-    parser.add_argument("--densify_3dgs", action="store_true", help="3DGS clone/split")
-    parser.add_argument(
-        "--densify_alpha", type=float, default=2.5, help="<= 0: top-k by error"
-    )
-    parser.add_argument("--densify_growth", type=float, default=1.5)
-    parser.add_argument(
-        "--ema", type=float, default=0.995, help="0 ships the last iterate"
-    )
-    parser.add_argument(
-        "--ema_from", type=int, default=1000, help="-1: last 100 iterations"
-    )
-    parser.add_argument("--max_scale", type=float, default=0.02)
-    parser.add_argument("--max_scale_k", type=float, default=1.25)
     args = parser.parse_args(argv)
 
     given = {a.lstrip("-").split("=")[0] for a in argv if a.startswith("--")}
-    defaults = SURFACE_DEFAULTS if args.encode_surface else INTERIOR_DEFAULTS
-    for k, v in defaults.items():
+    src = args.source_path.lower()
+    if args.kind is None:
+        if args.encode_surface:
+            args.kind = "surface"
+        else:
+            args.kind = "structured" if src.endswith(".vtk") else "interior"
+    elif args.encode_surface and args.kind != "surface":
+        parser.error("--encode_surface trains a surface model")
+    args.encode_surface = args.kind == "surface"
+    wrong = GRID_ONLY if args.kind != "structured" else MESH_ONLY
+    bad = sorted(f"--{k}" for k in wrong if k in given)
+    if bad:
+        parser.error(f"{', '.join(bad)} do(es) not apply to {args.kind} models")
+    for k, v in KIND_DEFAULTS[args.kind].items():
         if k not in given:
             setattr(args, k, v)
     if "sample_frac" in given and "samples_per_node" not in given:
         args.samples_per_node = 0.0
     if args.interior_skin is None:
         args.interior_skin = 0.0
-    if (args.use_mcmc or args.densify_3dgs) and args.ema > 0:
-        print(
-            "--use_mcmc/--densify_3dgs do not keep the EMA rows in step; using --ema 0"
-        )
-        args.ema = 0.0
     if args.ema_from < 0:
         args.ema_from = max(1, args.iterations - 100)
+    if args.ratio > 0:
+        if not src.endswith(".vtk"):
+            parser.error("--ratio needs a .vtk grid; give meshes --cap_max")
+        args.cap_max = vtk_node_count(args.source_path) // int(round(12 * args.ratio))
+        print(f"ratio {args.ratio:g}: cap_max {args.cap_max} Gaussians")
+    elif args.cap_max <= 0:
+        parser.error(
+            "give --cap_max (the final Gaussian count) or, for a grid, --ratio"
+        )
     args.save_iterations.append(args.iterations)
     if not args.model_path:
         args.model_path = os.path.join("./output/", str(uuid.uuid4())[:10])
@@ -558,6 +514,6 @@ def parse_args(argv):
 if __name__ == "__main__":
     args, lp, op = parse_args(sys.argv[1:])
     print("Optimizing " + args.model_path)
-    safe_state(args.quiet)
+    safe_state(args.quiet, seed=args.seed)
     training(lp.extract(args), op.extract(args), args)
     print("\nTraining complete.")
