@@ -324,8 +324,11 @@ def vtk_node_count(path):
 
 
 def parse_args(argv):
+    # No abbreviations: the per-type defaults below key on the full flag names given.
     parser = ArgumentParser(
-        description=__doc__, formatter_class=RawDescriptionHelpFormatter
+        description=__doc__,
+        formatter_class=RawDescriptionHelpFormatter,
+        allow_abbrev=False,
     )
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
@@ -482,6 +485,8 @@ def parse_args(argv):
             args.kind = "structured" if src.endswith(".vtk") else "interior"
     elif args.encode_surface and args.kind != "surface":
         parser.error("--encode_surface trains a surface model")
+    if args.kind == "structured" and not src.endswith(".vtk"):
+        parser.error("structured models need a .vtk grid")
     args.encode_surface = args.kind == "surface"
     wrong = GRID_ONLY if args.kind != "structured" else MESH_ONLY
     bad = sorted(f"--{k}" for k in wrong if k in given)
