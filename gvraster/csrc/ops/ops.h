@@ -1,5 +1,4 @@
-// Host entry points of the kernels both extensions compile from common/cuda (multi_adam.cuh,
-// volume_loss.cuh); each extension's bindings include this.
+// Host entry points of gvraster._ops (multi_adam.cu, volume_loss.cu).
 #pragma once
 #include <torch/extension.h>
 #include <vector>

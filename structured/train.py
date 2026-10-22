@@ -7,13 +7,13 @@ from argparse import ArgumentParser, Namespace
 import numpy as np
 import pyvista as pv
 import torch
-from diff_gaussian_rasterization.fused import fused_volume_loss
 from tqdm import tqdm
 
 from gaussian_renderer import render
 from gvcommon import densify, model_files
 from gvcommon.arguments import ModelParams, OptimizationParams
 from gvcommon.general_utils import build_scaling_rotation, safe_state
+from gvraster.ops import volume_loss
 from scene import GaussianModel, Scene
 
 CELL_COUNT = 128
@@ -276,7 +276,18 @@ def training(dataset, opt, args):
         xyz_lr = gaussians.update_learning_rate(iteration)
         render_pkg = render(gaussians, jitter, CELL_COUNT)
         cells, weights = render_pkg["cells"], render_pkg["weights"]
-        out = fused_volume_loss(cells, gt, weights, opt.fn_reg, args.fn_thresh)
+        # L2 over every cell, an empty one's -1 included (mask_data=False), plus the log FN
+        # barrier at tau.
+        out = volume_loss(
+            cells,
+            gt,
+            weights,
+            l1=False,
+            fn_mode="log",
+            fn_thresh=args.fn_thresh,
+            fn_reg=opt.fn_reg,
+            mask_data=False,
+        )
         loss, l_v, false_negative = out[0], out[1], out[2]
         if args.use_mcmc:
             loss = loss + opt.weight_reg * torch.abs(gaussians.get_weight).mean()

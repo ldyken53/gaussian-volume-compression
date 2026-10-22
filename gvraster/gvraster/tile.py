@@ -1,9 +1,11 @@
+"""Tile backend: Gaussians rendered onto a jittered cell lattice (regular grids)."""
+
 from typing import NamedTuple
 
 import torch
 import torch.nn as nn
 
-from . import _C
+from . import _tile as _C
 
 
 class GaussianRasterizationSettings(NamedTuple):

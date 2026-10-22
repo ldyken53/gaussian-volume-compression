@@ -3,7 +3,7 @@ This repository contains an implementation of training a mixed Gaussian model fr
 
 This directory is the repository's structured pipeline; `../README.md` maps the layout. Run it
 from here, with this pipeline's extension and the shared `../common` on `PYTHONPATH`
-(`export PYTHONPATH=$PWD/diff-gaussian-rasterization:$PWD/../common`).
+(`export PYTHONPATH=$PWD/../gvraster:$PWD/../common`).
 
 ## Cloning the Repository
 

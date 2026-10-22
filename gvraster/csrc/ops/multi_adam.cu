@@ -3,8 +3,7 @@
 // (no weight decay, amsgrad or maximize):
 //   m = b1 m + (1-b1) g;  v = b2 v + (1-b2) g^2;
 //   p -= (lr / (1-b1^t)) * m / (sqrt(v) / sqrt(1-b2^t) + eps)
-// Both extensions compile this through their own multi_adam.cu.
-#pragma once
+#include "ops.h"
 #include <c10/cuda/CUDAException.h>
 #include <cmath>
 #include <cuda_runtime.h>

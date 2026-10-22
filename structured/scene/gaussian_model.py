@@ -1,12 +1,12 @@
-from diff_gaussian_rasterization import _C
 from gvcommon.gaussian_model import GaussianModel as _GaussianModel
+from gvraster import ops
 
 
 class GaussianModel(_GaussianModel):
-    """The shared Gaussian model (gvcommon), stepped by this pipeline's extension, with what the
+    """The shared Gaussian model (gvcommon), stepped by gvraster's Adam kernel, with what the
     tile renderer reads from it: the volume bounds and the render rule."""
 
-    multi_adam_ = staticmethod(_C.multi_adam_)
+    multi_adam_ = staticmethod(ops.multi_adam_)
 
     def __init__(self):
         super().__init__()

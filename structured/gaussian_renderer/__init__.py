@@ -1,8 +1,4 @@
-from diff_gaussian_rasterization import (
-    GaussianRasterizationSettings,
-    GaussianRasterizer,
-)
-
+from gvraster.tile import GaussianRasterizationSettings, GaussianRasterizer
 from scene.gaussian_model import GaussianModel
 
 

@@ -1,9 +1,9 @@
 import torch
 
-from bvh_diff_gaussian_rasterization import _C, rasterize_gaussians
-from bvh_diff_gaussian_rasterization.fused import fused_activations
 from gvcommon.general_utils import build_rotation
 from gvcommon.model_files import read_render_rule
+from gvraster import bvh as _C
+from gvraster.bvh import fused_activations, rasterize_gaussians
 from scene.gaussian_model import GaussianModel
 
 # Render rule (occ_t, floor): a sample is empty where aw <= occ_t, else S / max(aw, floor).

@@ -1,15 +1,18 @@
-// Fused per-Gaussian activations, forward and backward, and the volume loss (shared with the
-// structured extension: common/cuda/volume_loss.cuh). Both match the torch expressions they
+// Fused per-Gaussian activations, forward and backward. Match the torch expressions they
 // replace, including torch's gradient conventions at the edges (normalize's eps floor blocks
 // the gradient).
 #include <torch/extension.h>
 #include <cuda_runtime.h>
 #include <c10/cuda/CUDAException.h>
 
-#include "volume_loss.cuh"
-
 namespace
 {
+
+void check(const torch::Tensor& t, const char* name)
+{
+	TORCH_CHECK(t.is_cuda() && t.scalar_type() == torch::kFloat32 && t.is_contiguous(), name,
+		" must be a contiguous float32 CUDA tensor");
+}
 
 constexpr float CAP_EPS = 1e-8f;   // _apply_cap: r = ||s|| + 1e-8
 constexpr float NORM_EPS = 1e-12f; // F.normalize default eps

@@ -1,18 +1,18 @@
-// The fused volume loss, forward and backward, which both extensions compile through their own
-// fused_ops.cu. Matches the torch expressions it replaces, including torch's gradient
-// conventions at the edges (clamp_min passes the gradient at equality; abs' is 0 at 0).
+// The fused volume loss, forward and backward. Matches the torch expressions it replaces,
+// including torch's gradient conventions at the edges (clamp_min passes the gradient at
+// equality; abs' is 0 at 0).
 //
 // Loss terms:
 //   data  (c-g)^2 or |c-g| (l1). With mask_data, the mean over cells with g != -1 and c != -1
-//         (the unstructured pipeline); else the mean over every cell, an empty cell's -1
-//         included (the structured pipeline, whose g is never -1)
+//         (mesh models); else the mean over every cell, an empty cell's -1 included (grid
+//         models, whose g is never -1)
 //   FN    on (g != -1) & (w > 0): hinge clamp(tau - w, 0) or log barrier
 //         clamp(log(tau / (w + 0.01 tau)), 0); scaled by fn_reg, or fn_reg * l_v (rel, detached)
 //   FP    (fp_reg > 0) on (g == -1) & (w > 0): w (lin), clamp(log(w / fp_t), 0) (log) or
 //         clamp(w - fp_t, 0) (hinge, mean over its violators)
 // FN and FP are means over their violators, or over all interior / exterior cells (norm_all).
 // rel_pow > 0 scales both by l_v^rel_pow (detached).
-#pragma once
+#include "ops.h"
 #include <c10/cuda/CUDAException.h>
 #include <cuda_runtime.h>
 #include <torch/extension.h>

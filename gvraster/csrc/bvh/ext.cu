@@ -5,7 +5,6 @@
 #include <cuBQL/bvh.h>
 #include "cuBQL/builder/cuda.h"
 #include "rasterize_points.h"
-#include "gv_ops.h"
 
 std::vector<torch::Tensor> fused_act_forward(
 	torch::Tensor rs, torch::Tensor rq, torch::Tensor rv, torch::Tensor rw, double max_scale);
@@ -153,11 +152,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 	m.def("sample_bvh_prim_ids", &SampleBVHPrimIDs);
 	m.def("rasterize_gaussians", &Rasterize);
 	m.def("rasterize_gaussians_backward", &RasterizeBackward);
-	m.def("multi_adam_", &multi_adam_);
 	m.def("fused_act_forward", &fused_act_forward);
 	m.def("fused_act_backward", &fused_act_backward);
-	m.def("fused_loss_forward", &fused_loss_forward);
-	m.def("fused_loss_backward", &fused_loss_backward);
 	m.def("margin_set_exterior", &margin_set_exterior);
 	m.def("margin_fp", &margin_fp);
 }

@@ -13,7 +13,6 @@ import pyvista as pv
 import torch
 from tqdm import tqdm
 
-from bvh_diff_gaussian_rasterization.fused import fused_volume_loss
 from gaussian_renderer import (
     build_bvh,
     build_bvh_cached,
@@ -29,6 +28,7 @@ from gaussian_renderer import (
 from gvcommon import densify, model_files
 from gvcommon.arguments import ModelParams, OptimizationParams
 from gvcommon.general_utils import build_scaling_rotation, safe_state
+from gvraster.ops import volume_loss
 from sampling import sample_exterior_points, sample_mesh_points
 from scene import GaussianModel, read_mesh
 
@@ -288,7 +288,7 @@ def training(dataset, opt, args):
                 args.fp_reg * hinge_frozen,
                 0.0,
             )
-        loss, l_v, false_negative, false_positive = fused_volume_loss(
+        loss, l_v, false_negative, false_positive = volume_loss(
             cells,
             gt,
             weights,
@@ -307,7 +307,7 @@ def training(dataset, opt, args):
         if surface:
             # Surface values are fit with L2 and the interior's light log barrier; the call
             # above only supplies the hinges.
-            lv_out = fused_volume_loss(
+            lv_out = volume_loss(
                 cells,
                 gt,
                 weights,

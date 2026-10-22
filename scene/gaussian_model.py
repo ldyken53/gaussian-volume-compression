@@ -1,8 +1,8 @@
-from bvh_diff_gaussian_rasterization import _C
 from gvcommon.gaussian_model import GaussianModel as _GaussianModel
+from gvraster import ops
 
 
 class GaussianModel(_GaussianModel):
-    """The shared Gaussian model (gvcommon), stepped by this pipeline's extension."""
+    """The shared Gaussian model (gvcommon), stepped by gvraster's Adam kernel."""
 
-    multi_adam_ = staticmethod(_C.multi_adam_)
+    multi_adam_ = staticmethod(ops.multi_adam_)

@@ -4,8 +4,11 @@ Two pipelines fit a set of 3D Gaussians to the scalar field of a volume:
 
 | pipeline | directory | input | rasterizer (Python package) | evaluation |
 |---|---|---|---|---|
-| unstructured | repository root | volume meshes (`.vtu`) | BVH over sample points (`bvh_diff_gaussian_rasterization`) | `eval_final.py` |
-| structured | `structured/` | regular grids (legacy `.vtk` STRUCTURED_POINTS) | tile rasterizer over the grid (`diff_gaussian_rasterization`) | `structured/full_psnr.py` |
+| unstructured | repository root | volume meshes (`.vtu`) | BVH over sample points (`gvraster.bvh`) | `eval_final.py` |
+| structured | `structured/` | regular grids (legacy `.vtk` STRUCTURED_POINTS) | tile rasterizer over the grid (`gvraster.tile`) | `structured/full_psnr.py` |
+
+Both renderers, and the Adam and loss kernels they share (`gvraster.ops`), are one package,
+`gvraster/`, built once.
 
 `common/gvcommon/` holds the code both pipelines share: the Gaussian model (parameters and
 activations, the ply layout, the fused Adam step with its parameter average, densification),
@@ -19,24 +22,22 @@ modules stand in for the other's.
 git clone --recursive <repo>
 conda env create --file environment.yml
 pip install submodules/simple-knn          # both pipelines import the installed simple_knn
-(cd diff-gaussian-rasterization && python setup.py build_ext --inplace)
-(cd structured/diff-gaussian-rasterization && python setup.py build_ext --inplace)
+(cd gvraster && python setup.py build_ext --inplace)
 
 # unstructured, from the repository root
-export PYTHONPATH=$PWD/diff-gaussian-rasterization:$PWD/common
+export PYTHONPATH=$PWD/gvraster:$PWD/common
 python train.py -s mesh.vtu --cap_max 5015 -m output/model [--encode_surface]
 python eval_final.py -s mesh.vtu --models output/model [--surface output/model]
 
 # structured, from structured/
-cd structured && export PYTHONPATH=$PWD/diff-gaussian-rasterization:$PWD/../common
+cd structured && export PYTHONPATH=$PWD/../gvraster:$PWD/../common
 python train.py -s volume.vtk --is_scaled --ratio 1024 -m output/model
 python full_psnr.py -s volume.vtk --is_scaled --continuous 2 -m output/model
 ```
 
 `structured/README.md` describes the structured pipeline. The repository keeps one copy of
 what both used: `submodules/simple-knn` (structured's pinned the same commit; both pipelines
-import the installed `simple_knn`), glm (`diff-gaussian-rasterization/third_party/glm`, which
-the structured extension builds against too), `raw_to_vtk.py`, `.gitignore` and
+import the installed `simple_knn`), glm (`gvraster/third_party/glm`), `raw_to_vtk.py`, `.gitignore` and
 `.clang-format`. `structured/environment.yml` is the structured pipeline's exported
 environment, kept beside the root's shorter one.
 
@@ -52,10 +53,10 @@ also encode its boundary, rendering samples outside the mesh as empty.
 git clone --recursive <repo>
 conda env create --file environment.yml
 pip install submodules/simple-knn
-cd diff-gaussian-rasterization && python setup.py build_ext --inplace
+cd gvraster && python setup.py build_ext --inplace
 ```
 
-Put `diff-gaussian-rasterization` (the in-place build) and `common` on `PYTHONPATH`.
+Put `gvraster` (the in-place build) and `common` on `PYTHONPATH`.
 
 ### Training and evaluation
 
