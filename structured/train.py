@@ -11,8 +11,8 @@ import torch
 from diff_gaussian_rasterization.fused import fused_volume_loss
 from tqdm import tqdm
 
-from arguments import ModelParams, OptimizationParams
 from gaussian_renderer import render
+from gvcommon.arguments import ModelParams, OptimizationParams
 from gvcommon.general_utils import build_scaling_rotation, safe_state
 from scene import GaussianModel, Scene
 
@@ -417,7 +417,16 @@ def vtk_node_count(path):
 if __name__ == "__main__":
     parser = ArgumentParser(description="Training script parameters")
     lp = ModelParams(parser)
-    op = OptimizationParams(parser)
+    # This pipeline's own defaults: densification and pruning windows, FN weight, 3DGS
+    # gradient threshold and MCMC weight term.
+    op = OptimizationParams(
+        parser,
+        densify_until_iter=12_000,
+        prune_until_iter=11_000,
+        fn_reg=0.0001,
+        densify_grad_threshold=0.0002,
+        weight_reg=0.01,
+    )
     parser.add_argument(
         "--ratio",
         type=float,

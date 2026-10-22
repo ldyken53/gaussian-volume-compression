@@ -13,7 +13,6 @@ import pyvista as pv
 import torch
 from tqdm import tqdm
 
-from arguments import ModelParams, OptimizationParams
 from bvh_diff_gaussian_rasterization.fused import fused_volume_loss
 from gaussian_renderer import (
     build_bvh,
@@ -27,6 +26,7 @@ from gaussian_renderer import (
     render,
     sample_bvh_prim_ids,
 )
+from gvcommon.arguments import ModelParams, OptimizationParams
 from gvcommon.general_utils import build_scaling_rotation, safe_state
 from sampling import sample_exterior_points, sample_mesh_points
 from scene import GaussianModel, read_mesh
@@ -504,7 +504,8 @@ def training(dataset, opt, args):
 def parse_args(argv):
     parser = ArgumentParser(description=__doc__)
     lp = ModelParams(parser)
-    op = OptimizationParams(parser)
+    # This pipeline's densification window and MCMC weight term.
+    op = OptimizationParams(parser, densify_until_iter=16_000, weight_reg=0.00001)
     parser.add_argument(
         "--fraction", type=float, default=1.0, help="share of mesh nodes seeded"
     )
