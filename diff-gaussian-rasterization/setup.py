@@ -4,6 +4,8 @@ from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 here = os.path.dirname(os.path.abspath(__file__))
+# Kernel sources both pipelines' extensions compile (see multi_adam.cu).
+common = os.path.normpath(os.path.join(here, "..", "common", "cuda"))
 
 setup(
     name="bvh-diff-gaussian-rasterization",
@@ -20,11 +22,16 @@ setup(
                 "margin.cu",
                 "ext.cu",
             ],
-            depends=["cuda_rasterizer/config.h", "cuda_rasterizer/auxiliary.h"],
+            depends=[
+                "cuda_rasterizer/config.h",
+                "cuda_rasterizer/auxiliary.h",
+                os.path.join(common, "multi_adam.cuh"),
+            ],
             extra_compile_args={
                 "nvcc": [
                     "-I" + os.path.join(here, "third_party/glm/"),
                     "-I" + os.path.join(here, "third_party/cuBQL/"),
+                    "-I" + common,
                     "-DNDEBUG",
                 ]
             },
