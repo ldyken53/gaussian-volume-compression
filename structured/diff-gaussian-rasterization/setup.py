@@ -4,6 +4,10 @@ from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 here = os.path.dirname(os.path.abspath(__file__))
+# One glm for the repository: the unstructured extension's submodule.
+glm = os.path.normpath(
+    os.path.join(here, "..", "..", "diff-gaussian-rasterization", "third_party", "glm")
+)
 
 setup(
     name="diff_gaussian_rasterization",
@@ -21,9 +25,7 @@ setup(
                 "ext.cpp",
             ],
             depends=["cuda_rasterizer/config.h", "cuda_rasterizer/auxiliary.h"],
-            extra_compile_args={
-                "nvcc": ["-I" + os.path.join(here, "third_party/glm/")]
-            },
+            extra_compile_args={"nvcc": ["-I" + glm]},
         )
     ],
     cmdclass={"build_ext": BuildExtension},

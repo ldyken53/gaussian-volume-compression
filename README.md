@@ -7,10 +7,13 @@ Two pipelines fit a set of 3D Gaussians to the scalar field of a volume:
 | unstructured | repository root | volume meshes (`.vtu`) | BVH over sample points (`bvh_diff_gaussian_rasterization`) | `eval_final.py` |
 | structured | `structured/` | regular grids (legacy `.vtk` STRUCTURED_POINTS) | tile rasterizer over the grid (`diff_gaussian_rasterization`) | `structured/full_psnr.py` |
 
-Code both pipelines share lives in `common/gvcommon/`. Both pipelines have a `train.py`,
-`scene/`, `gaussian_renderer/`, `utils/` and `arguments/`: run each from its own directory with
-its own extension and `common/` on `PYTHONPATH`. Never put both pipeline roots on `sys.path`,
-or one pipeline's modules stand in for the other's.
+`common/gvcommon/` holds the code both pipelines share: the Gaussian model (parameters and
+activations, the ply layout, the fused Adam step with its parameter average, densification),
+the densification schedule, the parameter groups, the per-model files (`max_scale`,
+`render_rule`) and size cap, and the structured-points reader. Both pipelines have a `train.py`,
+`scene/` and `gaussian_renderer/`: run each from its own directory with its own extension and
+`common/` on `PYTHONPATH`. Never put both pipeline roots on `sys.path`, or one pipeline's
+modules stand in for the other's.
 
 ```shell
 git clone --recursive <repo>
@@ -30,8 +33,12 @@ python train.py -s volume.vtk --is_scaled --ratio 1024 -m output/model
 python full_psnr.py -s volume.vtk --is_scaled --continuous 2 -m output/model
 ```
 
-`structured/README.md` describes the structured pipeline. Its `submodules/simple-knn` is not
-kept: it pinned the same commit as `submodules/simple-knn`, which both pipelines use.
+`structured/README.md` describes the structured pipeline. The repository keeps one copy of
+what both used: `submodules/simple-knn` (structured's pinned the same commit; both pipelines
+import the installed `simple_knn`), glm (`diff-gaussian-rasterization/third_party/glm`, which
+the structured extension builds against too), `raw_to_vtk.py`, `.gitignore` and
+`.clang-format`. `structured/environment.yml` is the structured pipeline's exported
+environment, kept beside the root's shorter one.
 
 ## Unstructured pipeline
 

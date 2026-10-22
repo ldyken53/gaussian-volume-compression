@@ -76,35 +76,6 @@ def main():
     print("Done!")
     mesh = pv.read(vtk_file)
     print(mesh.bounds)
-    # cell_count = 128
-    # xmin, xmax, ymin, ymax, zmin, zmax = mesh.bounds
-    # mins = [xmin, ymin, zmin]
-    # maxes = [xmax, ymax, zmax]
-    # spacing = [
-    #     (maxes[0] - mins[0]) / (cell_count - 1),
-    #     (maxes[1] - mins[1]) / (cell_count - 1),
-    #     (maxes[2] - mins[2]) / (cell_count - 1)
-    # ]
-    # x = np.linspace(mins[0], maxes[0], cell_count)
-    # y = np.linspace(mins[1], maxes[1], cell_count)
-    # z = np.linspace(mins[2], maxes[2], cell_count)
-    # x, y, z = np.meshgrid(x, y, z, indexing='ij')
-    # samples = np.vstack([x.ravel(), y.ravel(), z.ravel()]).T
-    # samples_3d = samples.reshape(cell_count, cell_count, cell_count, 3)
-    # rot = np.rot90(samples_3d, k=1, axes=(2,0))
-    # samples_tf = np.flip(rot, axis=2)
-    # save_cell = samples_tf.reshape(-1, 3)
-    # print("Save cell made")
-    # num_batches = 100
-    # size = cell_count ** 3
-    # big_samples = np.tile(save_cell, (num_batches, 1))
-    # big_gt = gpu_sample(
-    #     mesh.dimensions,
-    #     mesh.origin,
-    #     mesh.spacing,
-    #     mesh.point_data['value'],
-    #     big_samples
-    # )
 
 
 if __name__ == "__main__":
