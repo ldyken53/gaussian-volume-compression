@@ -200,31 +200,33 @@ def probe_gt(gaussians, cell_count):
 
 def training(dataset, opt, args):
     prepare_output(dataset)
-    if args.max_scale_k > 0:
-        # The cap grows with the Gaussian spacing N^(-1/3); --max_scale is the floor.
-        args.max_scale = max(
-            args.max_scale, args.max_scale_k * args.cap_max ** (-1.0 / 3.0)
-        )
-        print(
-            f"max_scale {args.max_scale:.4f} (k={args.max_scale_k}, N={args.cap_max})"
-        )
-    with open(os.path.join(dataset.model_path, "max_scale"), "w") as f:
-        f.write(f"{args.max_scale}\n")
     # Trained with the soft render (empty only where aw == 0), deployed under the stored rule.
     with open(os.path.join(dataset.model_path, "render_rule"), "w") as f:
         f.write(f"{args.occ_t} {args.denom_floor}\n")
     gaussians = GaussianModel()
-    gaussians.max_scale = args.max_scale
     gaussians.occ_t, gaussians.floor = 0.0, args.denom_floor
+    caps = [c for c in (args.init_share_max * args.cap_max, args.init_max) if c > 0]
     scene = Scene(
         dataset,
         gaussians,
         normalized=args.is_scaled,
         fraction=args.fraction,
-        max_init=(
-            (args.init_share_max * args.cap_max) if args.init_share_max > 0 else None
-        ),
+        max_init=min(caps) if caps else None,
     )
+    if args.max_scale_k > 0:
+        # The cap grows with the Gaussian spacing (V / N)^(1/3), V the volume's bounding box (the
+        # unstructured pipeline's rule too); --max_scale is the floor.
+        vol = float(np.prod(np.array(gaussians.maxes) - np.array(gaussians.mins)))
+        args.max_scale = max(
+            args.max_scale, args.max_scale_k * (vol / args.cap_max) ** (1.0 / 3.0)
+        )
+        print(
+            f"max_scale {args.max_scale:.4f} (k={args.max_scale_k}, N={args.cap_max}, "
+            f"V={vol:.3f})"
+        )
+    with open(os.path.join(dataset.model_path, "max_scale"), "w") as f:
+        f.write(f"{args.max_scale}\n")
+    gaussians.max_scale = args.max_scale
     gaussians.training_setup(opt)
 
     # Growth events: ~DENSIFY_GROWTH each, at least 3, done by half-way so the last ones train.
@@ -307,7 +309,7 @@ def training(dataset, opt, args):
             ):
                 if args.use_mcmc:
                     gaussians.relocate_gs(
-                        dead_mask=(gaussians.get_weight <= 0.005).squeeze(-1)
+                        dead_mask=(gaussians.get_weight < 0.005).squeeze(-1)
                     )
                     gaussians.add_new_gs(cap_max=args.cap_max)
                 else:
@@ -315,7 +317,7 @@ def training(dataset, opt, args):
                     budget = int(
                         args.cap_max
                         - gaussians.get_values.shape[0]
-                        + torch.count_nonzero(gaussians.get_weight <= args.min_weight)
+                        + torch.count_nonzero(gaussians.get_weight < args.min_weight)
                     )
                     remaining = max(1, densify_events - densifies)
                     k = min(-(-budget // remaining), budget)
@@ -422,13 +424,21 @@ if __name__ == "__main__":
         default=0.0,
         help="compression ratio: train to nodes / (12 * ratio) Gaussians (sets --cap_max)",
     )
-    parser.add_argument("--fraction", type=float, default=0.000005)
+    parser.add_argument(
+        "--fraction", type=float, default=0.00001, help="share of grid nodes seeded"
+    )
     parser.add_argument("--min_weight", type=float, default=0.005)
     parser.add_argument(
         "--init_share_max",
         type=float,
         default=0.25,
         help="cap the initial Gaussian count at this share of the final count; 0 = no cap",
+    )
+    parser.add_argument(
+        "--init_max",
+        type=int,
+        default=20000,
+        help="absolute initial Gaussian cap (the unstructured pipeline's too); 0 = none",
     )
     parser.add_argument(
         "--fn_thresh",
@@ -438,10 +448,16 @@ if __name__ == "__main__":
     )
     parser.add_argument("--is_scaled", action="store_true")
     parser.add_argument(
-        "--occ_t", type=float, default=0.002, help="render rule: empty where aw <= occ_t"
+        "--occ_t",
+        type=float,
+        default=0.002,
+        help="render rule: empty where aw <= occ_t",
     )
     parser.add_argument(
-        "--denom_floor", type=float, default=0.01, help="render rule: S / max(aw, floor)"
+        "--denom_floor",
+        type=float,
+        default=0.01,
+        help="render rule: S / max(aw, floor)",
     )
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--quiet", action="store_true")
@@ -474,7 +490,7 @@ if __name__ == "__main__":
         "--max_scale_k",
         type=float,
         default=1.25,
-        help="if > 0, max_scale = max(--max_scale, k * cap_max^(-1/3))",
+        help="if > 0, max_scale = max(--max_scale, k * (V / N)^(1/3)), V: bounding box",
     )
     parser.add_argument(
         "--ema",

@@ -14,7 +14,8 @@ from utils.graphics_utils import BasicPointCloud
 # Values are clamped this far inside (0, 1) before inverse_sigmoid: an exact 0 or 1 would map
 # to -inf/+inf, where the sigmoid has no gradient.
 VALUE_EPS = 1e-6
-INIT_WEIGHT = 0.01
+# Weight of the initial Gaussians (the unstructured pipeline's too); densified ones start at 0.01.
+INIT_WEIGHT = 0.1
 
 
 class GaussianModel:
@@ -580,7 +581,7 @@ class GaussianModel:
         """New Gaussians take the rows of pruned ones; only the overflow is appended."""
         d = self._new_gaussians(empty_points, empty_values, new_weight)
         k = empty_points.shape[0]
-        slots = torch.nonzero((self.get_weight <= min_weight).squeeze(-1)).squeeze(-1)
+        slots = torch.nonzero((self.get_weight < min_weight).squeeze(-1)).squeeze(-1)
         m = min(k, slots.numel())
         if m > 0:
             self._write_rows(slots[:m], {n: v[:m] for n, v in d.items()})
