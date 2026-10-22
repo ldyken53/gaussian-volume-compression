@@ -26,6 +26,7 @@ from gaussian_renderer import (
     render,
     sample_bvh_prim_ids,
 )
+from gvcommon import densify
 from gvcommon.arguments import ModelParams, OptimizationParams
 from gvcommon.general_utils import build_scaling_rotation, safe_state
 from sampling import sample_exterior_points, sample_mesh_points
@@ -179,14 +180,14 @@ def training(dataset, opt, args):
     if args.densify_growth > 1.0:
         # Each event grows the model by about densify_growth, finishing by half-way.
         n0 = max(1, gaussians.get_xyz.shape[0])
-        latest = max(
-            3,
-            (opt.iterations // 2 - opt.densify_from_iter) // opt.densification_interval,
+        densify_events, _ = densify.event_count(
+            n0,
+            n_final,
+            opt.iterations,
+            opt.densify_from_iter,
+            opt.densification_interval,
+            args.densify_growth,
         )
-        want = math.ceil(
-            math.log(max(n_final, n0) / n0) / math.log(args.densify_growth)
-        )
-        densify_events = int(min(latest, max(3, want)))
         print(f"densify_events {densify_events} ({n0:,} -> {n_final:,} Gaussians)")
 
     big_gt, big_samples = load_samples(args, mesh)
@@ -384,11 +385,7 @@ def training(dataset, opt, args):
                 and iteration % opt.densification_interval == 0
                 and iteration not in args.save_iterations
             ):
-                budget = int(
-                    n_final
-                    - gaussians.get_values.shape[0]
-                    + torch.count_nonzero(gaussians.get_weight < DEAD_WEIGHT)
-                )
+                budget = densify.budget(gaussians, n_final, DEAD_WEIGHT)
                 remaining = max(1, densify_events - densifies)
                 if args.use_mcmc:
                     gaussians.relocate_gs(
@@ -398,7 +395,7 @@ def training(dataset, opt, args):
                 elif args.densify_3dgs:
                     # Clone/split by position-gradient magnitude, threshold 0: 3DGS's image-space
                     # threshold never fires here.
-                    k3 = max(0, min(-(-budget // remaining), budget))
+                    k3 = max(0, densify.share(budget, remaining))
                     g = gaussians._xyz.grad
                     if k3 > 0 and g is not None:
                         n_cl = gaussians.densify_and_clone(
@@ -417,16 +414,9 @@ def training(dataset, opt, args):
                 else:
                     mask = gt.ravel() != -1
                     diff = torch.abs(cells.ravel()[mask] - gt.ravel()[mask])
-                    k = max(0, min(-(-budget // remaining), budget, diff.numel()))
+                    k = max(0, min(densify.share(budget, remaining), diff.numel()))
                     if k > 0:
-                        if args.densify_alpha <= 0:
-                            pick = torch.topk(diff, k).indices
-                        else:
-                            # Sample cells without replacement with p ~ err^alpha (Gumbel top-k).
-                            logits = args.densify_alpha * torch.log(diff + 1e-12)
-                            u = torch.rand_like(diff).clamp_min(1e-20)
-                            gumbel = -torch.log(-torch.log(u))
-                            pick = torch.topk(logits + gumbel, k).indices
+                        pick = densify.pick(diff, k, args.densify_alpha)
                         loss_idx = torch.nonzero(mask, as_tuple=False).squeeze(1)[pick]
                         gaussians.densify_in_place(
                             current_samples[loss_idx],

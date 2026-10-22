@@ -1,4 +1,3 @@
-import math
 import os
 import sys
 import time
@@ -12,6 +11,7 @@ from diff_gaussian_rasterization.fused import fused_volume_loss
 from tqdm import tqdm
 
 from gaussian_renderer import render
+from gvcommon import densify
 from gvcommon.arguments import ModelParams, OptimizationParams
 from gvcommon.general_utils import build_scaling_rotation, safe_state
 from scene import GaussianModel, Scene
@@ -230,12 +230,15 @@ def training(dataset, opt, args):
     gaussians.training_setup(opt)
 
     # Growth events: ~DENSIFY_GROWTH each, at least 3, done by half-way so the last ones train.
-    latest = max(
-        3, (opt.iterations // 2 - opt.densify_from_iter) // opt.densification_interval
-    )
     n0 = max(1, gaussians.get_xyz.shape[0])
-    want = math.ceil(math.log(max(args.cap_max, n0) / n0) / math.log(DENSIFY_GROWTH))
-    densify_events = int(min(latest, max(3, want)))
+    densify_events, latest = densify.event_count(
+        n0,
+        args.cap_max,
+        opt.iterations,
+        opt.densify_from_iter,
+        opt.densification_interval,
+        DENSIFY_GROWTH,
+    )
     print(
         f"densify_events: {densify_events} ({n0:,} -> {args.cap_max:,} Gaussians, "
         f"at most {latest})"
@@ -312,26 +315,12 @@ def training(dataset, opt, args):
                     gaussians.add_new_gs(cap_max=args.cap_max)
                 else:
                     err_flat = torch.abs(cells.ravel() - gt.ravel())
-                    budget = int(
-                        args.cap_max
-                        - gaussians.get_values.shape[0]
-                        + torch.count_nonzero(gaussians.get_weight < args.min_weight)
-                    )
+                    budget = densify.budget(gaussians, args.cap_max, args.min_weight)
                     remaining = max(1, densify_events - densifies)
-                    k = min(-(-budget // remaining), budget)
                     densifies += 1
-                    k = max(0, min(k, err_flat.numel()))
+                    k = max(0, min(densify.share(budget, remaining), err_flat.numel()))
                     if k > 0:
-                        if args.densify_alpha <= 0:
-                            loss_idx = torch.topk(err_flat, k).indices
-                        else:
-                            # Sample cells without replacement with probability ~ err^alpha
-                            # (Gumbel top-k): plain top-k spends the budget on a thin tail.
-                            logits = args.densify_alpha * torch.log(err_flat + 1e-12)
-                            u = torch.rand_like(err_flat).clamp_min(1e-20)
-                            loss_idx = torch.topk(
-                                logits - torch.log(-torch.log(u)), k
-                            ).indices
+                        loss_idx = densify.pick(err_flat, k, args.densify_alpha)
                         gaussians.densify_and_prune(
                             opt.densify_grad_threshold,
                             args.min_weight,
