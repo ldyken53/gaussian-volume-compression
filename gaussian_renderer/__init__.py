@@ -1,10 +1,9 @@
-import os
-
 import torch
 
 from bvh_diff_gaussian_rasterization import _C, rasterize_gaussians
 from bvh_diff_gaussian_rasterization.fused import fused_activations
 from gvcommon.general_utils import build_rotation
+from gvcommon.model_files import read_render_rule
 from scene.gaussian_model import GaussianModel
 
 # Render rule (occ_t, floor): a sample is empty where aw <= occ_t, else S / max(aw, floor).
@@ -25,11 +24,7 @@ def init_rasterizer(occ_t=0.0, floor=0.01):
 def model_render_rule(model_dir, surface):
     """A model's stored render rule; models from before render_rule existed used the old
     hard (surface) or soft (interior) cutoff."""
-    path = os.path.join(model_dir, "render_rule")
-    if os.path.exists(path):
-        occ_t, floor = (float(x) for x in open(path).read().split()[:2])
-        return occ_t, floor
-    return (0.01, 0.01) if surface else (0.0, 0.01)
+    return read_render_rule(model_dir, (0.01, 0.01) if surface else (0.0, 0.01))
 
 
 def build_bvh(samples):

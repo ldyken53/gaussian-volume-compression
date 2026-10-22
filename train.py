@@ -26,7 +26,7 @@ from gaussian_renderer import (
     render,
     sample_bvh_prim_ids,
 )
-from gvcommon import densify
+from gvcommon import densify, model_files
 from gvcommon.arguments import ModelParams, OptimizationParams
 from gvcommon.general_utils import build_scaling_rotation, safe_state
 from sampling import sample_exterior_points, sample_mesh_points
@@ -160,19 +160,12 @@ def training(dataset, opt, args):
         dataset.source_path, args.fraction, min(caps) if caps else None
     )
     gaussians.create_from_pcd(pcd, mesh)
-    if args.max_scale_k > 0:
-        # The cap grows with the Gaussian spacing (V / N)^(1/3), V the mesh's bounding box (the
-        # structured pipeline's rule too).
-        vol = float(np.prod(np.array(gaussians.maxes) - np.array(gaussians.mins)))
-        args.max_scale = max(
-            args.max_scale, args.max_scale_k * (vol / n_final) ** (1.0 / 3.0)
-        )
-        print(
-            f"max_scale {args.max_scale:.4f} (k={args.max_scale_k}, N={n_final}, V={vol:.3f})"
-        )
+    # The cap grows with the Gaussian spacing (V / N)^(1/3), V the mesh's bounding box.
+    args.max_scale = model_files.size_cap(
+        args.max_scale, args.max_scale_k, gaussians.mins, gaussians.maxes, n_final
+    )
     # Rendering a model needs the max_scale it was trained with.
-    with open(os.path.join(dataset.model_path, "max_scale"), "w") as f:
-        f.write(f"{args.max_scale}\n")
+    model_files.write_max_scale(dataset.model_path, args.max_scale)
     gaussians.max_scale = args.max_scale
     gaussians.training_setup(opt)
 
@@ -210,8 +203,7 @@ def training(dataset, opt, args):
     rule = SURFACE_RULE if surface else INTERIOR_RULE
     occ_t = rule[0] if args.occ_t is None else args.occ_t
     floor = rule[1] if args.denom_floor is None else args.denom_floor
-    with open(os.path.join(dataset.model_path, "render_rule"), "w") as f:
-        f.write(f"{occ_t} {floor}\n")
+    model_files.write_render_rule(dataset.model_path, occ_t, floor)
     init_rasterizer(0.0, floor)
     if args.samples_per_node > 0:
         # About this many samples per mesh node per iteration, at most the whole batch.

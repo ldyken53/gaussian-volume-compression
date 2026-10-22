@@ -11,7 +11,7 @@ from diff_gaussian_rasterization.fused import fused_volume_loss
 from tqdm import tqdm
 
 from gaussian_renderer import render
-from gvcommon import densify
+from gvcommon import densify, model_files
 from gvcommon.arguments import ModelParams, OptimizationParams
 from gvcommon.general_utils import build_scaling_rotation, safe_state
 from scene import GaussianModel, Scene
@@ -201,8 +201,7 @@ def probe_gt(gaussians, cell_count):
 def training(dataset, opt, args):
     prepare_output(dataset)
     # Trained with the soft render (empty only where aw == 0), deployed under the stored rule.
-    with open(os.path.join(dataset.model_path, "render_rule"), "w") as f:
-        f.write(f"{args.occ_t} {args.denom_floor}\n")
+    model_files.write_render_rule(dataset.model_path, args.occ_t, args.denom_floor)
     gaussians = GaussianModel()
     gaussians.occ_t, gaussians.floor = 0.0, args.denom_floor
     caps = [c for c in (args.init_share_max * args.cap_max, args.init_max) if c > 0]
@@ -213,19 +212,12 @@ def training(dataset, opt, args):
         fraction=args.fraction,
         max_init=min(caps) if caps else None,
     )
-    if args.max_scale_k > 0:
-        # The cap grows with the Gaussian spacing (V / N)^(1/3), V the volume's bounding box (the
-        # unstructured pipeline's rule too); --max_scale is the floor.
-        vol = float(np.prod(np.array(gaussians.maxes) - np.array(gaussians.mins)))
-        args.max_scale = max(
-            args.max_scale, args.max_scale_k * (vol / args.cap_max) ** (1.0 / 3.0)
-        )
-        print(
-            f"max_scale {args.max_scale:.4f} (k={args.max_scale_k}, N={args.cap_max}, "
-            f"V={vol:.3f})"
-        )
-    with open(os.path.join(dataset.model_path, "max_scale"), "w") as f:
-        f.write(f"{args.max_scale}\n")
+    # The cap grows with the Gaussian spacing (V / N)^(1/3), V the volume's bounding box;
+    # --max_scale is the floor.
+    args.max_scale = model_files.size_cap(
+        args.max_scale, args.max_scale_k, gaussians.mins, gaussians.maxes, args.cap_max
+    )
+    model_files.write_max_scale(dataset.model_path, args.max_scale)
     gaussians.max_scale = args.max_scale
     gaussians.training_setup(opt)
 

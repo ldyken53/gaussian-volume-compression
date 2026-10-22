@@ -18,6 +18,7 @@ import pyvista as pv
 import torch
 
 from gaussian_renderer import build_bvh, init_rasterizer, model_render_rule, render
+from gvcommon.model_files import read_max_scale
 from sampling import sample_exterior_points, sample_mesh_points
 from scene import GaussianModel
 
@@ -38,9 +39,7 @@ def psnr(sq_sum, n):
 def model_spec(spec):
     """path[:max_scale]; without one, the model's own max_scale file (else 0.02)."""
     mp, _, ms = spec.partition(":")
-    if not ms and os.path.exists(os.path.join(mp, "max_scale")):
-        ms = open(os.path.join(mp, "max_scale")).read()
-    return mp, float(ms) if ms else 0.02
+    return mp, float(ms) if ms else read_max_scale(mp)
 
 
 def main():

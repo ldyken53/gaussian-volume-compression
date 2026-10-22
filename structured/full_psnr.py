@@ -7,6 +7,7 @@ import pyvista as pv
 import torch
 
 from gaussian_renderer import render
+from gvcommon.model_files import read_max_scale, read_render_rule
 from scene import GaussianModel
 
 
@@ -188,17 +189,11 @@ def main():
             ]
             it = max(saved)
         gaussians = GaussianModel()
-        ms_file = os.path.join(mp, "max_scale")
         gaussians.max_scale = (
-            args.max_scale
-            if args.max_scale is not None
-            else float(open(ms_file).read()) if os.path.exists(ms_file) else 0.02
+            args.max_scale if args.max_scale is not None else read_max_scale(mp)
         )
         # The model's render rule; models without render_rule predate it: (0, 0.01).
-        rr = os.path.join(mp, "render_rule")
-        gaussians.occ_t, gaussians.floor = (
-            (float(x) for x in open(rr).read().split()[:2]) if os.path.exists(rr) else (0.0, 0.01)
-        )
+        gaussians.occ_t, gaussians.floor = read_render_rule(mp, (0.0, 0.01))
         with torch.no_grad():
             gaussians.load_ply(
                 os.path.join(mp, "point_cloud", f"iteration_{it}", "point_cloud.ply"),
