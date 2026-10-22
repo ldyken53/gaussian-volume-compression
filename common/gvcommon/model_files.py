@@ -1,6 +1,7 @@
-"""The small files a trained model keeps beside its ply. Rendering a model needs max_scale, the
-size cap get_scaling applies, and render_rule, the (occ_t, floor) it renders with: a point is
-empty where aw <= occ_t, else S / max(aw, floor). train_seconds.txt holds its training time."""
+"""Files kept beside each model's ply. Rendering a model needs max_scale, the size cap
+get_scaling applies, and render_rule, the (occ_t, floor) it renders with: a point is
+empty where aw <= occ_t, else S / max(aw, floor). train_seconds.txt is its training
+time."""
 
 import os
 
