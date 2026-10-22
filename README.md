@@ -1,10 +1,44 @@
-# Gaussian volume compression for unstructured meshes
+# Gaussian volume compression
+
+Two pipelines fit a set of 3D Gaussians to the scalar field of a volume:
+
+| pipeline | directory | input | rasterizer (Python package) | evaluation |
+|---|---|---|---|---|
+| unstructured | repository root | volume meshes (`.vtu`) | BVH over sample points (`bvh_diff_gaussian_rasterization`) | `eval_final.py` |
+| structured | `structured/` | regular grids (legacy `.vtk` STRUCTURED_POINTS) | tile rasterizer over the grid (`diff_gaussian_rasterization`) | `structured/full_psnr.py` |
+
+Both pipelines have a `train.py`, `scene/`, `gaussian_renderer/`, `utils/` and `arguments/`.
+Run each from its own directory with only its own extension on `PYTHONPATH`; never put both
+pipeline roots on `sys.path`, or one pipeline's modules stand in for the other's.
+
+```shell
+git clone --recursive <repo>
+conda env create --file environment.yml
+pip install submodules/simple-knn          # both pipelines import the installed simple_knn
+(cd diff-gaussian-rasterization && python setup.py build_ext --inplace)
+(cd structured/diff-gaussian-rasterization && python setup.py build_ext --inplace)
+
+# unstructured, from the repository root
+export PYTHONPATH=$PWD/diff-gaussian-rasterization
+python train.py -s mesh.vtu --cap_max 5015 -m output/model [--encode_surface]
+python eval_final.py -s mesh.vtu --models output/model [--surface output/model]
+
+# structured, from structured/
+cd structured && export PYTHONPATH=$PWD/diff-gaussian-rasterization
+python train.py -s volume.vtk --is_scaled --ratio 1024 -m output/model
+python full_psnr.py -s volume.vtk --is_scaled --continuous 2 -m output/model
+```
+
+`structured/README.md` describes the structured pipeline. Its `submodules/simple-knn` is not
+kept: it pinned the same commit as `submodules/simple-knn`, which both pipelines use.
+
+## Unstructured pipeline
 
 Fits a set of 3D Gaussians to the scalar field of a volume mesh (`.vtu`; structured `.vtk` also
 loads). Interior models reproduce the field inside the mesh; surface models (`--encode_surface`)
 also encode its boundary, rendering samples outside the mesh as empty.
 
-## Setup
+### Setup
 
 ```shell
 git clone --recursive <repo>
@@ -15,7 +49,7 @@ cd diff-gaussian-rasterization && python setup.py build_ext --inplace
 
 Put `diff-gaussian-rasterization` on `PYTHONPATH` to use the in-place build.
 
-## Training and evaluation
+### Training and evaluation
 
 ```shell
 python train.py -s mesh.vtu --cap_max 5015 -m output/model              # interior
@@ -26,7 +60,7 @@ python eval_final.py -s mesh.vtu --models output/model [--surface output/model]
 `--cap_max` is the final Gaussian count: storage / (ratio x 48 bytes). The defaults are
 the final configurations; `run_final.sh` trains and evaluates every final model.
 
-## Render rule
+### Render rule
 
 Every model renders the same way: at a point, with S = sum w G v and aw = sum w G over the
 Gaussians, the point is empty where aw <= T and otherwise has the value S / max(aw, F).
