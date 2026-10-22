@@ -437,10 +437,9 @@ def training(dataset, opt, args):
                     gaussians._xyz.add_(noise)
 
     torch.cuda.synchronize()
-    train_seconds = time.perf_counter() - train_t0 - save_seconds
-    print(f"TRAIN_SECONDS: {train_seconds:.2f} (save {save_seconds:.2f})", flush=True)
-    with open(os.path.join(dataset.model_path, "train_seconds.txt"), "w") as f:
-        f.write(f"{train_seconds:.3f}\n")
+    model_files.write_train_seconds(
+        dataset.model_path, time.perf_counter() - train_t0 - save_seconds, save_seconds
+    )
 
 
 def parse_args(argv):

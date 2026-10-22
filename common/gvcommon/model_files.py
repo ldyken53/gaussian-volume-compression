@@ -1,6 +1,6 @@
-"""The small files a trained model keeps beside its ply. Rendering a model needs both:
-max_scale, the size cap get_scaling applies, and render_rule, the (occ_t, floor) it renders with:
-a point is empty where aw <= occ_t, else S / max(aw, floor)."""
+"""The small files a trained model keeps beside its ply. Rendering a model needs max_scale, the
+size cap get_scaling applies, and render_rule, the (occ_t, floor) it renders with: a point is
+empty where aw <= occ_t, else S / max(aw, floor). train_seconds.txt holds its training time."""
 
 import os
 
@@ -31,6 +31,14 @@ def read_max_scale(model_dir, default=0.02):
 def write_render_rule(model_dir, occ_t, floor):
     with open(os.path.join(model_dir, "render_rule"), "w") as f:
         f.write(f"{occ_t} {floor}\n")
+
+
+def write_train_seconds(model_dir, seconds, save_seconds):
+    """The training time to quote (the iteration loop's wall clock minus saves): printed as
+    TRAIN_SECONDS and written to train_seconds.txt."""
+    print(f"TRAIN_SECONDS: {seconds:.2f} (save {save_seconds:.2f})", flush=True)
+    with open(os.path.join(model_dir, "train_seconds.txt"), "w") as f:
+        f.write(f"{seconds:.3f}\n")
 
 
 def read_render_rule(model_dir, legacy):
