@@ -1,6 +1,6 @@
 import os
 
-from scene.dataset_readers import readData
+from gvcommon.volume import read_structured
 from scene.gaussian_model import GaussianModel
 
 
@@ -22,7 +22,7 @@ class Scene:
             and args.source_path.lower().endswith((".vtk", ".vtu"))
         ):
             raise SystemExit(f"{args.source_path}: expected a .vtk or .vtu volume")
-        mesh, pcd = readData(args.source_path, fraction, normalized, max_init)
+        mesh, pcd = read_structured(args.source_path, fraction, normalized, max_init)
         self.gaussians.create_from_pcd(pcd, mesh)
 
     def save(self, iteration, ema=None):

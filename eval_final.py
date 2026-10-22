@@ -10,7 +10,6 @@ render as occupied.
 import glob
 import json
 import math
-import os
 from argparse import ArgumentParser
 
 import numpy as np
