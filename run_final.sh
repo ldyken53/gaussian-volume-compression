@@ -1,11 +1,9 @@
 #!/bin/bash
-# Final models: interior and surface models of each mesh and structured models of each grid, at
-# every final compression ratio. One GPU, serial.
-# Build once: (cd gvraster && python setup.py build_ext --inplace)
+# The paper's final models: interior (VEGGIES+S) and surface (VEGGIES) models of each mesh and
+# structured models of each grid, at every compression ratio. One GPU, serial.
 # usage: run_final.sh <gpu> [interior|surface|structured|all] [dataset ...]
 #   meshes: mito sf1 valley rbl eq; grids: vertebra miranda chameleon richtmyer
-# Outputs output/IN_<d>_<r>, output/SU_<d>_s<r> and output/ST_<d>_<r>, evaluations in
-# bench_logs/eval_<tag>.json.
+# Models go to output/<kind>_<dataset>_<ratio>, evaluations to bench_logs/eval_<tag>.json.
 cd "$(dirname "$0")"
 G=${1:-0}; MODE=${2:-all}; shift $(( $# < 2 ? $# : 2 ))
 DS=${*:-"mito sf1 valley rbl eq vertebra miranda chameleon richtmyer"}
@@ -15,44 +13,31 @@ U=/lus/eagle/projects/UIC-HPC/ldyken53
 declare -A SRC=([mito]=$A/mito.vtu [sf1]=$A/sf1.vtu [valley]=$U/valley.vtu [rbl]=$U/rbl.vtu
                 [eq]=$A/earthquakenorm.vtu [vertebra]=/home/ldyken53/vertebra.vtk
                 [miranda]=$A/miran.vtk [chameleon]=$A/chame.vtk [richtmyer]=$A/richt.vtk)
-# Meshes: final Gaussian count per ratio 1024x / 256x / 64x: storage / (ratio x 48 bytes).
-declare -A CAP=([mito]="5015 20058 80232" [sf1]="12663 50653 202611" [valley]="23925 95700 382800"
-                [rbl]="3539 14157 56628" [eq]="87659 350636 1402545")
-# Grids: the ratios trained (--ratio sets the count to nodes / (12 x ratio)).
-declare -A RATIOS=([vertebra]="1024 256 64 4096 16384" [miranda]="1024 256 64"
-                   [chameleon]="1024 256 64" [richtmyer]="1024 256 64")
+declare -A RATIOS=([vertebra]="1024 256 64 4096 16384")
+# Earthquake is too large to triangulate here, so it trains on precomputed sample sets.
+declare -A SETS=([eq_interior]=$U/earthquakebig [eq_surface]=$A/earthquake2big)
 mkdir -p bench_logs
 
-run() {  # tag src [train flags...]
-  local t=$1 src=$2; shift 2
-  python train.py -s $src -m output/$t "$@" > bench_logs/$t.log 2>&1
+run() {  # kind dataset ratio
+  local t=$1_$2_$3 src=${SRC[$2]} flags="--kind $1 --ratio $3"
+  [ $1 = structured ] && flags="$flags --is_scaled"
+  [ -n "${SETS[$2_$1]}" ] && flags="$flags --precomputed_samples ${SETS[$2_$1]}"
+  python train.py -s $src -m output/$t $flags > bench_logs/$t.log 2>&1
   echo "EXIT=$?" >> bench_logs/$t.log
-  local ev=""
-  [[ " $* " == *" --encode_surface "* ]] && ev="--surface output/$t"
   # Grids report the continuous PSNR, the structured metric of record.
-  [[ $src == *.vtk ]] && ev="--is_scaled --continuous 2"
-  python eval.py -s $src --models output/$t $ev --out bench_logs/eval_$t.json \
-    > bench_logs/eval_$t.log 2>&1
+  local ev=""; [ $1 = structured ] && ev="--is_scaled --continuous 2"
+  python eval.py -s $src --models output/$t $ev --out bench_logs/eval_$t.json > bench_logs/eval_$t.log 2>&1
 }
 
 for d in $DS; do
-  if [ -n "${RATIOS[$d]}" ]; then
-    if [ $MODE = all ] || [ $MODE = structured ]; then
-      for r in ${RATIOS[$d]}; do run ST_${d}_$r ${SRC[$d]} --is_scaled --ratio $r; done
-    fi
-    continue
+  if [[ ${SRC[$d]} == *.vtk ]]; then
+    kinds="structured"
+  else
+    kinds="interior surface"
   fi
-  caps=(${CAP[$d]}); ei=""; es=""
-  # Earthquake trains on precomputed sample sets.
-  [ $d = eq ] && ei="--precomputed_samples $U/earthquakebig" && es="--precomputed_samples $A/earthquake2big"
-  for k in 0 1 2; do
-    r=$((1024 >> (2 * k)))
-    if [ $MODE = all ] || [ $MODE = interior ]; then
-      run IN_${d}_$r ${SRC[$d]} --cap_max ${caps[$k]} $ei
-    fi
-    if [ $MODE = all ] || [ $MODE = surface ]; then
-      run SU_${d}_s$r ${SRC[$d]} --cap_max ${caps[$k]} --encode_surface $es
-    fi
+  for kind in $kinds; do
+    [ $MODE = all ] || [ $MODE = $kind ] || continue
+    for r in ${RATIOS[$d]:-1024 256 64}; do run $kind $d $r; done
   done
 done
 echo "FINAL RUNS DONE"
