@@ -1,12 +1,13 @@
 #include "backward.h"
-#include "auxiliary.h"
+#include "gaussian.h"
+#include "scratch.h"
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
 #include <cuBQL/traversal/fixedBoxQuery.h>
 namespace cg = cooperative_groups;
 
-// dL/dconic -> dL/dscale and dL/drotation (unnormalized quaternion).
-__global__ void preprocessCUDA(int P, const glm::vec3* scales, const glm::vec4* rotations,
+// dL/dconic to dL/dscale and dL/drotation, through the covariance.
+__global__ void prepareBackwardCUDA(int P, const glm::vec3* scales, const glm::vec4* rotations,
 	const float* conics, glm::vec3* dL_dscales, glm::vec4* dL_drots, float* dL_dconics)
 {
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -98,10 +99,10 @@ __global__ void preprocessCUDA(int P, const glm::vec3* scales, const glm::vec4* 
 // One warp per Gaussian over the same box and support test as the forward pass. The bound
 // (64 registers) schedules the pair loop ~20% faster than the compiler's own choice.
 __global__ void __launch_bounds__(256, 4)
-	renderCUDA(int P, const float* means3D, const glm::vec3* scales, const glm::vec4* rotations,
-		const float* conics, const float* values, const float* weights, const cuBQL::bvh3f bvh,
-		float* dL_dmeans, float* dL_dvalues, float* dL_dweights, float* dL_dconics,
-		const float4* __restrict__ sample_pack, const float* __restrict__ sample_fc)
+	sampleBackwardCUDA(int P, const float* means, const glm::vec3* scales,
+		const glm::vec4* rotations, const float* conics, const float* values, const float* weights,
+		const cuBQL::bvh3f bvh, float* dL_dmeans, float* dL_dvalues, float* dL_dweights,
+		float* dL_dconics, const float4* __restrict__ point_a, const float* __restrict__ point_b)
 {
 	auto warp = cg::tiled_partition<32>(cg::this_thread_block());
 	int idx = blockIdx.x * (blockDim.x / 32) + (threadIdx.x / 32);
@@ -113,15 +114,15 @@ __global__ void __launch_bounds__(256, 4)
 	auto rot = rotations[idx];
 	const float conic[6] = {conics[idx * 6 + 0], conics[idx * 6 + 1], conics[idx * 6 + 2],
 		conics[idx * 6 + 3], conics[idx * 6 + 4], conics[idx * 6 + 5]};
-	const float3 position = {means3D[3 * idx], means3D[3 * idx + 1], means3D[3 * idx + 2]};
+	const float3 position = {means[3 * idx], means[3 * idx + 1], means[3 * idx + 2]};
 
 	float cov[6];
 	computeCov3D(scale, rot, cov);
-	const float m = truncationRadius(weights[idx]);
-	const cuBQL::box3f box = tightGaussianBox(position, cov, m);
+	const float m = supportRadius(weights[idx]);
+	const cuBQL::box3f box = supportBox(position, cov, m);
 
-	// sample_pack.w = dvo = dL/dR / D and sample_fc = dL/dw_sample - dvo * R (both 0 when
-	// uncovered), so with e = exp(-q/2) every term builds from e and qe = (dvo v + fc) e.
+	// With e = exp(-q/2), point_a[s] = (x, y, z, a_s) and point_b[s] = b_s, point s adds
+	// w a_s e to dL/dv, (a_s v + b_s) e to dL/dw and -w/2 (a_s v + b_s) e to dL/dq.
 	const float w = weights[idx], v = values[idx];
 	const float qmax = supportQmax(w);
 	const float cxx = conic[0], cxy = conic[1], cxz = conic[2];
@@ -134,16 +135,16 @@ __global__ void __launch_bounds__(256, 4)
 		[&](uint32_t* primIDs, int count) {
 			for (int i = lane; i < count; i += 32) {
 				const int primID = primIDs[i];
-				const float4 sp = sample_pack[primID];
-				const float dx = sp.x - position.x, dy = sp.y - position.y, dz = sp.z - position.z;
+				const float4 p = point_a[primID];
+				const float dx = p.x - position.x, dy = p.y - position.y, dz = p.z - position.z;
 				const float t0 = fmaf(c2xz, dz, fmaf(c2xy, dy, cxx * dx));
 				const float t1 = fmaf(c2yz, dz, cyy * dy);
 				const float q = fmaf(dx, t0, fmaf(dy, t1, czz * dz * dz));
 				if (!(q >= 0.0f && q <= qmax))
 					continue;
 				const float e = expf(-0.5f * q);
-				s_v = fmaf(sp.w, e, s_v);
-				const float qe = fmaf(sp.w, v, sample_fc[primID]) * e;
+				s_v = fmaf(p.w, e, s_v);
+				const float qe = fmaf(p.w, v, point_b[primID]) * e;
 				s_q += qe;
 				const float ax = qe * dx, ay = qe * dy, az = qe * dz;
 				Gx += ax;
@@ -173,14 +174,13 @@ __global__ void __launch_bounds__(256, 4)
 	zz = cg::reduce(warp, zz, cg::plus<float>());
 
 	if (lane == 0) {
-		// dL/dquad = h qe with h = -w/2.
 		const float h = -0.5f * w;
 		dL_dvalues[idx] = w * s_v;
 		dL_dweights[idx] = s_q;
 		dL_dmeans[idx * 3] = w * (cxx * Gx + cxy * Gy + cxz * Gz);
 		dL_dmeans[idx * 3 + 1] = w * (cxy * Gx + cyy * Gy + cyz * Gz);
 		dL_dmeans[idx * 3 + 2] = w * (cxz * Gx + cyz * Gy + czz * Gz);
-		// Per-entry gradients, not the doubled per-parameter off-diagonals: preprocessCUDA
+		// Per-entry gradients, not the doubled per-parameter off-diagonals: prepareBackwardCUDA
 		// expands them into the symmetric G.
 		dL_dconics[idx * 6 + 0] = h * xx;
 		dL_dconics[idx * 6 + 1] = h * xy;
@@ -191,49 +191,45 @@ __global__ void __launch_bounds__(256, 4)
 	}
 }
 
-// Per-sample terms, computed once per sample instead of once per (Gaussian, sample) pair.
-// An empty sample keeps its weight adjoint (the FN/FP terms) but has no value adjoint.
-__global__ void samplePrepCUDA(int S, float occ_t, float floor, const float* __restrict__ samples,
-	const float* __restrict__ out_cells, const float* __restrict__ out_weights,
-	const float* __restrict__ dL_dsamples, const float* __restrict__ dL_dsample_weights,
-	float4* __restrict__ sample_pack, float* __restrict__ sample_fc)
+// The per-point adjoints a = dL/dV = dL/dvalue / max(I, floor) and b = dL/dI = dL/dinfluence -
+// a value, once per point instead of once per (Gaussian, point) pair. An undefined point keeps
+// its influence term (the FN and FP losses) but has no value term.
+__global__ void pointAdjointsCUDA(int S, float threshold, float floor,
+	const float* __restrict__ xyz, const float* __restrict__ out_values,
+	const float* __restrict__ out_influence, const float* __restrict__ dL_dout_values,
+	const float* __restrict__ dL_dout_influence, float4* __restrict__ point_a,
+	float* __restrict__ point_b)
 {
 	const int s = blockIdx.x * blockDim.x + threadIdx.x;
 	if (s >= S)
 		return;
-	const float aw = out_weights[s];
-	const bool covered = aw > occ_t;
-	// Below the floor the (v - R) adjoint is kept at the floored denominator on purpose.
-	const float denom = covered ? max(aw, floor) : 1.0f;
-	const float dvo = covered ? dL_dsamples[s] / denom : 0.0f;
-	sample_pack[s] = make_float4(samples[3 * s], samples[3 * s + 1], samples[3 * s + 2], dvo);
-	sample_fc[s] = covered ? dL_dsample_weights[s] - dvo * out_cells[s]
-						   : (aw > 0.0f ? dL_dsample_weights[s] : 0.0f);
+	const float influence = out_influence[s];
+	const bool defined = influence > threshold;
+	// Below the floor the denominator is constant and the exact b has no -a value term; keeping
+	// it trains better.
+	const float denom = defined ? max(influence, floor) : 1.0f;
+	const float a = defined ? dL_dout_values[s] / denom : 0.0f;
+	point_a[s] = make_float4(xyz[3 * s], xyz[3 * s + 1], xyz[3 * s + 2], a);
+	point_b[s] = defined ? dL_dout_influence[s] - a * out_values[s]
+						 : (influence > 0.0f ? dL_dout_influence[s] : 0.0f);
 }
 
-void BACKWARD::render(int P, int S, const float* means3D, const glm::vec3* scales,
+void BACKWARD::sample(int P, int S, const float* means, const glm::vec3* scales,
 	const glm::vec4* rotations, const float* conics, const float* values, const float* weights,
-	const float* samples, const cuBQL::bvh3f& bvh, float occ_t, float floor, const float* out_cells,
-	const float* out_weights, const float* dL_dsamples, const float* dL_dsample_weights,
-	float* dL_dmean3D, float* dL_dvalue, float* dL_dweights, glm::vec3* dL_dscale,
-	glm::vec4* dL_drot, float* dL_dconics)
+	const float* points, const cuBQL::bvh3f& bvh, float threshold, float floor,
+	const float* out_values, const float* out_influence, const float* dL_dout_values,
+	const float* dL_dout_influence, float* dL_dmeans, float* dL_dvalues, float* dL_dweights,
+	glm::vec3* dL_dscales, glm::vec4* dL_drotations, float* dL_dconics)
 {
-	static float4* sample_pack = nullptr;
-	static float* sample_fc = nullptr;
-	static int prep_cap = 0;
-	if (S > prep_cap) {
-		if (sample_pack) {
-			cudaFree(sample_pack);
-			cudaFree(sample_fc);
-		}
-		cudaMalloc(&sample_pack, sizeof(float4) * S);
-		cudaMalloc(&sample_fc, sizeof(float) * S);
-		prep_cap = S;
-	}
-	samplePrepCUDA<<<(S + 255) / 256, 256>>>(S, occ_t, floor, samples, out_cells, out_weights, dL_dsamples,
-		dL_dsample_weights, sample_pack, sample_fc);
-	renderCUDA<<<(P * 32 + 255) / 256, 256>>>(P, means3D, scales, rotations, conics, values,
-		weights, bvh, dL_dmean3D, dL_dvalue, dL_dweights, dL_dconics, sample_pack, sample_fc);
-	preprocessCUDA<<<(P + 255) / 256, 256>>>(
-		P, scales, rotations, conics, dL_dscale, dL_drot, dL_dconics);
+	static float4* point_a = nullptr;
+	static float* point_b = nullptr;
+	static size_t a_bytes = 0, b_bytes = 0;
+	growScratch(point_a, a_bytes, S);
+	growScratch(point_b, b_bytes, S);
+	pointAdjointsCUDA<<<(S + 255) / 256, 256>>>(S, threshold, floor, points, out_values,
+		out_influence, dL_dout_values, dL_dout_influence, point_a, point_b);
+	sampleBackwardCUDA<<<(P * 32 + 255) / 256, 256>>>(P, means, scales, rotations, conics, values,
+		weights, bvh, dL_dmeans, dL_dvalues, dL_dweights, dL_dconics, point_a, point_b);
+	prepareBackwardCUDA<<<(P + 255) / 256, 256>>>(
+		P, scales, rotations, conics, dL_dscales, dL_drotations, dL_dconics);
 }

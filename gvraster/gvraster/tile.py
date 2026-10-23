@@ -1,103 +1,84 @@
-"""Tile backend: Gaussians rendered onto a jittered cell lattice (regular grids)."""
-
-from typing import NamedTuple
+"""Sampling on a jittered lattice with a tile rasterizer (grids)."""
 
 import torch
-import torch.nn as nn
 
 from . import _tile as _C
 
 
-class GaussianRasterizationSettings(NamedTuple):
-    volume_mins: tuple[float, float, float]
-    volume_maxes: tuple[float, float, float]
-    cell_count: int
-    max_scale: float
-    # Render rule: a cell is empty where aw <= occ_t, else it renders S / max(aw, floor).
-    occ_t: float = 0.0
-    floor: float = 0.01
-
-
-class _RasterizeGaussians(torch.autograd.Function):
+class _Sample(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, means3D, scales, rotations, values, weights, jitter, settings):
-        num_rendered, cells, cell_weights, geom, binning, img = _C.rasterize_gaussians(
-            means3D,
-            scales,
-            rotations,
-            values,
-            weights,
-            jitter,
-            settings.max_scale,
-            *settings.volume_mins,
-            *settings.volume_maxes,
-            settings.cell_count,
-            settings.occ_t,
-            settings.floor,
+    def forward(
+        ctx, means, raw_scales, raw_rotations, raw_values, raw_weights, jitter, setup
+    ):
+        pairs, values, influence, *buffers = _C.sample_forward(
+            means, raw_scales, raw_rotations, raw_values, raw_weights, jitter, *setup
         )
-        ctx.settings = settings
-        ctx.num_rendered = num_rendered
+        ctx.setup, ctx.pairs = setup, pairs
         ctx.save_for_backward(
-            scales,
-            rotations,
-            values,
-            weights,
+            raw_scales,
+            raw_rotations,
+            raw_values,
+            raw_weights,
             jitter,
-            geom,
-            binning,
-            img,
-            cells,
-            cell_weights,
+            values,
+            influence,
+            *buffers,
         )
-        return cells, cell_weights
+        return values, influence
 
     @staticmethod
-    def backward(ctx, grad_cells, grad_cell_weights):
-        s = ctx.settings
+    def backward(ctx, grad_values, grad_influence):
         (
-            scales,
-            rotations,
-            values,
-            weights,
+            raw_scales,
+            raw_rotations,
+            raw_values,
+            raw_weights,
             jitter,
-            geom,
-            binning,
-            img,
-            cells,
-            cell_weights,
+            values,
+            influence,
+            *buffers,
         ) = ctx.saved_tensors
-        grads = _C.rasterize_gaussians_backward(
-            scales,
-            rotations,
-            values,
-            weights,
+        grads = _C.sample_backward(
+            raw_scales,
+            raw_rotations,
+            raw_values,
+            raw_weights,
             jitter,
-            cells,
-            cell_weights,
-            s.max_scale,
-            *s.volume_mins,
-            *s.volume_maxes,
-            s.cell_count,
-            grad_cells,
-            grad_cell_weights,
-            geom,
-            ctx.num_rendered,
-            binning,
-            img,
-            s.occ_t,
-            s.floor,
+            *ctx.setup,
+            values,
+            influence,
+            grad_values,
+            grad_influence,
+            ctx.pairs,
+            *buffers,
         )
         return (*grads, None, None)
 
 
-class GaussianRasterizer(nn.Module):
-    """Renders raw (pre-activation) Gaussian parameters onto a jittered cell lattice."""
-
-    def __init__(self, raster_settings):
-        super().__init__()
-        self.raster_settings = raster_settings
-
-    def forward(self, means3D, scales, rotations, values, weights, jitter):
-        return _RasterizeGaussians.apply(
-            means3D, scales, rotations, values, weights, jitter, self.raster_settings
-        )
+def sample(
+    means,
+    raw_scales,
+    raw_rotations,
+    raw_values,
+    raw_weights,
+    jitter,
+    bounds_min,
+    bounds_max,
+    cells,
+    max_scale,
+    rule,
+):
+    """(values, influence) of the Gaussians with raw parameters at the cells^3 lattice points
+    spanning [bounds_min, bounds_max], each moved by its jitter (3 floats per point, in [z, y, x]
+    order), under the rule of gvraster.bvh.sample."""
+    setup = (
+        *(float(x) for x in bounds_min),
+        *(float(x) for x in bounds_max),
+        int(cells),
+        float(max_scale),
+        float(rule[0]),
+        float(rule[1]),
+    )
+    return _Sample.apply(
+        means, raw_scales, raw_rotations, raw_values, raw_weights, jitter, setup
+    )

@@ -1,11 +1,13 @@
-#ifndef CUDA_RASTERIZER_AUXILIARY_H_INCLUDED
-#define CUDA_RASTERIZER_AUXILIARY_H_INCLUDED
+#pragma once
 
-#include "config.h"
+// A Gaussian reaches a point only where w G >= SUPPORT_T.
+#define SUPPORT_T 1e-4f
+
 #include <cuBQL/bvh.h>
 #include <glm/glm.hpp>
 
-// 3D covariance with the relative epsilon; the conic and both passes' boxes derive from it.
+// The covariance with a relative epsilon on its diagonal; the conic and both passes' support
+// boxes derive from it.
 __forceinline__ __device__ void computeCov3D(
 	const glm::vec3 scale, const glm::vec4 rot, float cov[6])
 {
@@ -35,22 +37,20 @@ __forceinline__ __device__ void computeCov3D(
 	cov[5] = Sigma[2][2] + epsilon;
 }
 
-// Squared support radius: w * exp(-q/2) >= SUPPORT_T exactly where q <= qmax.
+// w exp(-q/2) >= SUPPORT_T exactly where q <= qmax.
 __forceinline__ __device__ float supportQmax(const float w) { return 2.0f * logf(w / SUPPORT_T); }
 
-// Support radius in sigmas; clamped so w < SUPPORT_T gives an empty box rather than a NaN one.
-__forceinline__ __device__ float truncationRadius(const float w)
+// The support radius in standard deviations; 0 rather than NaN when w < SUPPORT_T.
+__forceinline__ __device__ float supportRadius(const float w)
 {
 	return sqrtf(fmaxf(0.0f, supportQmax(w)));
 }
 
-// Tight AABB of the m-sigma ellipsoid: half-width m * sqrt(cov_dd) per axis.
-__forceinline__ __device__ cuBQL::box3f tightGaussianBox(
+// The axis-aligned box of the m-sigma ellipsoid: half-width m sqrt(cov_dd) per axis.
+__forceinline__ __device__ cuBQL::box3f supportBox(
 	const float3 p, const float cov[6], const float m)
 {
 	const float3 e = {m * sqrtf(cov[0]), m * sqrtf(cov[3]), m * sqrtf(cov[5])};
 	return cuBQL::box3f(cuBQL::vec3f(p.x - e.x, p.y - e.y, p.z - e.z),
 		cuBQL::vec3f(p.x + e.x, p.y + e.y, p.z + e.z));
 }
-
-#endif

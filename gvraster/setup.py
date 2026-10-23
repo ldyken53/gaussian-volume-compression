@@ -1,10 +1,9 @@
-"""gvraster: the CUDA side of Gaussian volume models, as three extension modules.
+"""gvraster: the CUDA kernels of VEGGIES models, as three extension modules.
 
-  gvraster._bvh   renders Gaussians at arbitrary sample points through a BVH (meshes), plus the
-                  fused activations and the surface models' margin FP term
-  gvraster._tile  renders Gaussians onto a cell lattice with a tile rasterizer (regular grids)
-  gvraster._ops   the training kernels both renderers share: one-launch Adam (+ EMA) and the
-                  fused volume loss
+  gvraster._bvh   sampling at arbitrary points through a BVH (meshes), the activations, and the
+                  margin FP term
+  gvraster._tile  sampling on a jittered lattice with a tile rasterizer (grids)
+  gvraster._ops   Adam with the parameter averages, and the training loss
 
 Build in place with `python setup.py build_ext --inplace` and put this directory on PYTHONPATH.
 """
@@ -29,7 +28,7 @@ setup(
     ext_modules=[
         CUDAExtension(
             name="gvraster._ops",
-            sources=sources("ops", ["multi_adam.cu", "volume_loss.cu", "ops.cpp"]),
+            sources=sources("ops", ["multi_adam.cu", "volume_loss.cu", "bindings.cpp"]),
             depends=sources("ops", ["ops.h"]),
             extra_compile_args={"nvcc": ["-DNDEBUG"]},
         ),
@@ -38,16 +37,25 @@ setup(
             sources=sources(
                 "bvh",
                 [
-                    "cuda_rasterizer/forward.cu",
-                    "cuda_rasterizer/backward.cu",
-                    "rasterize_points.cu",
-                    "fused_ops.cu",
+                    "forward.cu",
+                    "backward.cu",
+                    "sample.cu",
+                    "activations.cu",
                     "margin.cu",
-                    "ext.cu",
+                    "points.cu",
+                    "bindings.cpp",
                 ],
             ),
             depends=sources(
-                "bvh", ["cuda_rasterizer/config.h", "cuda_rasterizer/auxiliary.h"]
+                "bvh",
+                [
+                    "bvh.h",
+                    "points.h",
+                    "forward.h",
+                    "backward.h",
+                    "gaussian.h",
+                    "scratch.h",
+                ],
             ),
             extra_compile_args={"nvcc": ["-I" + glm, "-I" + cubql, "-DNDEBUG"]},
         ),
@@ -55,16 +63,18 @@ setup(
             name="gvraster._tile",
             sources=sources(
                 "tile",
-                [
-                    "cuda_rasterizer/rasterizer_impl.cu",
-                    "cuda_rasterizer/forward.cu",
-                    "cuda_rasterizer/backward.cu",
-                    "rasterize_points.cu",
-                    "ext.cpp",
-                ],
+                ["tiles.cu", "forward.cu", "backward.cu", "sample.cu", "bindings.cpp"],
             ),
             depends=sources(
-                "tile", ["cuda_rasterizer/config.h", "cuda_rasterizer/auxiliary.h"]
+                "tile",
+                [
+                    "tile.h",
+                    "tiles.h",
+                    "forward.h",
+                    "backward.h",
+                    "config.h",
+                    "activation.h",
+                ],
             ),
             extra_compile_args={"nvcc": ["-I" + glm]},
         ),

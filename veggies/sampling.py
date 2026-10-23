@@ -22,27 +22,27 @@ def legacy_rule(surface):
 
 def set_points(points):
     """Make points the positions sample_points evaluates at (builds a BVH over them)."""
-    bvh.build_bvh(points)
+    bvh.set_points(points)
 
 
 def set_points_cached(points, key):
     """set_points, reusing the BVH built for batch key."""
-    bvh.build_bvh_cached(points, int(key))
+    bvh.set_points_cached(points, int(key))
 
 
 def leaf_order():
     """Indices of the current points in BVH leaf order."""
-    return bvh.sample_bvh_prim_ids()
+    return bvh.leaf_order()
 
 
 def sample_points(model, rule):
     """(values, influence) at the current points."""
     means = model.means
-    scales, rotations, values, weights = bvh.fused_activations(
+    scales, rotations, values, weights = bvh.activate(
         model._scales, model._rotations, model._values, model._weights, model.max_scale
     )
     order = model.locality_order()
-    return bvh.rasterize_gaussians(
+    return bvh.sample(
         means[order],
         scales[order],
         rotations[order],
@@ -55,21 +55,18 @@ def sample_points(model, rule):
 def sample_grid(model, jitter, cells, rule):
     """(values, influence) on the cells^3 lattice over the model's bounds, each position moved by
     its jitter (3 floats per cell, cells in [z, y, x] order)."""
-    settings = tile.GaussianRasterizationSettings(
-        volume_mins=model.bounds_min,
-        volume_maxes=model.bounds_max,
-        cell_count=cells,
-        max_scale=float(model.max_scale),
-        occ_t=float(rule[0]),
-        floor=float(rule[1]),
-    )
-    return tile.GaussianRasterizer(settings)(
+    return tile.sample(
         model.means,
         model._scales,
         model._rotations,
         model._values,
         model._weights,
         jitter,
+        model.bounds_min,
+        model.bounds_max,
+        cells,
+        model.max_scale,
+        rule,
     )
 
 

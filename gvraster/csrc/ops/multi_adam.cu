@@ -1,6 +1,6 @@
 // One-launch Adam over several parameter tensors with per-tensor learning rates, optionally
-// updating a Polyak average of each in the same pass; the same update as torch's fused Adam
-// (no weight decay, amsgrad or maximize):
+// updating each tensor's parameter average in the same pass. It is torch's fused Adam without
+// weight decay, amsgrad or maximize:
 //   m = b1 m + (1-b1) g;  v = b2 v + (1-b2) g^2;
 //   p -= (lr / (1-b1^t)) * m / (sqrt(v) / sqrt(1-b2^t) + eps)
 #include "ops.h"
@@ -17,8 +17,8 @@ struct AdamArgs {
 	const float* g[MAX_TENSORS];
 	float* m[MAX_TENSORS];
 	float* v[MAX_TENSORS];
-	float* e[MAX_TENSORS];        // optional Polyak average, updated from the new p
-	long long end[MAX_TENSORS];   // inclusive prefix sum of element counts
+	float* e[MAX_TENSORS];        // the parameter averages, updated from the new p
+	long long end[MAX_TENSORS];   // inclusive prefix sum of the element counts
 	float step_size[MAX_TENSORS]; // lr / (1 - b1^t)
 };
 
@@ -39,7 +39,7 @@ __global__ void multiAdamKernel(
 		a.v[t][j] = v;
 		const float p = a.p[t][j] - a.step_size[t] * m / (sqrtf(v) / bc2_sqrt + eps);
 		a.p[t][j] = p;
-		// Matches torch.lerp_(ema, p, w) for w < 0.5.
+		// torch.lerp_(ema, p, w) for w < 0.5.
 		if (EMA) {
 			const float e = a.e[t][j];
 			a.e[t][j] = e + ema_w * (p - e);
@@ -47,8 +47,8 @@ __global__ void multiAdamKernel(
 	}
 }
 
-// emas is empty, or one buffer per param updated as lerp(ema, new param, ema_w).
-void multi_adam_(std::vector<torch::Tensor> params, std::vector<torch::Tensor> grads,
+// emas is empty, or one average per parameter, updated to lerp(average, new parameter, ema_w).
+void multiAdam(std::vector<torch::Tensor> params, std::vector<torch::Tensor> grads,
 	std::vector<torch::Tensor> exp_avgs, std::vector<torch::Tensor> exp_avg_sqs,
 	std::vector<double> lrs, int64_t step, double beta1, double beta2, double eps,
 	std::vector<torch::Tensor> emas, double ema_w)

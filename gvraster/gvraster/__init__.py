@@ -1,9 +1,8 @@
-"""CUDA kernels for Gaussian volume models.
+"""The CUDA kernels of VEGGIES models.
 
-gvraster.bvh   Gaussians rendered at arbitrary sample points through a BVH (unstructured meshes)
-gvraster.tile  Gaussians rendered onto a cell lattice by a tile rasterizer (regular grids)
-gvraster.ops   the training kernels both use: one-launch Adam (+ EMA) and the fused volume loss
+gvraster.bvh   sampling at arbitrary points through a BVH (meshes), and the activations
+gvraster.tile  sampling on a jittered lattice with a tile rasterizer (grids)
+gvraster.ops   Adam with the parameter averages, and the training loss
 
-Each submodule loads only its own extension, so a build missing one renderer still runs the
-other.
+Each submodule loads only its own extension.
 """

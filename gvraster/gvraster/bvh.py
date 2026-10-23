@@ -1,94 +1,95 @@
-"""BVH backend: Gaussians rendered at arbitrary sample points (unstructured meshes).
+"""Sampling at arbitrary points through a BVH over them (meshes), and the activations.
 
-The samples are those of the last build_bvh / build_bvh_cached call; every render until the
-next build evaluates at them.
+set_points makes points the positions every later sample() evaluates at.
 """
 
 import torch
 
 from . import _bvh as _C
 
-# (samples): the points every render evaluates at
-build_bvh = _C.build_bvh
-# (samples, key): build_bvh, reusing the BVH built for batch key
-build_bvh_cached = _C.build_bvh_cached
-# (): primIDs of the last BVH, in leaf order
-sample_bvh_prim_ids = _C.sample_bvh_prim_ids
-# (samples, key): register exterior sample set key for margin_fp
+# (points)
+set_points = _C.set_points
+# (points, key): set_points, reusing the BVH built for key
+set_points_cached = _C.set_points_cached
+# () -> the points' indices in BVH leaf order
+leaf_order = _C.leaf_order
+# (points, key): register exterior point set key for margin_fp
 margin_set_exterior = _C.margin_set_exterior
-# (means, conic, weights, T, key) -> (value, d means, d conic, d weights)
+# (means, conics, weights, T, key) -> (value, d means, d conics, d weights)
 margin_fp = _C.margin_fp
 
 
-class _RasterizeGaussians(torch.autograd.Function):
+class _Sample(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, means3D, scales, rotations, values, weights, rule):
-        occ_t, floor = float(rule[0]), float(rule[1])
-        cells, cell_weights, conics = _C.rasterize_gaussians(
-            means3D, scales, rotations, values, weights, occ_t, floor
+    def forward(ctx, means, scales, rotations, values, weights, rule):
+        threshold, floor = float(rule[0]), float(rule[1])
+        out_values, influence, conics = _C.sample_forward(
+            means, scales, rotations, values, weights, threshold, floor
         )
-        ctx.rule = (occ_t, floor)
+        ctx.rule = (threshold, floor)
         ctx.save_for_backward(
-            means3D, scales, rotations, values, weights, cells, cell_weights, conics
+            means, scales, rotations, values, weights, out_values, influence, conics
         )
-        return cells, cell_weights
+        return out_values, influence
 
     @staticmethod
-    def backward(ctx, grad_cells, grad_cell_weights):
-        means3D, scales, rotations, values, weights, cells, cell_weights, conics = (
+    def backward(ctx, grad_values, grad_influence):
+        means, scales, rotations, values, weights, out_values, influence, conics = (
             ctx.saved_tensors
         )
-        grads = _C.rasterize_gaussians_backward(
-            means3D,
+        grads = _C.sample_backward(
+            means,
             scales,
             rotations,
             conics,
             values,
             weights,
-            cells,
-            cell_weights,
-            grad_cells,
-            grad_cell_weights,
+            out_values,
+            influence,
+            grad_values,
+            grad_influence,
             *ctx.rule,
         )
         return (*grads, None)
 
 
-def rasterize_gaussians(means3D, scales, rotations, values, weights, rule):
-    """(cells, aw) at the last BVH build's samples under the render rule (occ_t, floor):
-    a sample is empty (-1) where aw <= occ_t, else S / max(aw, floor)."""
-    return _RasterizeGaussians.apply(means3D, scales, rotations, values, weights, rule)
+def sample(means, scales, rotations, values, weights, rule):
+    """(values, influence) of the activated Gaussians at the points. With rule (T, floor), a
+    point is undefined (-1) where its influence I <= T, and is otherwise V / max(I, floor).
+    """
+    return _Sample.apply(means, scales, rotations, values, weights, rule)
 
 
-class _FusedActivations(torch.autograd.Function):
+class _Activate(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, raw_scaling, raw_rotation, raw_values, raw_weight, max_scale):
-        scales, rotations, values, weights = _C.fused_act_forward(
-            raw_scaling, raw_rotation, raw_values, raw_weight, float(max_scale)
+    def forward(ctx, raw_scales, raw_rotations, raw_values, raw_weights, max_scale):
+        scales, rotations, values, weights = _C.activate_forward(
+            raw_scales, raw_rotations, raw_values, raw_weights, float(max_scale)
         )
         ctx.max_scale = float(max_scale)
-        ctx.save_for_backward(raw_scaling, raw_rotation, values, weights)
+        ctx.save_for_backward(raw_scales, raw_rotations, values, weights)
         return scales, rotations, values, weights
 
     @staticmethod
-    def backward(ctx, g_scales, g_rotations, g_values, g_weights):
-        raw_scaling, raw_rotation, values, weights = ctx.saved_tensors
-        ds, dq, dv, dw = _C.fused_act_backward(
-            raw_scaling,
-            raw_rotation,
+    def backward(ctx, d_scales, d_rotations, d_values, d_weights):
+        raw_scales, raw_rotations, values, weights = ctx.saved_tensors
+        grads = _C.activate_backward(
+            raw_scales,
+            raw_rotations,
             values,
             weights,
             ctx.max_scale,
-            g_scales.contiguous(),
-            g_rotations.contiguous(),
-            g_values.contiguous(),
-            g_weights.contiguous(),
+            d_scales.contiguous(),
+            d_rotations.contiguous(),
+            d_values.contiguous(),
+            d_weights.contiguous(),
         )
-        return ds, dq, dv, dw, None
+        return (*grads, None)
 
 
-def fused_activations(raw_scaling, raw_rotation, raw_values, raw_weight, max_scale):
-    """(exp + soft norm cap, normalize, sigmoid, sigmoid) of the raw parameters."""
-    return _FusedActivations.apply(
-        raw_scaling, raw_rotation, raw_values, raw_weight, max_scale
+def activate(raw_scales, raw_rotations, raw_values, raw_weights, max_scale):
+    """(scales, rotations, values, weights): exp softly capped at norm max_scale, normalize,
+    sigmoid, sigmoid."""
+    return _Activate.apply(
+        raw_scales, raw_rotations, raw_values, raw_weights, max_scale
     )

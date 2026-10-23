@@ -1,8 +1,8 @@
-// Support-margin FP term (--fp_mode margin): F = sum over exterior samples s and Gaussians i
-// whose support reaches s of (qmax_i - q_i(s)), qmax = 2 ln(w / T). Zero exactly when no support
-// reaches the exterior, and its gradient does not shrink with the contribution's weight.
-// Per Gaussian: dF/dw = 2 n / w, dF/dmu = 2 C sum d, dF/dc_jk = -sum d_j d_k (x2 off-diagonal,
-// the parameter convention of the 6-vector conic).
+// The support-margin FP term (--fp_mode margin): F = the sum over exterior points s and the
+// Gaussians i whose support reaches s of qmax_i - q_i(s), with qmax = 2 ln(w / T). It is zero
+// exactly when no support reaches the exterior, and its gradient does not shrink with the
+// Gaussian's weight. Per Gaussian: dF/dw = 2 n / w, dF/dmu = 2 C sum d, dF/dc_jk = -sum d_j d_k
+// (doubled off the diagonal, the parameter convention of the 6-vector conic).
 #include <torch/extension.h>
 #include <cuda_runtime.h>
 #include <c10/cuda/CUDAException.h>
@@ -11,19 +11,18 @@
 #include <unordered_map>
 #include <cuBQL/bvh.h>
 #include <cuBQL/traversal/fixedBoxQuery.h>
+#include "bvh.h"
+#include "points.h"
 namespace cg = cooperative_groups;
-
-// ext.cu compiles cuBQL's builder.
-void buildPointBVH(const float* samples, int n, cuBQL::bvh3f& out);
 
 namespace
 {
 
-struct ExtBVH {
+struct ExteriorSet {
 	cuBQL::bvh3f bvh;
-	torch::Tensor samples;
+	torch::Tensor points;
 };
-std::unordered_map<int64_t, ExtBVH> ext_cache;
+std::unordered_map<int64_t, ExteriorSet> exterior_sets;
 
 __global__ void marginKernel(int P, const float* __restrict__ means,
 	const float* __restrict__ conic, const float* __restrict__ weights, float T,
@@ -51,7 +50,7 @@ __global__ void marginKernel(int P, const float* __restrict__ means,
 	const float px = means[3 * idx], py = means[3 * idx + 1], pz = means[3 * idx + 2];
 	const float a = conic[6 * idx], b = conic[6 * idx + 1], c = conic[6 * idx + 2];
 	const float d = conic[6 * idx + 3], e = conic[6 * idx + 4], f = conic[6 * idx + 5];
-	// Support box: half-width m sqrt(Sigma_kk), Sigma = conic^-1 (diagonal of the inverse).
+	// Support box: half-width m sqrt(Sigma_kk), the diagonal of the conic's inverse.
 	const float det = a * (d * f - e * e) - b * (b * f - c * e) + c * (b * e - c * d);
 	const float m = sqrtf(qmax);
 	const float hx = m * sqrtf(fmaxf((d * f - e * e) / det, 0.0f));
@@ -116,36 +115,36 @@ __global__ void marginKernel(int P, const float* __restrict__ means,
 
 } // namespace
 
-// Build (first time) and cache the BVH of exterior sample set `key`.
-void margin_set_exterior(torch::Tensor samples, int64_t key)
+// Registers exterior set key, building its BVH the first time.
+void marginSetExterior(torch::Tensor points, int64_t key)
 {
-	if (ext_cache.count(key))
+	if (exterior_sets.count(key))
 		return;
-	TORCH_CHECK(samples.is_cuda() && samples.scalar_type() == torch::kFloat32,
-		"exterior samples: float32 CUDA");
-	auto s = samples.contiguous();
-	const int n = s.size(0);
-	ExtBVH e;
-	e.samples = s;
+	TORCH_CHECK(points.is_cuda() && points.scalar_type() == torch::kFloat32,
+		"exterior points: float32 CUDA");
+	auto xyz = points.contiguous();
+	const int n = xyz.size(0);
+	ExteriorSet set;
+	set.points = xyz;
 	if (n > 0)
-		buildPointBVH(s.data_ptr<float>(), n, e.bvh);
-	ext_cache[key] = e;
+		buildPointBVH(xyz.data_ptr<float>(), n, set.bvh);
+	exterior_sets[key] = set;
 }
 
-// Per-Gaussian margin sums and their derivatives against exterior set `key`.
-std::vector<torch::Tensor> margin_fp(
-	torch::Tensor means, torch::Tensor conic, torch::Tensor weights, double T, int64_t key)
+// (F per Gaussian, dF/dmeans, dF/dconics, dF/dweights) against exterior set key.
+std::vector<torch::Tensor> marginFP(
+	torch::Tensor means, torch::Tensor conics, torch::Tensor weights, double T, int64_t key)
 {
-	auto it = ext_cache.find(key);
-	TORCH_CHECK(it != ext_cache.end(), "margin_fp: exterior set not registered");
+	auto it = exterior_sets.find(key);
+	TORCH_CHECK(it != exterior_sets.end(), "margin_fp: exterior set not registered");
 	const int P = means.size(0);
 	auto o = means.options();
 	auto val = torch::zeros({P}, o), gmu = torch::zeros({P, 3}, o), gc = torch::zeros({P, 6}, o),
 		 gw = torch::zeros({P}, o);
-	if (P > 0 && it->second.samples.size(0) > 0) {
-		auto mc = means.contiguous(), cc = conic.contiguous(), wc = weights.contiguous();
+	if (P > 0 && it->second.points.size(0) > 0) {
+		auto mc = means.contiguous(), cc = conics.contiguous(), wc = weights.contiguous();
 		marginKernel<<<(P * 32 + 255) / 256, 256>>>(P, mc.data_ptr<float>(), cc.data_ptr<float>(),
-			wc.data_ptr<float>(), (float)T, it->second.samples.data_ptr<float>(), it->second.bvh,
+			wc.data_ptr<float>(), (float)T, it->second.points.data_ptr<float>(), it->second.bvh,
 			val.data_ptr<float>(), gmu.data_ptr<float>(), gc.data_ptr<float>(),
 			gw.data_ptr<float>());
 		C10_CUDA_KERNEL_LAUNCH_CHECK();

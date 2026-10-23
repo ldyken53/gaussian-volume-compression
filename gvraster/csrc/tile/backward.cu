@@ -1,11 +1,11 @@
 #include "backward.h"
-#include "auxiliary.h"
+#include "activation.h"
 #include <cooperative_groups.h>
 namespace cg = cooperative_groups;
 
-__global__ void preprocessCUDA(int P, const float* rs, const float* rq,
-	const float* __restrict__ values, const float* __restrict__ weights, const float max_scale,
-	const float* __restrict__ packed, const float* __restrict__ grad_rows,
+__global__ void prepareBackwardCUDA(int P, const float* rs, const float* rq,
+	const float* __restrict__ raw_values, const float* __restrict__ raw_weights,
+	const float max_scale, const float* __restrict__ packed, const float* __restrict__ grad_rows,
 	float* __restrict__ dL_dmeans, glm::vec3* dL_dscales, glm::vec4* dL_drots,
 	float* __restrict__ dL_dvalues, float* __restrict__ dL_dweights)
 {
@@ -13,7 +13,7 @@ __global__ void preprocessCUDA(int P, const float* rs, const float* rq,
 	if (idx >= P)
 		return;
 
-	// Recompute the activations exactly as forward preprocess did.
+	// The activations, exactly as prepareCUDA computed them.
 	const float es0 = expf(rs[3 * idx]), es1 = expf(rs[3 * idx + 1]), es2 = expf(rs[3 * idx + 2]);
 	const float s_nrm = sqrtf(es0 * es0 + es1 * es1 + es2 * es2);
 	const float s_r = s_nrm + ACT_CAP_EPS;
@@ -37,7 +37,7 @@ __global__ void preprocessCUDA(int P, const float* rs, const float* rq,
 	glm::mat3 M = S * R;
 	glm::mat3 Sigma = glm::transpose(M) * M;
 
-	// Conic from the packed record: (mean, value), (weight, cxx, cxy, cxz), (cyy, cyz, czz, -).
+	// The conic from the packed record: (mean, value), (weight, cxx, cxy, cxz), (cyy, cyz, czz, -).
 	const float* cn = packed + 12 * idx;
 	const float* gr = grad_rows + 12 * idx;
 	glm::mat3 Co(cn[5], cn[6], cn[7], cn[6], cn[8], cn[9], cn[7], cn[9], cn[10]);
@@ -46,7 +46,7 @@ __global__ void preprocessCUDA(int P, const float* rs, const float* rq,
 	glm::mat3 dS = -Co * G * Co;
 	const float dcov[6] = {dS[0][0], dS[0][1], dS[0][2], dS[1][1], dS[1][2], dS[2][2]};
 
-	// Gradient of the diagonal epsilon added in forward (proportional to the largest |Sigma_dd|).
+	// Through the diagonal epsilon, which follows the largest |Sigma_dd|.
 	const float a0 = abs(Sigma[0][0]), a1 = abs(Sigma[1][1]), a2 = abs(Sigma[2][2]);
 	const float de0 = (a0 >= a1 && a0 >= a2) ? 1e-5 * glm::sign(Sigma[0][0]) : 0.0f;
 	const float de1 = (a1 >= a0 && a1 >= a2) ? 1e-5 * glm::sign(Sigma[1][1]) : 0.0f;
@@ -59,7 +59,7 @@ __global__ void preprocessCUDA(int P, const float* rs, const float* rq,
 	glm::mat3 Rt = glm::transpose(R);
 	glm::mat3 dL_dMt = glm::transpose(dL_dM);
 
-	// Activated scale, then the soft cap and exp.
+	// The activated scale, then the soft cap and the exp.
 	const float gsx = glm::dot(Rt[0], dL_dMt[0]);
 	const float gsy = glm::dot(Rt[1], dL_dMt[1]);
 	const float gsz = glm::dot(Rt[2], dL_dMt[2]);
@@ -68,7 +68,7 @@ __global__ void preprocessCUDA(int P, const float* rs, const float* rq,
 	dL_dscales[idx] = glm::vec3(
 		(gsx * s_f + cs * es0) * es0, (gsy * s_f + cs * es1) * es1, (gsz * s_f + cs * es2) * es2);
 
-	// Normalized quaternion, then the normalization.
+	// The normalized quaternion, then the normalization.
 	dL_dMt[0] *= scale.x;
 	dL_dMt[1] *= scale.y;
 	dL_dMt[2] *= scale.z;
@@ -95,52 +95,51 @@ __global__ void preprocessCUDA(int P, const float* rs, const float* rq,
 	dL_dmeans[3 * idx] = gr[6];
 	dL_dmeans[3 * idx + 1] = gr[7];
 	dL_dmeans[3 * idx + 2] = gr[8];
-	const float v = act_sigmoid(values[idx]), w = act_sigmoid(weights[idx]);
+	const float v = act_sigmoid(raw_values[idx]), w = act_sigmoid(raw_weights[idx]);
 	dL_dvalues[idx] = gr[9] * v * (1.0f - v);
 	dL_dweights[idx] = gr[10] * w * (1.0f - w);
 }
 
-// One block per tile; each thread takes one Gaussian of the tile at a time, sums its gradient
-// over the tile's cells in registers and adds it to the Gaussian's row once.
-__global__ void renderCUDA(const dim3 grid, const uint2* __restrict__ ranges,
-	const uint32_t* __restrict__ point_list, const float3 volume_mins, const uint3 num_cells,
+// One block per tile; each thread takes one of the tile's Gaussians at a time, sums its gradient
+// over the tile's lattice points in registers and adds it to the Gaussian's row once.
+__global__ void sampleBackwardCUDA(const dim3 grid, const uint2* __restrict__ ranges,
+	const uint32_t* __restrict__ gaussian_ids, const float3 bounds_min, const uint3 cells,
 	const float3 cell_size, const float* __restrict__ jitter, const float4* __restrict__ packed,
-	const float* __restrict__ out_cells, const float* __restrict__ out_weights,
-	const float* __restrict__ dL_dcells, const float* __restrict__ dL_dcell_weights,
-	float* __restrict__ grad_rows, const float occ_t, const float floor)
+	const float* __restrict__ out_values, const float* __restrict__ out_influence,
+	const float* __restrict__ dL_dout_values, const float* __restrict__ dL_dout_influence,
+	float* __restrict__ grad_rows, const float threshold, const float floor)
 {
 	const uint3 cmin = {blockIdx.x * BLOCK_X, blockIdx.y * BLOCK_Y, blockIdx.z * BLOCK_Z};
-	const uint3 cmax = {min(cmin.x + BLOCK_X, num_cells.x), min(cmin.y + BLOCK_Y, num_cells.y),
-		min(cmin.z + BLOCK_Z, num_cells.z)};
+	const uint3 cmax = {min(cmin.x + BLOCK_X, cells.x), min(cmin.y + BLOCK_Y, cells.y),
+		min(cmin.z + BLOCK_Z, cells.z)};
 	const uint32_t bx = cmax.x - cmin.x, by = cmax.y - cmin.y, bz = cmax.z - cmin.z;
 	const uint32_t n_cells = bx * by * bz;
 
-	// Per cell: position and dvo = dL/dR / D, and fc = dL/daw - dvo * R. Empty cells get 0, 0.
+	// Per lattice point: its position and a = dL/dV, and b = dL/dI; both 0 where it is undefined.
 	__shared__ float4 s_cell[BLOCK_SIZE];
-	__shared__ float s_fc[BLOCK_SIZE];
+	__shared__ float s_b[BLOCK_SIZE];
 	for (uint32_t i = threadIdx.x; i < n_cells; i += blockDim.x) {
 		const uint32_t lz = i / (bx * by), ly = (i % (bx * by)) / bx, lx = i % bx;
 		const uint3 cell = {cmin.x + lx, cmin.y + ly, cmin.z + lz};
-		const uint32_t cell_id = cell.z * num_cells.x * num_cells.y + cell.y * num_cells.x + cell.x;
-		const float aw = out_weights[cell_id];
-		const bool covered = aw > occ_t;
-		const float inv_aw = covered ? 1.0f / max(aw, floor) : 0.0f;
-		const float dvo = covered ? dL_dcells[cell_id] * inv_aw : 0.0f;
+		const uint32_t cell_id = cell.z * cells.x * cells.y + cell.y * cells.x + cell.x;
+		const float influence = out_influence[cell_id];
+		const bool defined = influence > threshold;
+		const float inv_denom = defined ? 1.0f / max(influence, floor) : 0.0f;
+		const float a = defined ? dL_dout_values[cell_id] * inv_denom : 0.0f;
 		s_cell[i] = make_float4(
-			static_cast<float>(cell.x) * cell_size.x + volume_mins.x + jitter[cell_id * 3],
-			static_cast<float>(cell.y) * cell_size.y + volume_mins.y + jitter[cell_id * 3 + 1],
-			static_cast<float>(cell.z) * cell_size.z + volume_mins.z + jitter[cell_id * 3 + 2],
-			dvo);
-		// Keeping -dvo * R below the floor (where D is constant) is deliberate: it trains better
-		// than the exact adjoint.
-		s_fc[i] = covered ? dL_dcell_weights[cell_id] - dvo * out_cells[cell_id] : 0.0f;
+			static_cast<float>(cell.x) * cell_size.x + bounds_min.x + jitter[cell_id * 3],
+			static_cast<float>(cell.y) * cell_size.y + bounds_min.y + jitter[cell_id * 3 + 1],
+			static_cast<float>(cell.z) * cell_size.z + bounds_min.z + jitter[cell_id * 3 + 2], a);
+		// Below the floor the denominator is constant and the exact b has no -a value term;
+		// keeping it trains better.
+		s_b[i] = defined ? dL_dout_influence[cell_id] - a * out_values[cell_id] : 0.0f;
 	}
 	__syncthreads();
 
 	const uint2 range = ranges[blockIdx.z * grid.y * grid.x + blockIdx.y * grid.x + blockIdx.x];
 	const uint32_t n_gauss = range.y - range.x;
 	for (uint32_t g = threadIdx.x; g < n_gauss; g += blockDim.x) {
-		const int id = point_list[range.x + g];
+		const int id = gaussian_ids[range.x + g];
 		const float4 p0 = packed[3 * id], p1 = packed[3 * id + 1], p2 = packed[3 * id + 2];
 		const float3 mean = make_float3(p0.x, p0.y, p0.z);
 		const float value = p0.w, w = p1.x, qmax = p2.w;
@@ -148,7 +147,7 @@ __global__ void renderCUDA(const dim3 grid, const uint2* __restrict__ ranges,
 		const float con_yy = p2.x, con_yz = p2.y, con_zz = p2.z;
 		const float c2xy = 2.0f * con_xy, c2xz = 2.0f * con_xz, c2yz = 2.0f * con_yz;
 
-		// With e = exp(-q/2) and F = dvo * v + fc, dL/dq = -w/2 * F * e.
+		// With e = exp(-q/2), dL/dq = -w/2 (a v + b) e.
 		float s_v = 0.0f, s_q = 0.0f, Gx = 0.0f, Gy = 0.0f, Gz = 0.0f;
 		float xx = 0.0f, xy = 0.0f, xz = 0.0f, yy = 0.0f, yz = 0.0f, zz = 0.0f;
 		bool hit = false;
@@ -163,7 +162,7 @@ __global__ void renderCUDA(const dim3 grid, const uint2* __restrict__ ranges,
 			const float e = __expf(-0.5f * q);
 			hit = true;
 			s_v = fmaf(cp.w, e, s_v);
-			const float qe = fmaf(cp.w, value, s_fc[c]) * e;
+			const float qe = fmaf(cp.w, value, s_b[c]) * e;
 			s_q += qe;
 			const float a = qe * dx, b = qe * dy, cz = qe * dz;
 			Gx += a;
@@ -176,11 +175,12 @@ __global__ void renderCUDA(const dim3 grid, const uint2* __restrict__ ranges,
 			yz = fmaf(b, dz, yz);
 			zz = fmaf(cz, dz, zz);
 		}
-		// Pairs whose support reaches no cell of the tile contribute nothing: skip the atomics.
+		// A Gaussian whose support reaches none of the tile's points adds nothing: skip the
+		// atomics.
 		if (!hit)
 			continue;
 
-		// Off-diagonal conic gradients stay undoubled; backward preprocess symmetrizes.
+		// Off-diagonal conic gradients stay undoubled; prepareBackwardCUDA symmetrizes them.
 		const float h = -0.5f * w;
 		float* gr = grad_rows + 12 * id;
 		atomicAdd(gr + 0, h * xx);
@@ -197,20 +197,22 @@ __global__ void renderCUDA(const dim3 grid, const uint2* __restrict__ ranges,
 	}
 }
 
-void BACKWARD::render(dim3 grid, const uint2* ranges, const uint32_t* point_list,
-	float3 volume_mins, uint3 num_cells, float3 cell_size, const float* jitter,
-	const float4* packed, const float* out_cells, const float* out_weights, const float* dL_dcells,
-	const float* dL_dcell_weights, float* grad_rows, float occ_t, float floor)
+void BACKWARD::sample(dim3 grid, const uint2* ranges, const uint32_t* gaussian_ids,
+	float3 bounds_min, uint3 cells, float3 cell_size, const float* jitter, const float4* packed,
+	const float* out_values, const float* out_influence, const float* dL_dout_values,
+	const float* dL_dout_influence, float* grad_rows, float threshold, float floor)
 {
-	renderCUDA<<<grid, BWD_THREADS>>>(grid, ranges, point_list, volume_mins, num_cells, cell_size,
-		jitter, packed, out_cells, out_weights, dL_dcells, dL_dcell_weights, grad_rows, occ_t, floor);
+	sampleBackwardCUDA<<<grid, BWD_THREADS>>>(grid, ranges, gaussian_ids, bounds_min, cells,
+		cell_size, jitter, packed, out_values, out_influence, dL_dout_values, dL_dout_influence,
+		grad_rows, threshold, floor);
 }
 
-void BACKWARD::preprocess(int P, const float* scales, const float* rotations, const float* values,
-	const float* weights, float max_scale, const float4* packed, const float* grad_rows,
-	float* dL_dmeans, float* dL_dscales, float* dL_drots, float* dL_dvalues, float* dL_dweights)
+void BACKWARD::prepare(int P, const float* raw_scales, const float* raw_rotations,
+	const float* raw_values, const float* raw_weights, float max_scale, const float4* packed,
+	const float* grad_rows, float* dL_dmeans, float* dL_dscales, float* dL_drotations,
+	float* dL_dvalues, float* dL_dweights)
 {
-	preprocessCUDA<<<(P + 255) / 256, 256>>>(P, scales, rotations, values, weights, max_scale,
-		(const float*)packed, grad_rows, dL_dmeans, (glm::vec3*)dL_dscales, (glm::vec4*)dL_drots,
-		dL_dvalues, dL_dweights);
+	prepareBackwardCUDA<<<(P + 255) / 256, 256>>>(P, raw_scales, raw_rotations, raw_values,
+		raw_weights, max_scale, (const float*)packed, grad_rows, dL_dmeans, (glm::vec3*)dL_dscales,
+		(glm::vec4*)dL_drotations, dL_dvalues, dL_dweights);
 }
