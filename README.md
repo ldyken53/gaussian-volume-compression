@@ -62,7 +62,9 @@ PyTorch's.
 
 Meshes too large to triangulate on the GPU can train on precomputed samples
 (`tools/gen_samples.py`, then `--precomputed_samples PREFIX`) and evaluate on precomputed points
-(`tools/precompute_tet.py`, then `eval.py --eval_set PREFIX`).
+(`tools/precompute_tet.py`, then `eval.py --eval_set PREFIX`). Both draw points the way training
+and evaluation do, and on meshes with cells other than tetrahedra they take the values from the
+cells themselves (trilinear on a hexahedron), not from the tets the cells are split into.
 
 A model directory holds `point_cloud/iteration_<N>/point_cloud.ply` (the Gaussians, saved as
 their parameter average), `max_scale` and `render_rule` (needed to sample it), `veggies.json`
@@ -89,7 +91,7 @@ What differs by type (set from the type unless given):
 | | structured | interior | surface |
 |---|---|---|---|
 | seeds (`--fraction`, `--init_share_max`, `--init_max`) | 10⁻⁵ of the nodes, at most 25% of the target and 20,000 | every node, at most 50% of the target and 20,000 | every node, at most 50% of the target and 20,000 |
-| samples per step | one of 400 precomputed jittered 128³ lattices (`--jitter_gt`) | ~0.25 per mesh node (`--samples_per_node`) | the same number, replacing 20% with points just outside the mesh and 10% just inside its surface (`--interior_skin`) |
+| samples per step | one of 400 precomputed jittered 128³ lattices (`--jitter_gt`) | ~0.25 per mesh node (`--samples_per_node`), half of them in tets picked in proportion to their value range (`--importance`) | the same number, replacing 20% with points just outside the mesh and 10% just inside its surface (`--interior_skin`) |
 | reconstruction loss | L2 over every lattice cell | L2 over samples in the mesh | L2 over samples in the mesh |
 | FN / FP loss | log barrier on I (λ_FN 10⁻⁴) | log barrier on I | hinges around T, FN inside and FP outside, scaled by the L1 data loss (λ_FN 1200, λ_FP 12) |
 

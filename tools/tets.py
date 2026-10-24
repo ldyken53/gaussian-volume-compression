@@ -49,8 +49,8 @@ def triangulate(m, cells=None, tag_source=False):
 
 
 def points_in_tets(tets, pts, vals, rng):
-    """One uniform point in each of the (k, 4) tets, and its linearly interpolated value, which
-    is what vtkProbeFilter would return there."""
+    """One uniform point in each of the (k, 4) tets, and its linearly interpolated value. That is
+    the mesh's own value only where the tet is a cell of it; elsewhere use probe()."""
     k = tets.shape[0]
     u = np.sort(rng.random((k, 3)), axis=1)
     b = np.empty((k, 4))
@@ -59,3 +59,27 @@ def points_in_tets(tets, pts, vals, rng):
     b[:, 2] = u[:, 2] - u[:, 1]
     b[:, 3] = 1 - u[:, 2]
     return (b[:, :, None] * pts[tets]).sum(1), (b * vals[tets]).sum(1)
+
+
+def has_non_tets(m):
+    """True if some cell is not a tetrahedron. Inside one, linear interpolation within its split
+    tets differs from the cell's own (trilinear on a hexahedron), which is what eval.py scores."""
+    return bool(np.any(np.asarray(m.celltypes) != pv.CellType.TETRA))
+
+
+def scale_for_probe(m, name, vals, pts):
+    """Give m read_mesh's scaled points and values, in place, so probe() returns train.py's
+    units."""
+    m.points = pts
+    m.point_data[name] = vals.astype(np.float32)
+
+
+def probe(m, name, points, inner=4_000_000):
+    """The mesh's own value at each point (vtkProbeFilter), -1 outside it."""
+    out = np.empty(points.shape[0], dtype=np.float32)
+    for lo in range(0, points.shape[0], inner):
+        pr = pv.PolyData(points[lo : lo + inner]).sample(m)
+        g = np.asarray(pr[name], dtype=np.float32)
+        g[~np.asarray(pr["vtkValidPointMask"]).astype(bool)] = -1.0
+        out[lo : lo + inner] = g
+    return out

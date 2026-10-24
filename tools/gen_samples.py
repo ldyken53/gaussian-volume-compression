@@ -3,9 +3,10 @@
     python tools/gen_samples.py mesh.vtu out/mesh --batches 400 --size 2097152 [--surface]
 
 Writes <out>_samples.npy (batches, size, 3) and <out>_gt.npy (batches, size), drawn like
-train.py's own samples (uniform points in uniform tets) and scaled the same way. The batches are
-built a chunk at a time from the tets of a random subset of the cells, so no triangulation holds
-the whole mesh. With --surface, each batch's interior points are followed by --ext_share of the
+train.py's own samples (uniform points in tets, --importance of the tets picked by value range)
+and scaled the same way. The batches are built a chunk at a time from the tets of a subset of the
+cells, so no triangulation holds the whole mesh. On meshes with non-tet cells the in-mesh values
+are probed from the cells (--probe_interior), as eval.py scores them. With --surface, each batch's interior points are followed by --ext_share of the
 batch up to --band_width outside the mesh and --interior_skin of it up to --band_width inside.
 Finished chunks are recorded in <out>_progress.txt, and a rerun continues from there.
 """
@@ -18,7 +19,14 @@ from typing import NamedTuple
 import numpy as np
 import pyvista as pv
 
-from tets import points_in_tets, read_mesh, triangulate
+from tets import (
+    has_non_tets,
+    points_in_tets,
+    probe,
+    read_mesh,
+    scale_for_probe,
+    triangulate,
+)
 
 
 def parse_args():
@@ -42,16 +50,18 @@ def parse_args():
     )
     p.add_argument(
         "--stratified",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="split the cells disjointly across the chunks and draw each chunk's tets without "
-        "replacement, instead of drawing tets with replacement from a random subset",
+        "replacement (default), instead of drawing tets with replacement from a random subset",
     )
     p.add_argument(
         "--importance",
         type=float,
-        default=0.0,
+        default=0.5,
         help="with --stratified: the share of each chunk's points drawn with probability "
-        "proportional to their tet's value range (sharp features), the rest uniformly",
+        "proportional to their tet's value range (sharp features), the rest uniformly (0.5, "
+        "train.py's default)",
     )
     p.add_argument(
         "--importance_pow",
@@ -76,6 +86,13 @@ def parse_args():
     p.add_argument(
         "--interior_skin", type=float, default=0.0, help="share just inside it"
     )
+    p.add_argument(
+        "--probe_interior",
+        action=argparse.BooleanOptionalAction,
+        help="take the in-mesh points' values from the mesh's own cells, as eval.py scores them, "
+        "instead of linearly within the tets they were drawn from (default: when the mesh has "
+        "non-tet cells, where the two differ)",
+    )
     p.add_argument("--band_width", type=float, default=0.01)
     p.add_argument(
         "--band_pow", type=float, default=1.0, help="distance = u^p * --band_width"
@@ -86,6 +103,8 @@ def parse_args():
         a.interior_skin = a.interior_skin or 0.1
     if a.batches % a.chunk_batches:
         p.error("--batches must be a multiple of --chunk_batches")
+    if a.importance > 0 and not a.stratified:
+        p.error("--importance needs --stratified (use --importance 0 with --no-stratified)")
     return a
 
 
@@ -142,17 +161,6 @@ def band_points(band, rng, n, inward, width, power):
     p = (b[:, :, None] * band.points[band.triangles[f]]).sum(1)
     d = rng.random((n, 1)) ** power * width
     return (p + band.normals[f] * (-d if inward else d)).astype(np.float32)
-
-
-def probe(m, name, points, inner):
-    """The mesh's value at each point, -1 outside it."""
-    out = np.empty(points.shape[0], dtype=np.float32)
-    for lo in range(0, points.shape[0], inner):
-        pr = pv.PolyData(points[lo : lo + inner]).sample(m)
-        g = np.asarray(pr[name], dtype=np.float32)
-        g[~np.asarray(pr["vtkValidPointMask"]).astype(bool)] = -1.0
-        out[lo : lo + inner] = g
-    return out
 
 
 def importance_pick(tets, vals, n, share, power, rng):
@@ -235,11 +243,17 @@ def main():
         f"normalised: vals[{vals.min():.4f},{vals.max():.4f}] pts[{pts.min():.4f},{pts.max():.4f}]",
         flush=True,
     )
+    if a.probe_interior is None:
+        a.probe_interior = has_non_tets(m)
+    print(
+        f"in-mesh values: {'probed from the cells' if a.probe_interior else 'linear in the tets'}",
+        flush=True,
+    )
     band = None
-    if size_ext or size_skin:
+    if size_ext or size_skin or a.probe_interior:
         # The probe reads the mesh itself, so it gets the same scaling.
-        m.points = pts
-        m.point_data[name] = vals.astype(np.float32)
+        scale_for_probe(m, name, vals, pts)
+    if size_ext or size_skin:
         band = boundary(m, a.inner)
 
     mode = "r+" if done else "w+"
@@ -267,6 +281,17 @@ def main():
             else None
         )
         samples, gt = interior_points(tets, pick, pts, vals, per_chunk, a.inner, rng)
+        if a.probe_interior:
+            tp = time.time()
+            linear, gt = gt, probe(m, name, samples, a.inner)
+            ok = gt != -1
+            mse = float(np.mean((gt[ok] - linear[ok]).astype(np.float64) ** 2))
+            print(
+                f"  probed in {time.time() - tp:.0f}s: {100 * (~ok).mean():.4f}% not found; "
+                f"tet-linear values differ by {-10 * np.log10(max(mse, 1e-30)):.2f} dB PSNR",
+                flush=True,
+            )
+            del linear, ok
         b0, cb = c * a.chunk_batches, a.chunk_batches
         S[b0 : b0 + cb, :size_int] = samples.reshape(cb, size_int, 3)
         G[b0 : b0 + cb, :size_int] = gt.reshape(cb, size_int)

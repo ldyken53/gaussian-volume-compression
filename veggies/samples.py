@@ -16,15 +16,30 @@ from veggies import sampling
 from veggies.utils import morton_codes
 
 
-def sample_mesh_points(mesh, num_batches, batch_size, device="cuda"):
-    """Uniform random cells, then a uniform point inside each (dense where cells are small)."""
+def sample_mesh_points(mesh, num_batches, batch_size, importance=0.0, device="cuda"):
+    """Uniform random cells, then a uniform point inside each (dense where cells are small).
+    With importance, that share of the cells is drawn with probability proportional to the cell's
+    value range instead."""
     points = torch.tensor(mesh.points, dtype=torch.float32, device=device)
     tets = mesh.triangulate()
     cells = torch.tensor(
         tets.cells.reshape(-1, 5)[:, 1:], dtype=torch.long, device=device
     )
     total = num_batches * batch_size
-    corners = points[cells[torch.randint(0, cells.shape[0], (total,), device=device)]]
+    pick = torch.randint(0, cells.shape[0], (total,), device=device)
+    if importance > 0:
+        name = mesh.array_names[0]
+        assert name in mesh.point_data, "--importance needs a point-data array"
+        vals = torch.tensor(mesh.point_data[name], dtype=torch.float32, device=device)
+        rr = vals[cells]
+        cdf = (rr.amax(1) - rr.amin(1)).double().cumsum(0)
+        del rr
+        hot = torch.rand(total, device=device) < importance
+        u = torch.rand(int(hot.sum()), device=device, dtype=torch.float64) * cdf[-1]
+        pick[hot] = torch.searchsorted(cdf, u).clamp_(max=cells.shape[0] - 1)
+        del cdf, u, hot
+    corners = points[cells[pick]]
+    del pick
     # The gaps of sorted uniforms are uniform barycentric coordinates in a tetrahedron.
     u = torch.rand(total, 3, device=device).sort(dim=1).values
     bary = torch.zeros(total, 4, device=device)
@@ -71,13 +86,15 @@ BATCH_SIZE = 128**3
 NUM_BATCHES = 100
 
 
-def sample_cache_path(cache_dir, source_path, surface, interior_skin):
+def sample_cache_path(cache_dir, source_path, surface, interior_skin, importance=0.0):
     if not cache_dir:
         return None
     stem = os.path.splitext(os.path.basename(source_path))[0]
     tag = f"{stem}_c128_b{NUM_BATCHES}_s{int(bool(surface))}"
     if surface and interior_skin > 0:
         tag += f"_skin{interior_skin:g}"
+    if importance > 0:
+        tag += f"_imp{importance:g}"
     return os.path.join(cache_dir, tag + "_gt.npy")
 
 
@@ -93,7 +110,11 @@ def load_samples(args, mesh):
     surface = args.kind == "surface"
     size = BATCH_SIZE
     cache = sample_cache_path(
-        args.sample_cache_dir, args.source_path, surface, args.interior_skin
+        args.sample_cache_dir,
+        args.source_path,
+        surface,
+        args.interior_skin,
+        args.importance,
     )
     torch.manual_seed(SAMPLE_SEED)
     if surface:
@@ -102,7 +123,11 @@ def load_samples(args, mesh):
         n_out = int(math.floor(size * 0.2))
         n_skin = int(math.floor(size * args.interior_skin))
         parts = [
-            sample_mesh_points(mesh, NUM_BATCHES, size - n_out - n_skin).cpu().numpy(),
+            sample_mesh_points(
+                mesh, NUM_BATCHES, size - n_out - n_skin, args.importance
+            )
+            .cpu()
+            .numpy(),
             sample_exterior_points(mesh, NUM_BATCHES, n_out).cpu().numpy(),
         ]
         if n_skin > 0:
@@ -113,7 +138,9 @@ def load_samples(args, mesh):
             )
         samples = np.concatenate(parts, axis=1)
     else:
-        samples = sample_mesh_points(mesh, NUM_BATCHES, size).cpu().numpy()
+        samples = (
+            sample_mesh_points(mesh, NUM_BATCHES, size, args.importance).cpu().numpy()
+        )
 
     if cache is not None and os.path.exists(cache):
         print(f"Loaded cached ground truth from {cache}")

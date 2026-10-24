@@ -14,8 +14,9 @@ declare -A SRC=([mito]=$A/mito.vtu [sf1]=$A/sf1.vtu [valley]=$U/valley.vtu [rbl]
                 [eq]=$A/earthquakenorm.vtu [vertebra]=/home/ldyken53/vertebra.vtk
                 [miranda]=$A/miran.vtk [chameleon]=$A/chame.vtk [richtmyer]=$A/richt.vtk)
 declare -A RATIOS=([vertebra]="1024 256 64 4096 16384")
-# Earthquake is too large to triangulate here, so it trains on precomputed sample sets.
-declare -A SETS=([eq_interior]=$U/earthquakebig [eq_surface]=$A/earthquake2big)
+# Earthquake is too large to triangulate here, so it trains on precomputed sample sets:
+# tools/gen_samples.py earthquakenorm.vtu $U/earthquake_i50 --batches 100 (and --surface for _i50s).
+declare -A SETS=([eq_interior]=$U/earthquake_i50 [eq_surface]=$U/earthquake_i50s)
 mkdir -p bench_logs
 
 run() {  # kind dataset ratio

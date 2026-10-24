@@ -62,6 +62,7 @@ MESH_ONLY = dict(
     sample_frac=None,
     samples_per_node=None,
     sample_mode="stratified",
+    importance=0.5,
 )
 
 
@@ -226,6 +227,12 @@ def build_parser():
         "--samples_per_node", type=float, help="samples per mesh node per step (0.25)"
     )
     g.add_argument("--sample_mode", choices=["stratified", "random"])
+    g.add_argument(
+        "--importance",
+        type=float,
+        help="share of the in-mesh samples drawn with probability proportional to their tet's "
+        "value range, the rest uniformly (0.5; precomputed sets carry their own)",
+    )
 
     g = p.add_argument_group("Surface models")
     g.add_argument(
