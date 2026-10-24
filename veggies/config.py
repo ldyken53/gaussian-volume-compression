@@ -27,7 +27,6 @@ KIND_DEFAULTS = {
         lambda_fn=0.0001,
         lambda_fp=0.0,
         weight_reg=0.01,
-        densify_grad_threshold=0.0002,
     ),
     "interior": dict(
         fraction=1.0, init_share_max=0.5, fn_mode="log", lambda_fn=0.0001, lambda_fp=0.0
@@ -47,7 +46,6 @@ KIND_DEFAULTS = {
 }
 COMMON_DEFAULTS = dict(
     weight_reg=0.00001,
-    densify_grad_threshold=0.0,
     hinge_rel_pow=0.0,
     fp_mode="lin",
     fp_margin=0.05,
@@ -161,7 +159,10 @@ def build_parser():
         help="tau_2",
     )
     g.add_argument(
-        "--densify_grad_threshold", type=float, help="3DGS (0.0002 grids, 0 meshes)"
+        "--densify_grad_threshold",
+        type=float,
+        default=0.0,
+        help="3DGS clone/split position-gradient threshold",
     )
     g.add_argument(
         "--percent_dense", type=float, default=0.01, help="3DGS clone/split size limit"

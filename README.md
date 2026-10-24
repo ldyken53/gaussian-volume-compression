@@ -3,7 +3,7 @@
 Volume Encoding Gaussians with Geometry-Integration and Explicit Sampling: compresses a volume
 into a set of 3D Gaussians that can be sampled directly at any point, with no decompression step.
 Each Gaussian stores a mean, scale, rotation, value and weight (12 floats, 48 bytes), and the
-model's value at a point is the weighted average of the Gaussians around it (Eq. 1 of the paper).
+model's value at a point is the weighted average of the Gaussians around it.
 
 There are three types of model (`--kind`):
 
@@ -13,7 +13,7 @@ There are three types of model (`--kind`):
 | `surface` | a mesh: `.vtu`, or any VTK dataset with 3D cells | VEGGIES | the field and the domain; points outside the mesh sample as undefined |
 | `interior` | a mesh | VEGGIES+S | the field only; telling whether a point is inside the domain needs the mesh's exterior surface |
 
-The type follows the input: grids train structured models and meshes train surface models. Use
+Grids train structured models and meshes train surface models by default. Use
 `--kind interior` for VEGGIES+S.
 
 ## Setup
@@ -60,7 +60,7 @@ PyTorch's.
    in `veggies.json`, so `sample` takes and returns the volume's own coordinates and values.
    Grids that are already scaled can pass `--is_scaled`.
 
-Meshes too large to triangulate on the GPU train on precomputed samples
+Meshes too large to triangulate on the GPU can train on precomputed samples
 (`tools/gen_samples.py`, then `--precomputed_samples PREFIX`) and evaluate on precomputed points
 (`tools/precompute_tet.py`, then `eval.py --eval_set PREFIX`).
 
@@ -88,8 +88,8 @@ What differs by type (set from the type unless given):
 
 | | structured | interior | surface |
 |---|---|---|---|
-| seeds (`--fraction`, `--init_share_max`) | 10⁻⁵ of the nodes, at most 25% of the target | every node, at most 50% | every node, at most 50% |
-| samples per step | one of 400 precomputed jittered 128³ lattices (`--jitter_gt`) | ~0.25 per mesh node (`--samples_per_node`) | the same, plus 20% just outside the mesh and 10% just inside it (`--interior_skin`) |
+| seeds (`--fraction`, `--init_share_max`, `--init_max`) | 10⁻⁵ of the nodes, at most 25% of the target and 20,000 | every node, at most 50% of the target and 20,000 | every node, at most 50% of the target and 20,000 |
+| samples per step | one of 400 precomputed jittered 128³ lattices (`--jitter_gt`) | ~0.25 per mesh node (`--samples_per_node`) | the same number, replacing 20% with points just outside the mesh and 10% just inside its surface (`--interior_skin`) |
 | reconstruction loss | L2 over every lattice cell | L2 over samples in the mesh | L2 over samples in the mesh |
 | FN / FP loss | log barrier on I (λ_FN 10⁻⁴) | log barrier on I | hinges around T, FN inside and FP outside, scaled by the L1 data loss (λ_FN 1200, λ_FP 12) |
 
@@ -118,6 +118,3 @@ Older option names still work: `--encode_surface` (`--encode_domain`), `--fn_reg
 (`--defined_threshold`), `--denom_floor` (`--floor`), `--use_mcmc` / `--densify_3dgs`
 (`--densify mcmc` / `3dgs`). A mesh given without `--kind` used to train an interior model; it now
 trains a surface model.
-
-The code borrows from [3D Gaussian Splatting for Real-Time Radiance Field
-Rendering](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/); see `LICENSE` and `NOTICE`.
