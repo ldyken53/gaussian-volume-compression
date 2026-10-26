@@ -9,6 +9,7 @@ dist/
 .vscode
 
 # Run artifacts
+data/
 *.log
 *.npy
 output

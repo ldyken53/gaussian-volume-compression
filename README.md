@@ -117,4 +117,4 @@ volume and N the target count. `python train.py -h` lists every option.
 | `gvraster/` | CUDA kernels |
 | `simple-knn/` | nearest-neighbour distances that set new Gaussians' scales ([simple-knn](https://gitlab.inria.fr/bkerbl/simple-knn), its `LICENSE.md`; one missing include added) |
 | `tools/` | raw-volume conversion, precomputed sample sets |
-| `run_final.sh` | trains and evaluates the paper's final models |
+| `run_final.sh` | trains and evaluates the paper's final models from the datasets in `$DATA` (its header lists them) |
