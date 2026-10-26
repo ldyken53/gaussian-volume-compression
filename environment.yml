@@ -1,20 +1,16 @@
-name: gaussian_splatting
+name: veggies
 channels:
-  - pytorch
-  - nvidia
   - conda-forge
-  - defaults
 dependencies:
-  - plyfile
+  - python=3.13
   - pip
-  - pytorch-cuda
-  - torchvision
-  - tqdm
   - pip:
-    - opencv-python
-    - pyvista
-    - joblib
-    - piq
-    - matplotlib
-    - scipy
-    - submodules/simple-knn
+      - --extra-index-url https://download.pytorch.org/whl/cu126
+      - torch==2.11.0
+      - numpy==2.4.3
+      - pyvista==0.47.3
+      - vtk==9.6.1
+      - plyfile==1.1.3
+      - tqdm==4.67.3
+      - setuptools==70.2.0
+      - ninja

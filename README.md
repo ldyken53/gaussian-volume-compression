@@ -19,18 +19,19 @@ Grids train structured models and meshes train surface models by default. Use
 ## Setup
 
 ```shell
-git clone --recursive git@github.com:ldyken53/gaussian-volume-compression.git
-cd gaussian-volume-compression
+git clone --recursive https://github.com/ldyken53/VEGGIES.git
+cd VEGGIES
 conda env create --file environment.yml
-conda activate gaussian_splatting
-pip install submodules/simple-knn
+conda activate veggies
+pip install --no-build-isolation submodules/simple-knn
 (cd gvraster && python setup.py build_ext --inplace)
 export PYTHONPATH=$PWD/gvraster
 ```
 
 `gvraster/` holds the CUDA kernels: BVH sampling at arbitrary points (meshes), tile sampling on
-grids, and the fused Adam and loss kernels. Building it needs a CUDA toolkit that matches
-PyTorch's.
+grids, and the fused Adam and loss kernels. Building it and simple-knn needs a CUDA 12 toolkit
+(`nvcc`, or `CUDA_HOME` pointing at one) to match the CUDA 12.6 build of PyTorch that
+`environment.yml` installs; `--no-build-isolation` lets simple-knn's build see that PyTorch.
 
 ## Your own dataset
 
