@@ -3,7 +3,7 @@
 Volume Encoding Gaussians with Geometry-Integration and Explicit Sampling: compresses a volume
 into a set of 3D Gaussians that can be sampled directly at any point, with no decompression step.
 Each Gaussian stores a mean, scale, rotation, value and weight (12 floats, 48 bytes), and the
-model's value at a point is the weighted average of the Gaussians around it.
+model's value at a point is the weighted average of the Gaussians intersecting it.
 
 There are three types of model (`--kind`):
 
@@ -23,15 +23,17 @@ git clone --recursive https://github.com/ldyken53/VEGGIES.git
 cd VEGGIES
 conda env create --file environment.yml
 conda activate veggies
-pip install --no-build-isolation submodules/simple-knn
+pip install --no-build-isolation ./simple-knn
 (cd gvraster && python setup.py build_ext --inplace)
 export PYTHONPATH=$PWD/gvraster
 ```
 
 `gvraster/` holds the CUDA kernels: BVH sampling at arbitrary points (meshes), tile sampling on
 grids, and the fused Adam and loss kernels. Building it and simple-knn needs a CUDA 12 toolkit
-(`nvcc`, or `CUDA_HOME` pointing at one) to match the CUDA 12.6 build of PyTorch that
-`environment.yml` installs; `--no-build-isolation` lets simple-knn's build see that PyTorch.
+(`nvcc`, or `CUDA_HOME` pointing at one; 12.6 matches the PyTorch build that `environment.yml`
+installs) and GCC 9 to 13, which PyTorch requires with CUDA 12; set `CC` and `CXX` if your
+default compiler is outside that range. `--no-build-isolation` lets simple-knn's build see that
+PyTorch.
 
 ## Your own dataset
 
@@ -113,11 +115,6 @@ volume and N the target count. `python train.py -h` lists every option.
 | `veggies/config.py` | options and per-type defaults |
 | `veggies/train.py`, `veggies/evaluate.py`, `veggies/api.py` | training, evaluation, `load_model` |
 | `gvraster/` | CUDA kernels |
+| `simple-knn/` | nearest-neighbour distances that set new Gaussians' scales ([simple-knn](https://gitlab.inria.fr/bkerbl/simple-knn), its `LICENSE.md`; one missing include added) |
 | `tools/` | raw-volume conversion, precomputed sample sets |
 | `run_final.sh` | trains and evaluates the paper's final models |
-
-Older option names still work: `--encode_surface` (`--encode_domain`), `--fn_reg` / `--fp_reg`
-(`--lambda_fn` / `--lambda_fp`), `--min_weight` (`--prune_threshold`), `--occ_t`
-(`--defined_threshold`), `--denom_floor` (`--floor`), `--use_mcmc` / `--densify_3dgs`
-(`--densify mcmc` / `3dgs`). A mesh given without `--kind` used to train an interior model; it now
-trains a surface model.
