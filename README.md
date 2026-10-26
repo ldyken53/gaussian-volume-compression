@@ -57,7 +57,7 @@ PyTorch.
 
    train("data.vti", "output/model", ratio=256)   # the same as the command line
    model = load_model("output/model")
-   values = model.sample(points)                  # (N, 3) points; NaN where undefined
+   values = model.sample(points)                  # (N, 3) points -> (N,) CUDA tensor, NaN where undefined
    ```
    Training scales the volume into the unit cube with values in [0, 1] and records the transform
    in `veggies.json`, so `sample` takes and returns the volume's own coordinates and values.

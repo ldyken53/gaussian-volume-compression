@@ -22,9 +22,9 @@ class TrainedModel:
         self.model.load_ply(ply)
 
     def sample(self, points):
-        """Values at points (N, 3) in the source volume's coordinates, NaN where the model is
-        undefined. Interior models (VEGGIES+S) are defined beyond the volume's domain; clip their
-        samples with the volume's exterior surface."""
+        """Values at points (N, 3) in the source volume's coordinates, as an (N,) CUDA tensor, NaN
+        where the model is undefined. Interior models (VEGGIES+S) are defined beyond the volume's
+        domain; clip their samples with the volume's exterior surface."""
         points = torch.as_tensor(points, dtype=torch.float32, device="cuda")
         norm = self.normalization
         if norm:
