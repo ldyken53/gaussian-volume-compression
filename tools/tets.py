@@ -63,7 +63,8 @@ def points_in_tets(tets, pts, vals, rng):
 
 def has_non_tets(m):
     """True if some cell is not a tetrahedron. Inside one, linear interpolation within its split
-    tets differs from the cell's own (trilinear on a hexahedron), which is what eval.py scores."""
+    tets differs from the cell's own (trilinear on a hexahedron), which is what eval.py scores.
+    """
     return bool(np.any(np.asarray(m.celltypes) != pv.CellType.TETRA))
 
 

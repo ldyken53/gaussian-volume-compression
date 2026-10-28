@@ -67,11 +67,13 @@ def run(args):
     t0 = time.perf_counter()
     save_seconds = 0.0
     densified = 0
+    # Drifted Gaussians are recycled at the densification events up to this iteration (0: off).
+    recycle_until = args.recycle_until * args.iterations
     progress = tqdm(range(args.iterations), desc="Training progress")
     for iteration in range(1, args.iterations + 1):
-        drift = args.kind == "surface" and iteration <= args.iterations // 2
-        if args.kind == "surface":
-            data.track = drift
+        recycling = iteration <= recycle_until
+        if recycle_until > 0:
+            data.recording = recycling
         gt = data.next(model)
         means_lr = model.update_learning_rate(iteration)
         values, influence = data.render(model)
@@ -110,9 +112,9 @@ def run(args):
                 and iteration % args.densification_interval == 0
                 and iteration not in args.save_iterations
             ):
-                drifted = data.drifted(model, threshold) if drift else None
+                recycle = data.drifted(model, threshold) if recycling else None
                 densify.run_event(
-                    model, args, data, values, gt, n_final, events - densified, drifted
+                    model, args, data, values, gt, n_final, events - densified, recycle
                 )
                 densified += 1
 

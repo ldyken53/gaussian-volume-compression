@@ -104,7 +104,9 @@ def parse_args():
     if a.batches % a.chunk_batches:
         p.error("--batches must be a multiple of --chunk_batches")
     if a.importance > 0 and not a.stratified:
-        p.error("--importance needs --stratified (use --importance 0 with --no-stratified)")
+        p.error(
+            "--importance needs --stratified (use --importance 0 with --no-stratified)"
+        )
     return a
 
 
@@ -235,7 +237,8 @@ def main():
     progress = a.out + "_progress.txt"
     done = 0
     if os.path.exists(progress):
-        done = int(open(progress).read().strip() or 0)
+        with open(progress) as f:
+            done = int(f.read().strip() or 0)
         print(f"resuming: {done}/{n_chunks} chunks already written", flush=True)
 
     m, name, vals, pts = read_mesh(a.src, a.array, np.float32)
@@ -314,7 +317,8 @@ def main():
             print(f"  band in {time.time() - tb:.0f}s: " + ", ".join(empty), flush=True)
         S.flush()
         G.flush()
-        open(progress, "w").write(str(c + 1))
+        with open(progress, "w") as f:
+            f.write(str(c + 1))
         print(
             f"chunk {c + 1}/{n_chunks}: {tets.shape[0]} tets in {time.time() - t:.0f}s, "
             f"gt[{gt.min():.4f},{gt.max():.4f}] mean {gt.mean():.4f}",

@@ -36,19 +36,19 @@ def leaf_order():
 
 
 def set_point_flags(flags):
-    """Mark the current points the reach record counts (float, > 0)."""
+    """Flag the current points (one float each, > 0) that sample_points' reach counts."""
     bvh.set_point_flags(flags)
 
 
 def sample_points(model, rule, reach=None):
-    """(values, influence) at the current points. reach (P, model order): raised in place to each
-    Gaussian's largest w G at a flagged point."""
+    """(values, influence) at the current points. reach, if given (one float per Gaussian): raised
+    in place to each Gaussian's largest w G at a flagged point."""
     means = model.means
     scales, rotations, values, weights = bvh.activate(
         model._scales, model._rotations, model._values, model._weights, model.max_scale
     )
     order = model.locality_order()
-    r = None if reach is None else torch.zeros(means.shape[0], device=means.device)
+    r = None if reach is None else torch.empty(means.shape[0], device=means.device)
     out = bvh.sample(
         means[order],
         scales[order],

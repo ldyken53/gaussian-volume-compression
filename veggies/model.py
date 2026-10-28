@@ -98,10 +98,7 @@ class VeggiesModel:
         points = torch.tensor(np.asarray(seeds.points)).float().cuda()
         self.set_bounds(volume)
         print(f"Seeds: {points.shape[0]}")
-        dist2 = torch.clamp_min(
-            distCUDA2(torch.from_numpy(np.asarray(seeds.points)).float().cuda()),
-            0.0000001,
-        )
+        dist2 = torch.clamp_min(distCUDA2(points), 0.0000001)
         scales = torch.log(torch.sqrt(dist2))[..., None].repeat(1, 3)
         rotations = torch.zeros((points.shape[0], 4), device="cuda")
         rotations[:, 0] = 1

@@ -16,9 +16,18 @@ def write_max_scale(model_dir, max_scale):
         f.write(f"{max_scale}\n")
 
 
+def _read(model_dir, name):
+    """The text of a model file, or None if it is missing."""
+    path = os.path.join(model_dir, name)
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return f.read()
+
+
 def read_max_scale(model_dir, default=0.02):
-    path = os.path.join(model_dir, "max_scale")
-    return float(open(path).read()) if os.path.exists(path) else default
+    text = _read(model_dir, "max_scale")
+    return float(text) if text is not None else default
 
 
 def write_render_rule(model_dir, threshold, floor):
@@ -27,10 +36,10 @@ def write_render_rule(model_dir, threshold, floor):
 
 
 def read_render_rule(model_dir, legacy):
-    path = os.path.join(model_dir, "render_rule")
-    if not os.path.exists(path):
+    text = _read(model_dir, "render_rule")
+    if text is None:
         return legacy
-    threshold, floor = (float(x) for x in open(path).read().split()[:2])
+    threshold, floor = (float(x) for x in text.split()[:2])
     return threshold, floor
 
 
@@ -40,8 +49,8 @@ def write_info(model_dir, kind, normalization):
 
 
 def read_info(model_dir):
-    path = os.path.join(model_dir, "veggies.json")
-    return json.load(open(path)) if os.path.exists(path) else {}
+    text = _read(model_dir, "veggies.json")
+    return json.loads(text) if text is not None else {}
 
 
 def write_train_seconds(model_dir, seconds, save_seconds):

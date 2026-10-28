@@ -6,12 +6,16 @@
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> sampleForward(const torch::Tensor& means,
 	const torch::Tensor& scales, const torch::Tensor& rotations, const torch::Tensor& values,
-	const torch::Tensor& weights, double threshold, double floor, const torch::Tensor& reach)
+	const torch::Tensor& weights, double threshold, double floor,
+	const std::optional<torch::Tensor>& reach)
 {
 	TORCH_CHECK(means.ndimension() == 2 && means.size(1) == 3, "means must be (P, 3)");
 	const Points& points = currentPoints();
 	const int P = means.size(0);
 	const int S = points.xyz.size(0);
+	TORCH_CHECK(!reach || (reach->is_cuda() && reach->scalar_type() == torch::kFloat32 &&
+							  reach->is_contiguous() && reach->numel() == P),
+		"reach: contiguous float32 CUDA, one per Gaussian");
 	auto opts = means.options().dtype(torch::kFloat32);
 	torch::Tensor out_values = torch::zeros({S}, opts);
 	torch::Tensor out_influence = torch::zeros({S}, opts);
@@ -27,8 +31,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> sampleForward(const torc
 		FORWARD::sample(P, S, m.data_ptr<float>(), values.contiguous().data_ptr<float>(),
 			w.data_ptr<float>(), conics.data_ptr<float>(), boxes, points.packed, points.bvh,
 			(float)threshold, (float)floor, out_values.data_ptr<float>(),
-			out_influence.data_ptr<float>(),
-			reach.numel() == P ? reach.data_ptr<float>() : nullptr);
+			out_influence.data_ptr<float>(), reach ? reach->data_ptr<float>() : nullptr);
 	}
 	return std::make_tuple(out_values, out_influence, conics);
 }

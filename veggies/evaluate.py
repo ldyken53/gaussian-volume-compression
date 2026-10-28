@@ -17,7 +17,6 @@ model.
 
 import json
 import math
-import os
 import time
 from argparse import ArgumentParser, RawDescriptionHelpFormatter
 
@@ -196,9 +195,8 @@ def native_grid_errors(model, grid, gt, rule, block):
                 n_def += defined.sum()
                 n_fn += ((~defined) & (g != 0.0)).sum()
                 n_fp += (defined & (g == 0.0)).sum()
-                bg = (
-                    g == 0.0
-                )  # values are min-max normalized, so 0 is the exact background
+                # Values are min-max normalized, so 0 is the exact background.
+                bg = g == 0.0
                 sse_bg += (values[bg] ** 2).double().sum()
                 n_bg += bg.sum()
     n = float(nx) * ny * nz
@@ -263,7 +261,7 @@ def evaluate_grid(args):
                 cp, _ = continuous_psnr(
                     model, grid, rule, args.sample_grid, args.continuous
                 )
-            cont = " psnr_continuous=%.3f" % cp
+            cont = f" psnr_continuous={cp:.3f}"
             r["psnr_continuous"] = round(cp, 3)
         n = model.count
         print(
@@ -359,4 +357,5 @@ def main(argv=None):
     )
     results = evaluate_grid(args) if grid else evaluate_mesh(args)
     if args.out:
-        json.dump(results, open(args.out, "w"), indent=2)
+        with open(args.out, "w") as f:
+            json.dump(results, f, indent=2)

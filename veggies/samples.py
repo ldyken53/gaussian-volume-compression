@@ -248,22 +248,21 @@ class MeshSamples:
         self.gt_all, self.samples_all = gt, samples
         self.num_batches, self.size = num_batches, size
         self.batch, self.samples = 0, None
-        # Reach record (surface drift recycling): set track before next(); reach is each
-        # Gaussian's largest w G at an inside sample since the last densify event.
-        self.track, self.reach = False, None
+        # While recording (set before next()), reach holds each Gaussian's largest w G at an
+        # inside sample since the last drifted() call.
+        self.recording, self.reach = False, None
 
     @torch.no_grad()
     def drifted(self, model, threshold):
-        """Surface models: Gaussians with w >= threshold whose support (w G >= threshold) reached
-        no inside sample rendered since the last event. These are boundary Gaussians the FP hinge
-        pushed past the exterior band, where no sample sees them. Resets the record."""
-        if self.reach is None or self.reach.shape[0] != model.means.shape[0]:
-            self.reach = None
+        """Indices of the Gaussians with w >= threshold whose w G stayed below threshold at every
+        inside sample rendered since the last call, then a fresh record. On surface models these
+        are boundary Gaussians the FP hinge pushed past the exterior band, where no sample sees
+        them. None if the record does not cover the current Gaussians."""
+        reach, self.reach = self.reach, None
+        if reach is None or reach.shape[0] != model.count:
             return None
         w = model.weights.reshape(-1)
-        idx = torch.nonzero((self.reach < threshold) & (w >= threshold)).squeeze(1)
-        self.reach = None
-        return idx
+        return torch.nonzero((reach < threshold) & (w >= threshold)).squeeze(1)
 
     def next(self, model):
         self.batch = np.random.randint(0, self.num_batches)
@@ -284,17 +283,18 @@ class MeshSamples:
             sampling.set_points(samples)
         else:
             sampling.set_points_cached(samples, self.batch)
-        if self.track:
+        if self.recording:
             sampling.set_point_flags((gt != -1).float())
         self.samples = samples
         return gt
 
     def render(self, model):
-        if not self.track:
-            return sampling.sample_points(model, self.rule)
-        if self.reach is None or self.reach.shape[0] != model.means.shape[0]:
-            self.reach = torch.zeros(model.means.shape[0], device=model.means.device)
-        return sampling.sample_points(model, self.rule, self.reach)
+        reach = None
+        if self.recording:
+            if self.reach is None or self.reach.shape[0] != model.count:
+                self.reach = torch.zeros(model.count, device="cuda")
+            reach = self.reach
+        return sampling.sample_points(model, self.rule, reach)
 
     def positions(self, idx):
         return self.samples[idx]
@@ -363,6 +363,7 @@ class NodeSampler:
         st = [(n[a] - 1) / (cc - 1) for a in range(3)]
         self.jittered = True
         self.jit_step = st
+        self.cur_jit = 0
         vol = self.vol.reshape(-1)
         gts, jits = [], []
         for _ in range(k):
@@ -432,7 +433,7 @@ class NodeSampler:
 
         if self.jittered:
             # The jittered position the error was measured at, not the bare lattice node.
-            jit = self.jit_jitter[getattr(self, "cur_jit", 0)].float().view(-1, 3)[idx]
+            jit = self.jit_jitter[self.cur_jit].float().view(-1, 3)[idx]
             return t(self.lo) + node * t(self.jit_step) * t(self.d) + jit
         return t(self.lo) + (t(self.off) + node * t(self.stride)) * t(self.d)
 

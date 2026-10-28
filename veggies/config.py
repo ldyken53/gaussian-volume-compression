@@ -42,6 +42,7 @@ KIND_DEFAULTS = {
         fp_margin=0.2,
         fnfp_norm="all",
         interior_skin=0.1,
+        recycle_until=0.5,
     ),
 }
 COMMON_DEFAULTS = dict(
@@ -63,6 +64,7 @@ MESH_ONLY = dict(
     samples_per_node=None,
     sample_mode="stratified",
     importance=0.5,
+    recycle_until=0.0,
 )
 
 
@@ -233,6 +235,12 @@ def build_parser():
         help="share of the in-mesh samples drawn with probability proportional to their tet's "
         "value range, the rest uniformly (0.5; precomputed sets carry their own)",
     )
+    g.add_argument(
+        "--recycle_until",
+        type=float,
+        help="share of training in which each densification event re-places the Gaussians "
+        "that reached no inside sample since the last (surface 0.5, interior 0 = off)",
+    )
 
     g = p.add_argument_group("Surface models")
     g.add_argument(
@@ -312,5 +320,5 @@ def to_argv(source, model_path, options):
         if v is True:
             argv.append(f"--{k}")
         elif v is not False and v is not None:
-            argv += [f"--{k}", *map(str, v if isinstance(v, (list, tuple)) else [v])]
+            argv += [f"--{k}", *map(str, v if isinstance(v, list | tuple) else [v])]
     return argv
