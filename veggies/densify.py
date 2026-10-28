@@ -58,8 +58,13 @@ def pick(err, k, alpha):
     return torch.topk(logits - torch.log(-torch.log(u)), k).indices
 
 
-def run_event(model, args, data, values, gt, n_final, events_left):
+def run_event(model, args, data, values, gt, n_final, events_left, drifted=None):
+    """drifted: indices of Gaussians to treat as dead this event, so their slots are re-placed."""
     dead = args.prune_threshold
+    if drifted is not None and drifted.numel() > 0:
+        model._weights.data[drifted] = inverse_sigmoid(
+            torch.tensor(dead * 0.1, device=model._weights.device)
+        )
     left = budget(model, n_final, dead)
     events_left = max(1, events_left)
     if args.densify == "mcmc":

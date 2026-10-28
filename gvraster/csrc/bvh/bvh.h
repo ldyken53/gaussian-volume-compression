@@ -7,10 +7,12 @@
 void setPoints(const torch::Tensor& points);
 void setPointsCached(const torch::Tensor& points, int64_t key);
 torch::Tensor leafOrder();
+// Flags (float, > 0 = inside) into the current points' packed 4th float, for the reach record.
+void setPointFlags(const torch::Tensor& flags);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> sampleForward(const torch::Tensor& means,
 	const torch::Tensor& scales, const torch::Tensor& rotations, const torch::Tensor& values,
-	const torch::Tensor& weights, double threshold, double floor);
+	const torch::Tensor& weights, double threshold, double floor, const torch::Tensor& reach);
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 sampleBackward(const torch::Tensor& means, const torch::Tensor& scales,
 	const torch::Tensor& rotations, const torch::Tensor& conics, const torch::Tensor& values,

@@ -1,6 +1,7 @@
 #include "forward.h"
 #include "gaussian.h"
 #include <cooperative_groups.h>
+#include <cooperative_groups/reduce.h>
 #include <cuBQL/traversal/fixedBoxQuery.h>
 namespace cg = cooperative_groups;
 
@@ -37,7 +38,7 @@ __global__ void prepareCUDA(int P, const float* means, const glm::vec3* scales,
 // One warp per Gaussian; the lanes split each overlapped leaf's points.
 __global__ void sampleCUDA(int P, const float* means, const float* values, const float* weights,
 	const float4* __restrict__ points, const float* conics, const cuBQL::box3f* boxes,
-	const cuBQL::bvh3f bvh, float* V, float* I)
+	const cuBQL::bvh3f bvh, float* V, float* I, float* __restrict__ reach)
 {
 	auto warp = cg::tiled_partition<32>(cg::this_thread_block());
 	int idx = blockIdx.x * (blockDim.x / 32) + (threadIdx.x / 32);
@@ -53,6 +54,7 @@ __global__ void sampleCUDA(int P, const float* means, const float* values, const
 	const float qmax = supportQmax(w);
 	const float cxx = conic[0], c2xy = 2.0f * conic[1], c2xz = 2.0f * conic[2];
 	const float cyy = conic[3], c2yz = 2.0f * conic[4], czz = conic[5];
+	float wmax = 0.0f; // the largest w G at a flagged (inside) point, when reach is recorded
 
 	cuBQL::fixedBoxQuery::forEachLeaf<float, 3>(
 		[&](uint32_t* primIDs, int count) {
@@ -71,10 +73,17 @@ __global__ void sampleCUDA(int P, const float* means, const float* values, const
 				const float weight = w * expf(-0.5f * q);
 				atomicAdd(&I[primID], weight);
 				atomicAdd(&V[primID], weight * v);
+				if (reach != nullptr && p.w > 0.0f)
+					wmax = fmaxf(wmax, weight);
 			}
 			return 0;
 		},
 		bvh, boxes[idx]);
+	if (reach != nullptr) {
+		wmax = cg::reduce(warp, wmax, cg::greater<float>());
+		if (lane == 0)
+			reach[idx] = wmax;
+	}
 }
 
 // Undefined points keep their influence for the FN and FP terms.
@@ -98,9 +107,9 @@ void FORWARD::prepare(int P, const float* means, const glm::vec3* scales,
 
 void FORWARD::sample(int P, int S, const float* means, const float* values, const float* weights,
 	const float* conics, const cuBQL::box3f* boxes, const float4* points, const cuBQL::bvh3f& bvh,
-	float threshold, float floor, float* out_values, float* out_influence)
+	float threshold, float floor, float* out_values, float* out_influence, float* reach)
 {
 	sampleCUDA<<<(P * 32 + 255) / 256, 256>>>(
-		P, means, values, weights, points, conics, boxes, bvh, out_values, out_influence);
+		P, means, values, weights, points, conics, boxes, bvh, out_values, out_influence, reach);
 	applyRuleCUDA<<<(S + 255) / 256, 256>>>(S, threshold, floor, out_values, out_influence);
 }

@@ -248,6 +248,22 @@ class MeshSamples:
         self.gt_all, self.samples_all = gt, samples
         self.num_batches, self.size = num_batches, size
         self.batch, self.samples = 0, None
+        # Reach record (surface drift recycling): set track before next(); reach is each
+        # Gaussian's largest w G at an inside sample since the last densify event.
+        self.track, self.reach = False, None
+
+    @torch.no_grad()
+    def drifted(self, model, threshold):
+        """Surface models: Gaussians with w >= threshold whose support (w G >= threshold) reached
+        no inside sample rendered since the last event. These are boundary Gaussians the FP hinge
+        pushed past the exterior band, where no sample sees them. Resets the record."""
+        if self.reach is None or self.reach.shape[0] != model.means.shape[0]:
+            self.reach = None
+            return None
+        w = model.weights.reshape(-1)
+        idx = torch.nonzero((self.reach < threshold) & (w >= threshold)).squeeze(1)
+        self.reach = None
+        return idx
 
     def next(self, model):
         self.batch = np.random.randint(0, self.num_batches)
@@ -268,11 +284,17 @@ class MeshSamples:
             sampling.set_points(samples)
         else:
             sampling.set_points_cached(samples, self.batch)
+        if self.track:
+            sampling.set_point_flags((gt != -1).float())
         self.samples = samples
         return gt
 
     def render(self, model):
-        return sampling.sample_points(model, self.rule)
+        if not self.track:
+            return sampling.sample_points(model, self.rule)
+        if self.reach is None or self.reach.shape[0] != model.means.shape[0]:
+            self.reach = torch.zeros(model.means.shape[0], device=model.means.device)
+        return sampling.sample_points(model, self.rule, self.reach)
 
     def positions(self, idx):
         return self.samples[idx]

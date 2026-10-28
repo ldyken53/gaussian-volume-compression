@@ -69,6 +69,9 @@ def run(args):
     densified = 0
     progress = tqdm(range(args.iterations), desc="Training progress")
     for iteration in range(1, args.iterations + 1):
+        drift = args.kind == "surface" and iteration <= args.iterations // 2
+        if args.kind == "surface":
+            data.track = drift
         gt = data.next(model)
         means_lr = model.update_learning_rate(iteration)
         values, influence = data.render(model)
@@ -107,8 +110,9 @@ def run(args):
                 and iteration % args.densification_interval == 0
                 and iteration not in args.save_iterations
             ):
+                drifted = data.drifted(model, threshold) if drift else None
                 densify.run_event(
-                    model, args, data, values, gt, n_final, events - densified
+                    model, args, data, values, gt, n_final, events - densified, drifted
                 )
                 densified += 1
 

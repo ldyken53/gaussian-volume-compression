@@ -23,6 +23,13 @@ __global__ void packPoints(float4* out, const float* xyz, int n)
 		out[i] = make_float4(xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2], 0.0f);
 }
 
+__global__ void flagPoints(float4* out, const float* flags, int n)
+{
+	const int i = blockIdx.x * blockDim.x + threadIdx.x;
+	if (i < n)
+		out[i].w = flags[i];
+}
+
 namespace
 {
 
@@ -96,6 +103,16 @@ void setPointsCached(const torch::Tensor& points, int64_t key)
 	current.bvh = it->second.bvh;
 	current_is_cached = true;
 	pack();
+}
+
+void setPointFlags(const torch::Tensor& flags)
+{
+	const int n = current.xyz.size(0);
+	TORCH_CHECK(flags.is_cuda() && flags.scalar_type() == torch::kFloat32 && flags.numel() == n,
+		"flags: float32 CUDA, one per current point");
+	auto f = flags.contiguous();
+	if (n > 0)
+		flagPoints<<<(n + 255) / 256, 256>>>((float4*)current.packed, f.data_ptr<float>(), n);
 }
 
 torch::Tensor leafOrder()

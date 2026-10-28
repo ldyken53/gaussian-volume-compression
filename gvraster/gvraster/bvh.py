@@ -13,6 +13,8 @@ set_points = _C.set_points
 set_points_cached = _C.set_points_cached
 # () -> the points' indices in BVH leaf order
 leaf_order = _C.leaf_order
+# (flags): float per current point, > 0 marks the points the reach record counts
+set_point_flags = _C.set_point_flags
 # (points, key): register exterior point set key for margin_fp
 margin_set_exterior = _C.margin_set_exterior
 # (means, conics, weights, T, key) -> (value, d means, d conics, d weights)
@@ -21,10 +23,10 @@ margin_fp = _C.margin_fp
 
 class _Sample(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, means, scales, rotations, values, weights, rule):
+    def forward(ctx, means, scales, rotations, values, weights, rule, reach):
         threshold, floor = float(rule[0]), float(rule[1])
         out_values, influence, conics = _C.sample_forward(
-            means, scales, rotations, values, weights, threshold, floor
+            means, scales, rotations, values, weights, threshold, floor, reach
         )
         ctx.rule = (threshold, floor)
         ctx.save_for_backward(
@@ -50,14 +52,22 @@ class _Sample(torch.autograd.Function):
             grad_influence,
             *ctx.rule,
         )
-        return (*grads, None)
+        return (*grads, None, None)
 
 
-def sample(means, scales, rotations, values, weights, rule):
+_NO_REACH = None
+
+
+def sample(means, scales, rotations, values, weights, rule, reach=None):
     """(values, influence) of the activated Gaussians at the points. With rule (T, floor), a
     point is undefined (-1) where its influence I <= T, and is otherwise V / max(I, floor).
     """
-    return _Sample.apply(means, scales, rotations, values, weights, rule)
+    if reach is None:
+        global _NO_REACH
+        if _NO_REACH is None:
+            _NO_REACH = torch.empty(0, device="cuda")
+        reach = _NO_REACH
+    return _Sample.apply(means, scales, rotations, values, weights, rule, reach)
 
 
 class _Activate(torch.autograd.Function):
