@@ -89,10 +89,11 @@ Gaussians at samples drawn with probability ∝ error^2.5, growing the model abo
 until the target count. Dead Gaussians (weight below τ2 = 0.005) are reused for new ones.
 `--densify 3dgs` and `--densify mcmc` select the alternatives the paper compares against.
 
-Surface models also recycle drifted Gaussians in the first half of training (`--recycle_until
-0.5`). These are boundary Gaussians that the FP term pushes out past the sampled exterior band,
-where no sample constrains them and they would render as floaters. Each densification event
-re-places the Gaussians whose w G stayed below T at every inside sample since the previous event.
+Surface models also remove exterior Gaussians in the first half of training
+(`--remove_exterior_gaussians 0.5`). These are boundary Gaussians that the FP term pushes out past
+the sampled exterior band, where no sample constrains them and they would render as floaters. Each
+densification event removes the Gaussians whose w G stayed below T at every inside sample since
+the previous event, and the densifier re-places their slots.
 
 What differs by type (set from the type unless given):
 

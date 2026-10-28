@@ -42,7 +42,7 @@ KIND_DEFAULTS = {
         fp_margin=0.2,
         fnfp_norm="all",
         interior_skin=0.1,
-        recycle_until=0.5,
+        remove_exterior_gaussians=0.5,
     ),
 }
 COMMON_DEFAULTS = dict(
@@ -64,7 +64,7 @@ MESH_ONLY = dict(
     samples_per_node=None,
     sample_mode="stratified",
     importance=0.5,
-    recycle_until=0.0,
+    remove_exterior_gaussians=0.0,
 )
 
 
@@ -236,10 +236,11 @@ def build_parser():
         "value range, the rest uniformly (0.5; precomputed sets carry their own)",
     )
     g.add_argument(
-        "--recycle_until",
+        "--remove_exterior_gaussians",
         type=float,
-        help="share of training in which each densification event re-places the Gaussians "
-        "that reached no inside sample since the last (surface 0.5, interior 0 = off)",
+        help="share of training in which each densification event removes the Gaussians that "
+        "reached no inside sample since the last, so their slots are re-placed (surface 0.5, "
+        "interior 0 = off)",
     )
 
     g = p.add_argument_group("Surface models")

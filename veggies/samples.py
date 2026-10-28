@@ -249,11 +249,11 @@ class MeshSamples:
         self.num_batches, self.size = num_batches, size
         self.batch, self.samples = 0, None
         # While recording (set before next()), reach holds each Gaussian's largest w G at an
-        # inside sample since the last drifted() call.
+        # inside sample since the last exterior_gaussians() call.
         self.recording, self.reach = False, None
 
     @torch.no_grad()
-    def drifted(self, model, threshold):
+    def exterior_gaussians(self, model, threshold):
         """Indices of the Gaussians with w >= threshold whose w G stayed below threshold at every
         inside sample rendered since the last call, then a fresh record. On surface models these
         are boundary Gaussians the FP hinge pushed past the exterior band, where no sample sees

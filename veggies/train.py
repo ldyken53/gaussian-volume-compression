@@ -67,13 +67,13 @@ def run(args):
     t0 = time.perf_counter()
     save_seconds = 0.0
     densified = 0
-    # Drifted Gaussians are recycled at the densification events up to this iteration (0: off).
-    recycle_until = args.recycle_until * args.iterations
+    # Exterior Gaussians are removed at the densification events up to this iteration (0: off).
+    remove_until = args.remove_exterior_gaussians * args.iterations
     progress = tqdm(range(args.iterations), desc="Training progress")
     for iteration in range(1, args.iterations + 1):
-        recycling = iteration <= recycle_until
-        if recycle_until > 0:
-            data.recording = recycling
+        removing = iteration <= remove_until
+        if remove_until > 0:
+            data.recording = removing
         gt = data.next(model)
         means_lr = model.update_learning_rate(iteration)
         values, influence = data.render(model)
@@ -112,9 +112,9 @@ def run(args):
                 and iteration % args.densification_interval == 0
                 and iteration not in args.save_iterations
             ):
-                recycle = data.drifted(model, threshold) if recycling else None
+                exterior = data.exterior_gaussians(model, threshold) if removing else None
                 densify.run_event(
-                    model, args, data, values, gt, n_final, events - densified, recycle
+                    model, args, data, values, gt, n_final, events - densified, exterior
                 )
                 densified += 1
 

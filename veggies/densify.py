@@ -58,12 +58,12 @@ def pick(err, k, alpha):
     return torch.topk(logits - torch.log(-torch.log(u)), k).indices
 
 
-def run_event(model, args, data, values, gt, n_final, events_left, recycle=None):
-    """One densification event. recycle: indices of Gaussians to re-place, set below the prune
-    threshold so that the strategy treats them as dead."""
+def run_event(model, args, data, values, gt, n_final, events_left, remove=None):
+    """One densification event. remove: indices of Gaussians to remove, set below the prune
+    threshold so that the strategy treats them as dead and re-places their slots."""
     dead = args.prune_threshold
-    if recycle is not None and recycle.numel() > 0:
-        model._weights.data[recycle] = inverse_sigmoid(
+    if remove is not None and remove.numel() > 0:
+        model._weights.data[remove] = inverse_sigmoid(
             torch.tensor(dead * 0.1, device=model._weights.device)
         )
     left = budget(model, n_final, dead)
