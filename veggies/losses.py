@@ -8,8 +8,6 @@ import torch
 from gvraster.ops import volume_loss
 from veggies import sampling
 
-SUPPORT_T = 1e-4  # a Gaussian reaches a sample only where w G >= SUPPORT_T
-
 
 class TrainingLoss:
     def __init__(self, args, threshold):
@@ -19,9 +17,7 @@ class TrainingLoss:
             self.fn_tau = args.fn_thresh
         else:
             self.fn_tau = ((1.0 + args.fn_margin) if self.surface else 1.1) * threshold
-        self.fp_tau = (
-            (1.0 - args.fp_margin) * threshold if args.fp_mode == "hinge" else SUPPORT_T
-        )
+        self.fp_tau = (1.0 - args.fp_margin) * threshold  # the FP threshold, a margin below T
         self.fp_on = self.surface and args.fp_mode != "margin"
         # Grid models fit every lattice cell, an undefined one's -1 included; mesh models skip
         # samples without ground truth or influence.
