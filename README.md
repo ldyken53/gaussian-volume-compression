@@ -38,8 +38,10 @@ PyTorch.
 ## Your own dataset
 
 1. Put it in a VTK file: a grid as `.vti` (or legacy `.vtk`), a mesh as `.vtu`. A headerless raw
-   volume converts with `python tools/raw_to_grid.py data.raw data.vti --shape X Y Z --dtype uint8`.
-   If the file holds several arrays, choose one with `--array NAME`.
+   volume converts with `python tools/raw_to_grid.py data.raw data.vti --shape X Y Z --dtype uint8`,
+   which writes the grid already scaled (values into [0, 1], longest axis into [0, 1]) and marks it
+   so, so training and evaluation skip that step. If the file holds several arrays, choose one with
+   `--array NAME`.
 2. Train:
    ```shell
    python train.py -s data.vti -m output/model --ratio 256
@@ -61,7 +63,8 @@ PyTorch.
    ```
    Training scales the volume into the unit cube with values in [0, 1] and records the transform
    in `veggies.json`, so `sample` takes and returns the volume's own coordinates and values.
-   Grids that are already scaled can pass `--is_scaled`.
+   Grids from `tools/raw_to_grid.py` are already scaled, and `sample` then takes and returns their
+   scaled units; other grids that are already scaled can pass `--is_scaled`.
 
 Meshes too large to triangulate on the GPU can train on precomputed samples
 (`tools/gen_samples.py`, then `--precomputed_samples PREFIX`) and evaluate on precomputed points

@@ -30,6 +30,16 @@ class Normalization(NamedTuple):
 
 IDENTITY = Normalization(0.0, 1.0, 0.0, 1.0)
 
+# Field data that tools/raw_to_grid.py writes into a grid it has already scaled: the Normalization
+# (offset, scale, value_min, value_max) that maps the raw volume to it. Loading such a grid skips
+# the scaling, as --is_scaled does.
+SCALED_KEY = "veggies_raw_normalization"
+
+
+def is_scaled_grid(grid):
+    """Whether the grid was written already scaled (tools/raw_to_grid.py)."""
+    return isinstance(grid, pv.ImageData) and SCALED_KEY in grid.field_data
+
 
 class Volume(NamedTuple):
     dataset: object
@@ -142,10 +152,15 @@ def normalize_mesh(mesh):
 
 
 def load(path, array=None, normalized=False):
-    """The volume at path, normalized unless it already is (grids only)."""
+    """The volume at path, normalized unless it already is (grids: normalized=True, or written
+    scaled by tools/raw_to_grid.py)."""
     if not os.path.exists(path):
         raise SystemExit(f"no such volume: {path}")
-    dataset = select_array(pv.read(path), array)
+    dataset = pv.read(path)
+    if is_scaled_grid(dataset) and not normalized:
+        print("Grid already scaled (tools/raw_to_grid.py): skipping normalization")
+        normalized = True
+    dataset = select_array(dataset, array)
     if isinstance(dataset, pv.ImageData):
         nbytes = 4 * dataset.n_points
         if normalized:

@@ -217,8 +217,10 @@ def native_grid_errors(model, grid, gt, rule, block):
 
 def evaluate_grid(args):
     t0 = time.time()
-    grid = volume.select_array(pv.read(args.source_path), args.array)
-    if not args.is_scaled:
+    grid = pv.read(args.source_path)
+    scaled = args.is_scaled or volume.is_scaled_grid(grid)
+    grid = volume.select_array(grid, args.array)
+    if not scaled:
         volume.normalize_grid(grid, grid.point_data.keys()[0])
     gt = grid_values(grid)
     print(
