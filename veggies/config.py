@@ -22,18 +22,16 @@ size: --ratio R trains (volume bytes) / (48 R) Gaussians, --cap_max N exactly N.
 KIND_DEFAULTS = {
     "structured": dict(
         fraction=0.00001,
-        init_share_max=0.25,
         fn_mode="log",
         lambda_fn=0.0001,
         lambda_fp=0.0,
         weight_reg=0.01,
     ),
     "interior": dict(
-        fraction=1.0, init_share_max=0.5, fn_mode="log", lambda_fn=0.0001, lambda_fp=0.0
+        fraction=1.0, fn_mode="log", lambda_fn=0.0001, lambda_fp=0.0
     ),
     "surface": dict(
         fraction=1.0,
-        init_share_max=0.5,
         fn_mode="abs",
         lambda_fn=1200.0,
         lambda_fp=12.0,
@@ -120,7 +118,8 @@ def build_parser():
     g.add_argument(
         "--init_share_max",
         type=float,
-        help="seed cap, x the final count (0.5 meshes, 0.25 grids)",
+        default=0.5,
+        help="seed cap, x the final count; 0 = none",
     )
     g.add_argument(
         "--init_max", type=int, default=20000, help="absolute seed cap; 0 = none"
